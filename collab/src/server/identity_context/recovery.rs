@@ -2,7 +2,12 @@ fn context_transport_candidates(facts: &IdentityFacts, cwd: &str) -> TransportCa
     TransportCandidates {
         desktop_bridge: facts.desktop_bridge.clone(),
         // Native AppServer admission requires one complete set of facts.
-        appserver: match (&facts.endpoint, &facts.namespace, &facts.session_id, &facts.thread_id) {
+        appserver: match (
+            &facts.endpoint,
+            &facts.namespace,
+            &facts.session_id,
+            &facts.thread_id,
+        ) {
             (Some(endpoint), Some(namespace), Some(session_id), Some(thread_id)) => {
                 Some(AppServerCandidate {
                     endpoint: endpoint.clone(),
@@ -21,9 +26,9 @@ fn context_transport_candidates(facts: &IdentityFacts, cwd: &str) -> TransportCa
 }
 
 fn verify_local_rex_socket(server: &str) -> anyhow::Result<()> {
-    let path = server
-        .strip_prefix("unix://")
-        .ok_or_else(|| anyhow::anyhow!("REX_EXECUTION_UNVERIFIED: Rex endpoint is not a local unix socket"))?;
+    let path = server.strip_prefix("unix://").ok_or_else(|| {
+        anyhow::anyhow!("REX_EXECUTION_UNVERIFIED: Rex endpoint is not a local unix socket")
+    })?;
     use std::os::unix::ffi::OsStrExt;
     let decoded_path = percent_encoding::percent_decode_str(path).collect::<Vec<_>>();
     let path = Path::new(std::ffi::OsStr::from_bytes(&decoded_path));
@@ -145,15 +150,11 @@ fn classify_rex_execution(
             .as_ref()
             .and_then(|previous| next.compare(previous))
     }) {
-        Some(std::cmp::Ordering::Greater) => {
-            RexRecoveryAdmission::Verified(execution)
-        }
-        Some(std::cmp::Ordering::Less) => {
-            RexRecoveryAdmission::Missing(
-                "REX_EXECUTION_ASSOCIATION_REQUIRED: caller is older than the current Rex execution"
-                    .into(),
-            )
-        }
+        Some(std::cmp::Ordering::Greater) => RexRecoveryAdmission::Verified(execution),
+        Some(std::cmp::Ordering::Less) => RexRecoveryAdmission::Missing(
+            "REX_EXECUTION_ASSOCIATION_REQUIRED: caller is older than the current Rex execution"
+                .into(),
+        ),
         _ => RexRecoveryAdmission::Missing(
             "REX_EXECUTION_ASSOCIATION_REQUIRED: precise execution start order is unavailable"
                 .into(),
@@ -430,10 +431,9 @@ impl ProjectRuntimeManager {
             facts.session_id.as_deref(),
         )
         .map_err(anyhow::Error::msg)?;
-        let endpoint = transport
-            .rex_endpoint
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("REX_ENDPOINT_REJECTED: selected transport lost its endpoint"))?;
+        let endpoint = transport.rex_endpoint.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("REX_ENDPOINT_REJECTED: selected transport lost its endpoint")
+        })?;
         verify_local_rex_socket(&endpoint.server)?;
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
             anyhow::anyhow!("REX_EXECUTION_UNVERIFIED: daemon runtime is unavailable")
@@ -441,8 +441,12 @@ impl ProjectRuntimeManager {
         let observed = handle
             .block_on(crate::client::adapters::rex::observe_current(endpoint))
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let owner = match observed.current_foreground_codex_owner() {
-            Ok(owner) => owner,
+        let expected_kind = facts
+            .agent_kind
+            .as_deref()
+            .and_then(crate::host_runtime::AgentKind::from_str);
+        let (observed_kind, owner) = match observed.current_foreground_agent_owner(expected_kind) {
+            Ok(found) => found,
             Err(reason) => {
                 return Ok(RexRecoveryObservation {
                     baseline,
@@ -452,12 +456,14 @@ impl ProjectRuntimeManager {
             }
         };
         let owner_pid = u32::try_from(owner.pid).map_err(|_| {
-            anyhow::anyhow!("REX_EXECUTION_UNVERIFIED: foreground PID is outside the process ID range")
+            anyhow::anyhow!(
+                "REX_EXECUTION_UNVERIFIED: foreground PID is outside the process ID range"
+            )
         })?;
-        let start_before = crate::host_runtime::exact_process_start_id(owner_pid)
-            .map_err(anyhow::Error::msg)?;
-        let start_after = crate::host_runtime::exact_process_start_id(owner_pid)
-            .map_err(anyhow::Error::msg)?;
+        let start_before =
+            crate::host_runtime::exact_process_start_id(owner_pid).map_err(anyhow::Error::msg)?;
+        let start_after =
+            crate::host_runtime::exact_process_start_id(owner_pid).map_err(anyhow::Error::msg)?;
         if start_before.is_none() || start_before != start_after {
             return Ok(RexRecoveryObservation {
                 baseline,
@@ -478,37 +484,35 @@ impl ProjectRuntimeManager {
                 ),
             });
         };
-        let nearest = crate::host_runtime::caller_nearest_agent(caller_pid)
-            .map_err(anyhow::Error::msg)?;
+        let nearest =
+            crate::host_runtime::caller_nearest_agent(caller_pid).map_err(anyhow::Error::msg)?;
         let Some((nearest_pid, nearest_kind)) = nearest else {
             return Ok(RexRecoveryObservation {
                 baseline,
                 transport,
                 admission: RexRecoveryAdmission::CallerMismatch(
-                    "REX_EXECUTION_CALLER_MISMATCH: caller has no Codex ancestor".into(),
+                    "REX_EXECUTION_CALLER_MISMATCH: caller has no supported agent ancestor".into(),
                 ),
             });
         };
-        if nearest_pid != owner_pid || nearest_kind != crate::host_runtime::AgentKind::Codex {
+        if nearest_pid != owner_pid || nearest_kind != observed_kind {
             return Ok(RexRecoveryObservation {
                 baseline,
                 transport,
                 admission: RexRecoveryAdmission::CallerMismatch(format!(
-                    "REX_EXECUTION_CALLER_MISMATCH: caller Codex owner pid={nearest_pid} differs from Rex foreground pid={owner_pid}"
+                    "REX_EXECUTION_CALLER_MISMATCH: caller {} owner pid={nearest_pid} differs from Rex {} foreground pid={owner_pid}",
+                    nearest_kind.display_name(),
+                    observed_kind.display_name(),
                 )),
             });
         }
-        let execution =
-            crate::server::binding_slot::VerifiedRexExecutionAssociation {
-                owner_pid,
-                owner_name: owner.name,
-                process_start_id: start_id,
-            };
-        let admission = classify_rex_execution(
-            baseline.as_ref(),
-            facts.session_id.as_deref(),
-            execution,
-        );
+        let execution = crate::server::binding_slot::VerifiedRexExecutionAssociation {
+            owner_pid,
+            owner_name: owner.name,
+            process_start_id: start_id,
+        };
+        let admission =
+            classify_rex_execution(baseline.as_ref(), facts.session_id.as_deref(), execution);
         Ok(RexRecoveryObservation {
             baseline,
             transport,
@@ -550,24 +554,18 @@ impl ProjectRuntimeManager {
                 invocation_cwd,
             )
         };
-        let Some(slot) = lookup
-            .map_err(anyhow::Error::msg)?
-        else {
+        let Some(slot) = lookup.map_err(anyhow::Error::msg)? else {
             return Ok(None);
         };
         let value = slot
             .active_binding()
             .expect("lookup returns active current");
-        if facts
-            .dsh
-            .as_ref()
-            .is_some_and(|candidate| {
-                value
-                    .transport
-                    .as_ref()
-                    .is_some_and(|transport| !identity::dsh_transport_matches(candidate, transport))
-            })
-        {
+        if facts.dsh.as_ref().is_some_and(|candidate| {
+            value
+                .transport
+                .as_ref()
+                .is_some_and(|transport| !identity::dsh_transport_matches(candidate, transport))
+        }) {
             anyhow::bail!("IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the current mapped binding");
         }
         let runtime = self.select_runtime(context).map_err(anyhow::Error::msg)?;
@@ -583,7 +581,11 @@ impl ProjectRuntimeManager {
 
     pub(super) fn binding_publication_matches(&self, binding: &RuntimeBinding) -> bool {
         let state = self.host.state.lock().unwrap();
-        state.global.current_thread_routes.values().any(|current| current == binding)
+        state
+            .global
+            .current_thread_routes
+            .values()
+            .any(|current| current == binding)
     }
 
     fn refresh_session_endpoint(
@@ -613,15 +615,7 @@ impl ProjectRuntimeManager {
             transport.thread_id = candidate.endpoint.codex_thread_id.clone();
         }
 
-        self.refresh_session_transport(
-            runtime,
-            saved,
-            transport,
-            ident,
-            scope,
-            None,
-            None,
-        )
+        self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None)
     }
 
     fn rex_execution_for_refresh(
@@ -690,8 +684,9 @@ impl ProjectRuntimeManager {
             if expected.current.rex_execution.as_ref() == Some(execution) {
                 // The association is already part of the exact baseline.
             } else {
-                let current_start = crate::host_runtime::exact_process_start_id(execution.owner_pid)
-                    .map_err(|error| anyhow::anyhow!(error))?;
+                let current_start =
+                    crate::host_runtime::exact_process_start_id(execution.owner_pid)
+                        .map_err(|error| anyhow::anyhow!(error))?;
                 if current_start.as_deref() != Some(execution.process_start_id.as_str()) {
                     anyhow::bail!(
                         "REX_EXECUTION_UNVERIFIED: current execution changed before commit"
@@ -729,14 +724,12 @@ impl ProjectRuntimeManager {
         if same_placement && published {
             let association_unchanged = rex_execution
                 .map(|execution| {
-                    expected_baseline
-                        .and_then(|baseline| baseline.current.rex_execution.as_ref())
+                    expected_baseline.and_then(|baseline| baseline.current.rex_execution.as_ref())
                         == Some(execution)
                 })
                 .unwrap_or_else(|| {
-                    expected_baseline.map_or(true, |baseline| {
-                        baseline.current.rex_execution.is_none()
-                    })
+                    expected_baseline
+                        .map_or(true, |baseline| baseline.current.rex_execution.is_none())
                 });
             if association_unchanged
                 && worker.transport.as_ref() == Some(&transport)
@@ -761,8 +754,13 @@ impl ProjectRuntimeManager {
         let control_context =
             ProjectContext::for_registered_root_with_app(&scope.root, saved.app_scope_id.clone())?;
         let (key, expected_generation) = if let Some(expected) = expected_baseline {
-            let control = self.binding_control_store().load().map_err(anyhow::Error::msg)?;
-            if control.slot(&expected.key).map(|slot| (slot.generation(), slot.active_binding()))
+            let control = self
+                .binding_control_store()
+                .load()
+                .map_err(anyhow::Error::msg)?;
+            if control
+                .slot(&expected.key)
+                .map(|slot| (slot.generation(), slot.active_binding()))
                 != Some((expected.generation, Some(&expected.current)))
             {
                 anyhow::bail!(
@@ -802,13 +800,22 @@ impl ProjectRuntimeManager {
             pane_anchor: holder.and_then(|holder| holder.pane_anchor.clone()),
             created_ms: now_ms(),
         };
-        let control = self.binding_control_store().load().map_err(anyhow::Error::msg)?;
-        let mut value = crate::server::binding_slot::BindingValue::new(next.clone(), transport.clone());
+        let control = self
+            .binding_control_store()
+            .load()
+            .map_err(anyhow::Error::msg)?;
+        let mut value =
+            crate::server::binding_slot::BindingValue::new(next.clone(), transport.clone());
         Self::prepare_control_value(&control, &key, &mut value).map_err(anyhow::Error::msg)?;
-        if transport.kind == TransportKind::Rex && rex_execution.is_none()
-            && expected_baseline.is_none() && next.session_id != saved.session_id {
+        if transport.kind == TransportKind::Rex
+            && rex_execution.is_none()
+            && expected_baseline.is_none()
+            && next.session_id != saved.session_id
+        {
             if let Some(target) = control.slot(&key).and_then(|slot| slot.active_binding()) {
-                value.replace_rex_holder(target).map_err(anyhow::Error::msg)?;
+                value
+                    .replace_rex_holder(target)
+                    .map_err(anyhow::Error::msg)?;
             }
         }
         if let Some(execution) = rex_execution {
@@ -817,9 +824,11 @@ impl ProjectRuntimeManager {
             if next.binding_id == baseline.current.binding.binding_id
                 && next.session_id == baseline.current.binding.session_id
                 && transport.rex_endpoint.as_ref()
-                    == baseline.current.transport.as_ref().and_then(|transport| {
-                        transport.rex_endpoint.as_ref()
-                    })
+                    == baseline
+                        .current
+                        .transport
+                        .as_ref()
+                        .and_then(|transport| transport.rex_endpoint.as_ref())
             {
                 value.rex_execution = baseline.current.rex_execution.clone();
             }
@@ -828,15 +837,18 @@ impl ProjectRuntimeManager {
             control.slot(&key).and_then(|slot| slot.active_binding()),
             &value,
             false,
-        ).map_err(anyhow::Error::msg)?;
-        let committed = self.commit_control_change_locked(
-            crate::server::binding_store::ControlChange::CommitWithEffect {
-                key: key.clone(),
-                value,
-                expected_generation: Some(expected_generation),
-                effect: effect.clone(),
-            },
-        ).map_err(anyhow::Error::msg)?;
+        )
+        .map_err(anyhow::Error::msg)?;
+        let committed = self
+            .commit_control_change_locked(
+                crate::server::binding_store::ControlChange::CommitWithEffect {
+                    key: key.clone(),
+                    value,
+                    expected_generation: Some(expected_generation),
+                    effect: effect.clone(),
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
         if committed.durability == crate::server::binding_store::Durability::Unknown {
             anyhow::bail!("BINDING_CONTROL_DURABILITY_UNKNOWN: binding intent published; business effects remain pending");
         }
@@ -863,7 +875,9 @@ impl ProjectRuntimeManager {
         scope: &Scope,
     ) -> anyhow::Result<RuntimeBinding> {
         if transport.kind != TransportKind::Rex {
-            anyhow::bail!("REX_CURRENT_BINDING_CHANGED: notification refresh requires Rex transport");
+            anyhow::bail!(
+                "REX_CURRENT_BINDING_CHANGED: notification refresh requires Rex transport"
+            );
         }
         self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None)
     }
@@ -898,18 +912,24 @@ impl ProjectRuntimeManager {
         // never used as a live pane here.
         validate_facts(&facts)?;
         let scope = Scope { root };
-        let displaced = rex_recovery.as_ref().is_some_and(|recovery|
-            matches!(recovery.admission, RexRecoveryAdmission::DisplacedExecution(_)));
+        let displaced = rex_recovery.as_ref().is_some_and(|recovery| {
+            matches!(
+                recovery.admission,
+                RexRecoveryAdmission::DisplacedExecution(_)
+            )
+        });
         let session_identity = if displaced {
             // The endpoint still belongs to the human-selected current. A
             // verified displaced caller registers independently of that owner.
             None
-        } else { self.current_session_identity_at_cwd(
-            &context,
-            &facts,
-            invocation_cwd,
-            allow_explicit_rex_rebind,
-        )? };
+        } else {
+            self.current_session_identity_at_cwd(
+                &context,
+                &facts,
+                invocation_cwd,
+                allow_explicit_rex_rebind,
+            )?
+        };
         if let Some(identity) = session_identity.as_ref() {
             if let Some(candidate) = facts.tmux.as_ref() {
                 let control = self
@@ -1015,8 +1035,10 @@ impl ProjectRuntimeManager {
                             == facts.session_id.as_deref()
                 }) {
                     let candidates = context_transport_candidates(&facts, &context.canonical_root);
-                    if candidates.rex.is_some() || candidates.dsh.is_some()
-                        || candidates.desktop_bridge.is_some() || candidates.appserver.is_some()
+                    if candidates.rex.is_some()
+                        || candidates.dsh.is_some()
+                        || candidates.desktop_bridge.is_some()
+                        || candidates.appserver.is_some()
                     {
                         let (execution, baseline) = match candidates.rex.as_ref() {
                             Some(candidate) => self.rex_execution_for_refresh(
@@ -1035,11 +1057,17 @@ impl ProjectRuntimeManager {
                                 &candidates,
                                 &context.canonical_root,
                                 facts.session_id.as_deref(),
-                            ).map_err(anyhow::Error::msg)?,
+                            )
+                            .map_err(anyhow::Error::msg)?,
                         };
                         current = Some(self.refresh_session_transport(
-                            &runtime, saved, transport, &mut ident, &scope,
-                            execution.as_ref(), baseline.as_ref(),
+                            &runtime,
+                            saved,
+                            transport,
+                            &mut ident,
+                            &scope,
+                            execution.as_ref(),
+                            baseline.as_ref(),
                         )?);
                     }
                 } else if facts.tmux.is_none() {
@@ -1062,8 +1090,7 @@ impl ProjectRuntimeManager {
                             )
                             .map_err(anyhow::Error::msg)?;
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
-                                None, None,
+                                &runtime, saved, transport, &mut ident, &scope, None, None,
                             )?);
                         } else if let Some(candidate) = facts.rex.as_ref() {
                             let (execution, baseline) = self.rex_execution_for_refresh(
@@ -1073,7 +1100,10 @@ impl ProjectRuntimeManager {
                                 facts.session_id.as_deref(),
                                 allow_explicit_rex_rebind,
                             )?;
-                            let candidates = TransportCandidates { rex: Some(candidate.clone()), ..Default::default() };
+                            let candidates = TransportCandidates {
+                                rex: Some(candidate.clone()),
+                                ..Default::default()
+                            };
                             transport = rex_recovery
                                 .as_ref()
                                 .map(|recovery| recovery.transport.clone())
@@ -1105,8 +1135,7 @@ impl ProjectRuntimeManager {
                             )
                             .map_err(|e| anyhow::anyhow!(e))?;
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
-                                None, None,
+                                &runtime, saved, transport, &mut ident, &scope, None, None,
                             )?);
                         } else if transport.kind == TransportKind::AppServer
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -1122,8 +1151,7 @@ impl ProjectRuntimeManager {
                             }
                             transport.tmux_endpoint = None;
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
-                                None, None,
+                                &runtime, saved, transport, &mut ident, &scope, None, None,
                             )?);
                         } else if transport.kind == TransportKind::Tmux
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -1134,8 +1162,7 @@ impl ProjectRuntimeManager {
                             // published binding still owns the saved transport
                             // projection, but does not authorize a new claim.
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
-                                None, None,
+                                &runtime, saved, transport, &mut ident, &scope, None, None,
                             )?);
                         }
                     }
@@ -1326,10 +1353,7 @@ mod anchor_provenance_tests {
 
         let unix_earlier = rex_execution_start_clock("9:900000").unwrap();
         let unix_later = rex_execution_start_clock("10:3").unwrap();
-        assert_eq!(
-            unix_earlier.partial_cmp(&unix_later),
-            Some(Ordering::Less)
-        );
+        assert_eq!(unix_earlier.partial_cmp(&unix_later), Some(Ordering::Less));
         assert_eq!(rex_execution_start_clock("unavailable"), None);
         assert_eq!(rex_execution_start_clock("10:invalid"), None);
 
@@ -1396,9 +1420,8 @@ mod anchor_provenance_tests {
         ));
 
         let mut fenced = baseline.clone();
-        fenced.current.rex_execution_fence = Some(
-            RexExecutionFence::from_start_id(&format!("linux:{boot}:100:900")).unwrap(),
-        );
+        fenced.current.rex_execution_fence =
+            Some(RexExecutionFence::from_start_id(&format!("linux:{boot}:100:900")).unwrap());
         assert!(matches!(
             classify_rex_execution(
                 Some(&fenced),
@@ -1412,31 +1435,82 @@ mod anchor_provenance_tests {
 
     #[test]
     fn rex_human_fence_admission_preserves_current_and_allows_future_execution() {
-        use crate::server::binding_slot::{BindingValue, IdentityBindingKey, RexExecutionFence, VerifiedRexExecutionAssociation};
+        use crate::server::binding_slot::{
+            BindingValue, IdentityBindingKey, RexExecutionFence, VerifiedRexExecutionAssociation,
+        };
         let (_, root) = test_server();
         let context = recovery_context(&root);
-        let key = IdentityBindingKey::new(context.project_scope.clone(), context.app_scope_id.clone(), "Alice");
+        let key = IdentityBindingKey::new(
+            context.project_scope.clone(),
+            context.app_scope_id.clone(),
+            "Alice",
+        );
         let binding = RuntimeBinding::new_with_session(
-            context.project_scope.clone(), context.app_scope_id.clone(),
-            identity::AgentId::new("actor").unwrap(), identity::RuntimeId::new("runtime").unwrap(),
-            identity::BindingId::new("binding").unwrap(), Some(identity::SessionId::new("s0").unwrap()), None,
-        ).unwrap();
+            context.project_scope.clone(),
+            context.app_scope_id.clone(),
+            identity::AgentId::new("actor").unwrap(),
+            identity::RuntimeId::new("runtime").unwrap(),
+            identity::BindingId::new("binding").unwrap(),
+            Some(identity::SessionId::new("s0").unwrap()),
+            None,
+        )
+        .unwrap();
         let execution = |pid, start: &str| VerifiedRexExecutionAssociation {
-            owner_pid: pid, owner_name: "codex".into(), process_start_id: start.into(),
+            owner_pid: pid,
+            owner_name: "codex".into(),
+            process_start_id: start.into(),
         };
         let mut current = BindingValue::new(binding, rex_transport(&root, "s0"));
         current.rex_execution = Some(execution(10, "100:123456"));
         current.rex_execution_fence = RexExecutionFence::from_start_id("200:654321");
-        let mut baseline = RexRecoveryBaseline { key, generation: 4, current };
-        assert!(matches!(classify_rex_execution(Some(&baseline), Some("s0"), execution(10, "100:123456")), RexRecoveryAdmission::Verified(_)));
-        assert!(matches!(classify_rex_execution(Some(&baseline), Some("s1"), execution(20, "200:654321")), RexRecoveryAdmission::DisplacedExecution(_)));
-        assert!(matches!(classify_rex_execution(Some(&baseline), Some("s1"), execution(20, "150:1")), RexRecoveryAdmission::DisplacedExecution(_)));
-        assert!(matches!(classify_rex_execution(Some(&baseline), Some("s3"), execution(30, "200:654322")), RexRecoveryAdmission::Verified(_)));
-        assert!(matches!(classify_rex_execution(Some(&baseline), Some("changed-session"), execution(10, "100:123456")), RexRecoveryAdmission::Missing(_)));
+        let mut baseline = RexRecoveryBaseline {
+            key,
+            generation: 4,
+            current,
+        };
+        assert!(matches!(
+            classify_rex_execution(Some(&baseline), Some("s0"), execution(10, "100:123456")),
+            RexRecoveryAdmission::Verified(_)
+        ));
+        assert!(matches!(
+            classify_rex_execution(Some(&baseline), Some("s1"), execution(20, "200:654321")),
+            RexRecoveryAdmission::DisplacedExecution(_)
+        ));
+        assert!(matches!(
+            classify_rex_execution(Some(&baseline), Some("s1"), execution(20, "150:1")),
+            RexRecoveryAdmission::DisplacedExecution(_)
+        ));
+        assert!(matches!(
+            classify_rex_execution(Some(&baseline), Some("s3"), execution(30, "200:654322")),
+            RexRecoveryAdmission::Verified(_)
+        ));
+        assert!(matches!(
+            classify_rex_execution(
+                Some(&baseline),
+                Some("changed-session"),
+                execution(10, "100:123456")
+            ),
+            RexRecoveryAdmission::Missing(_)
+        ));
         baseline.current.rex_execution = None;
-        assert!(matches!(classify_rex_execution(Some(&baseline), Some("s0"), execution(10, "100:123456")), RexRecoveryAdmission::Verified(_)), "restored current may establish association below the fence");
-        assert!(matches!(classify_rex_execution(Some(&baseline), Some("s1"), execution(20, "150:1")), RexRecoveryAdmission::DisplacedExecution(_)));
-        assert!(matches!(classify_rex_execution(Some(&baseline), Some("s3"), execution(30, "300:1")), RexRecoveryAdmission::Missing(_)), "future execution still needs a comparable current association");
+        assert!(
+            matches!(
+                classify_rex_execution(Some(&baseline), Some("s0"), execution(10, "100:123456")),
+                RexRecoveryAdmission::Verified(_)
+            ),
+            "restored current may establish association below the fence"
+        );
+        assert!(matches!(
+            classify_rex_execution(Some(&baseline), Some("s1"), execution(20, "150:1")),
+            RexRecoveryAdmission::DisplacedExecution(_)
+        ));
+        assert!(
+            matches!(
+                classify_rex_execution(Some(&baseline), Some("s3"), execution(30, "300:1")),
+                RexRecoveryAdmission::Missing(_)
+            ),
+            "future execution still needs a comparable current association"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1446,12 +1520,17 @@ mod anchor_provenance_tests {
         let socket = root.join("rex socket.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let server = format!("unix://{}", socket.display()).replace(' ', "%20");
-        assert!(verify_local_rex_socket(&server).is_ok(),
-            "the official Rex endpoint URI must resolve its encoded filesystem path");
+        assert!(
+            verify_local_rex_socket(&server).is_ok(),
+            "the official Rex endpoint URI must resolve its encoded filesystem path"
+        );
         let regular = root.join("regular file");
         std::fs::write(&regular, "not a socket").unwrap();
         let regular_uri = format!("unix://{}", regular.display()).replace(' ', "%20");
-        assert!(verify_local_rex_socket(&regular_uri).unwrap_err().to_string().contains("not a unix socket"));
+        assert!(verify_local_rex_socket(&regular_uri)
+            .unwrap_err()
+            .to_string()
+            .contains("not a unix socket"));
         drop(listener);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1485,8 +1564,7 @@ mod anchor_provenance_tests {
             Err(error) => error.to_string(),
         };
         assert!(
-            !error.contains("registration cwd")
-                && !error.contains("does not match project root"),
+            !error.contains("registration cwd") && !error.contains("does not match project root"),
             "the resident root must not participate in invocation-root admission: {error}"
         );
         assert!(
@@ -1546,19 +1624,24 @@ mod anchor_provenance_tests {
         }
     }
 
-    fn spawn_codex_caller(
+    fn spawn_codex_caller(root: &std::path::Path, label: &str) -> CodexCallerFixture {
+        spawn_named_caller(root, label, "codex")
+    }
+
+    fn spawn_named_caller(
         root: &std::path::Path,
         label: &str,
+        binary_name: &str,
     ) -> CodexCallerFixture {
-        let codex = root.join("codex");
-        match std::fs::symlink_metadata(&codex) {
+        let bin = root.join(binary_name);
+        match std::fs::symlink_metadata(&bin) {
             Ok(metadata) if metadata.file_type().is_symlink() => {}
-            Ok(_) => panic!("private fixture codex path exists and is not a symlink"),
+            Ok(_) => panic!("private fixture {binary_name} path exists and is not a symlink"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::os::unix::fs::symlink("/bin/sh", &codex)
-                    .expect("create private codex test symlink");
+                std::os::unix::fs::symlink("/bin/sh", &bin)
+                    .expect("create private agent test symlink");
             }
-            Err(error) => panic!("inspect private codex test symlink: {error}"),
+            Err(error) => panic!("inspect private {binary_name} test symlink: {error}"),
         }
         let caller_file = root.join(format!("{label}.caller-pid"));
         std::fs::remove_file(&caller_file).ok();
@@ -1566,11 +1649,11 @@ mod anchor_provenance_tests {
             "sleep 30 & echo $! > {}; wait",
             caller_file.to_string_lossy()
         );
-        let owner = Command::new(&codex)
+        let owner = Command::new(&bin)
             .arg("-c")
             .arg(script)
             .spawn()
-            .expect("spawn codex owner fixture");
+            .expect("spawn agent owner fixture");
         let owner_pid = owner.id();
         for _ in 0..100 {
             if let Ok(text) = std::fs::read_to_string(&caller_file) {
@@ -1579,7 +1662,7 @@ mod anchor_provenance_tests {
                         let caller_start_id =
                             crate::host_runtime::exact_process_start_id(caller_pid)
                                 .unwrap()
-                                .expect("codex caller fixture start identity");
+                                .expect("agent caller fixture start identity");
                         return CodexCallerFixture {
                             owner,
                             owner_pid,
@@ -1591,7 +1674,7 @@ mod anchor_provenance_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        panic!("codex caller fixture did not publish its child PID");
+        panic!("{binary_name} caller fixture did not publish its child PID");
     }
 
     fn stop_exact_process(pid: u32, expected_start_id: &str) {
@@ -1629,9 +1712,7 @@ mod anchor_provenance_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn rex_execution_association_continues_newer_execution_and_rejects_older_execution() {
-        use crate::client::adapters::rex::{
-            set_test_cli, set_test_timeout, TEST_FIXTURE_LOCK,
-        };
+        use crate::client::adapters::rex::{set_test_cli, set_test_timeout, TEST_FIXTURE_LOCK};
 
         let _guard = TEST_FIXTURE_LOCK.lock().await;
         let (server, root) = test_server();
@@ -1659,11 +1740,10 @@ mod anchor_provenance_tests {
         );
         assert!(seeded.ok, "{seeded:?}");
         let host_paths = server.host_paths.clone();
-        let control = crate::server::binding_store::BindingControlStore::new(
-            host_paths.state_root(),
-        )
-        .load()
-        .unwrap();
+        let control =
+            crate::server::binding_store::BindingControlStore::new(host_paths.state_root())
+                .load()
+                .unwrap();
         let current = control
             .active_values()
             .find(|value| value.binding.agent_id.as_str() == "rex-execution-owner")
@@ -1725,14 +1805,15 @@ mod anchor_provenance_tests {
         })
         .await
         .unwrap();
-        assert!(first.ok, "first verified Rex context must succeed: {first:?}");
-        let map_after_first: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(manager.binding_control_store().path()).unwrap(),
-        )
-        .unwrap();
+        assert!(
+            first.ok,
+            "first verified Rex context must succeed: {first:?}"
+        );
+        let map_after_first: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manager.binding_control_store().path()).unwrap())
+                .unwrap();
         assert_eq!(
-            map_after_first["slots"][0]["current"]["rex_execution"]["owner_pid"],
-            owner0.owner_pid,
+            map_after_first["slots"][0]["current"]["rex_execution"]["owner_pid"], owner0.owner_pid,
             "same-session recovery must persist the verified execution association"
         );
 
@@ -1770,10 +1851,9 @@ mod anchor_provenance_tests {
             second.ok,
             "a newer foreground execution must continue while the older execution is still alive: {second:?}"
         );
-        let map_while_old_alive: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(manager.binding_control_store().path()).unwrap(),
-        )
-        .unwrap();
+        let map_while_old_alive: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manager.binding_control_store().path()).unwrap())
+                .unwrap();
         assert_eq!(
             map_while_old_alive["slots"][0]["current"]["binding"]["session_id"],
             "session-s1"
@@ -1793,17 +1873,30 @@ mod anchor_provenance_tests {
         })
         .await
         .unwrap();
-        assert!(!older.ok, "an older foreground execution must not reclaim the name: {older:?}");
         assert!(
-            older.error.as_deref().is_some_and(|error| error.contains("older than the current Rex execution")),
+            !older.ok,
+            "an older foreground execution must not reclaim the name: {older:?}"
+        );
+        assert!(
+            older
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("older than the current Rex execution")),
             "the refusal must identify the older execution: {older:?}"
         );
         let after_older = manager.binding_control_store().load().unwrap();
-        let current = after_older.active_values()
+        let current = after_older
+            .active_values()
             .find(|value| value.binding.agent_id.as_str() == "rex-execution-owner")
             .unwrap();
-        assert_eq!(current.binding.session_id.as_ref().unwrap().as_str(), "session-s1");
-        assert_eq!(current.rex_execution.as_ref().unwrap().owner_pid, owner1.owner_pid);
+        assert_eq!(
+            current.binding.session_id.as_ref().unwrap().as_str(),
+            "session-s1"
+        );
+        assert_eq!(
+            current.rex_execution.as_ref().unwrap().owner_pid,
+            owner1.owner_pid
+        );
         std::env::set_var("COLLAB_TEST_REX_OWNER_PID", owner1.owner_pid.to_string());
         let request1_retry = IdentityContextRequest {
             operation_id: "rex-execution-s1-retry".into(),
@@ -1820,10 +1913,9 @@ mod anchor_provenance_tests {
             continued.ok,
             "the same current Rex execution must continue its name: {continued:?}"
         );
-        let map: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(manager.binding_control_store().path()).unwrap(),
-        )
-        .unwrap();
+        let map: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manager.binding_control_store().path()).unwrap())
+                .unwrap();
         let slot = map["slots"]
             .as_array()
             .unwrap()
@@ -1834,11 +1926,13 @@ mod anchor_provenance_tests {
             })
             .expect("continued stable name");
         assert_eq!(
-            slot["current"]["binding"]["session_id"],
-            "session-s1",
+            slot["current"]["binding"]["session_id"], "session-s1",
             "current map did not advance: {map:#}"
         );
-        assert_eq!(slot["current"]["rex_execution"]["owner_pid"], owner1.owner_pid);
+        assert_eq!(
+            slot["current"]["rex_execution"]["owner_pid"],
+            owner1.owner_pid
+        );
         assert!(slot["current"]["rex_execution"]["process_start_id"].is_string());
 
         let stale_request = IdentityContextRequest {
@@ -1867,10 +1961,9 @@ mod anchor_provenance_tests {
             }),
             "same-execution session change must retain its specific missing fact: {stale:?}"
         );
-        let map_after_replay: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(manager.binding_control_store().path()).unwrap(),
-        )
-        .unwrap();
+        let map_after_replay: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manager.binding_control_store().path()).unwrap())
+                .unwrap();
         assert_eq!(
             map_after_replay["slots"][0]["current"]["binding"]["session_id"],
             "session-s1"
@@ -1881,9 +1974,24 @@ mod anchor_provenance_tests {
         );
 
         let current_control = manager.binding_control_store().load().unwrap();
-        let target_key = current_control.active_values()
-            .find(|value| value.binding.session_id.as_ref().is_some_and(|session| session.as_str() == "session-s1"))
-            .and_then(|value| current_control.key_for_worker(&context.project_scope, &context.app_scope_id, value.binding.agent_id.as_str()).unwrap())
+        let target_key = current_control
+            .active_values()
+            .find(|value| {
+                value
+                    .binding
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|session| session.as_str() == "session-s1")
+            })
+            .and_then(|value| {
+                current_control
+                    .key_for_worker(
+                        &context.project_scope,
+                        &context.app_scope_id,
+                        value.binding.agent_id.as_str(),
+                    )
+                    .unwrap()
+            })
             .cloned()
             .unwrap();
         let target_name = target_key.name.clone();
@@ -1893,31 +2001,65 @@ mod anchor_provenance_tests {
             let context = context.clone();
             let mut request = request0.clone();
             request.operation_id = "rex-human-restores-earlier-execution".into();
-            request.grant_approval = Some(json!({"action":"restore_name", "requested_name":target_name,
-                "authorization":"user restores this earlier running session"}));
+            request.grant_approval = Some(
+                json!({"action":"restore_name", "requested_name":target_name,
+                "authorization":"user restores this earlier running session"}),
+            );
             move || manager.mapped_context(context, request)
-        }).await.unwrap();
-        assert!(human_restored.ok, "explicit human restoration must commit: {human_restored:?}");
+        })
+        .await
+        .unwrap();
+        assert!(
+            human_restored.ok,
+            "explicit human restoration must commit: {human_restored:?}"
+        );
         let (_, associated) = tokio::task::spawn_blocking({
             let manager = manager.clone();
             let context = context.clone();
             let mut request = request0.clone();
             request.operation_id = "rex-human-current-observes-execution".into();
             move || manager.mapped_context(context, request)
-        }).await.unwrap();
-        assert!(associated.ok, "the restored current can establish its execution: {associated:?}");
-        let initial_fence = manager.binding_control_store().load().unwrap()
-            .current_for_name(&context.project_scope, &context.app_scope_id, &target_name).unwrap().unwrap()
-            .active_binding().unwrap().rex_execution_fence.clone();
+        })
+        .await
+        .unwrap();
+        assert!(
+            associated.ok,
+            "the restored current can establish its execution: {associated:?}"
+        );
+        let initial_fence = manager
+            .binding_control_store()
+            .load()
+            .unwrap()
+            .current_for_name(&context.project_scope, &context.app_scope_id, &target_name)
+            .unwrap()
+            .unwrap()
+            .active_binding()
+            .unwrap()
+            .rex_execution_fence
+            .clone();
         let (_, refreshed) = tokio::task::spawn_blocking({
-            let manager = manager.clone(); let context = context.clone(); let mut request = request0.clone();
+            let manager = manager.clone();
+            let context = context.clone();
+            let mut request = request0.clone();
             request.operation_id = "rex-current-refresh-preserves-fence".into();
             move || manager.mapped_context(context, request)
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(refreshed.ok, "{refreshed:?}");
-        assert_eq!(manager.binding_control_store().load().unwrap()
-            .current_for_name(&context.project_scope, &context.app_scope_id, &target_name).unwrap().unwrap()
-            .active_binding().unwrap().rex_execution_fence, initial_fence);
+        assert_eq!(
+            manager
+                .binding_control_store()
+                .load()
+                .unwrap()
+                .current_for_name(&context.project_scope, &context.app_scope_id, &target_name)
+                .unwrap()
+                .unwrap()
+                .active_binding()
+                .unwrap()
+                .rex_execution_fence,
+            initial_fence
+        );
 
         // A genuinely future execution remains admissible while both earlier
         // processes are alive. Restoring E0 again must retain the larger E2 fence.
@@ -1928,25 +2070,38 @@ mod anchor_provenance_tests {
         request2.facts.caller_pid = Some(owner2.caller_pid);
         request2.operation_id = "rex-future-after-human-fence".into();
         let (_, future) = tokio::task::spawn_blocking({
-            let manager = manager.clone(); let context = context.clone();
+            let manager = manager.clone();
+            let context = context.clone();
             move || manager.mapped_context(context, request2)
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(future.ok, "future execution remains automatic: {future:?}");
         assert_eq!(future.data["result"]["snapshot"]["name"], target_name);
         std::env::set_var("COLLAB_TEST_REX_OWNER_PID", owner0.owner_pid.to_string());
         let (_, restored_again) = tokio::task::spawn_blocking({
-            let manager = manager.clone(); let context = context.clone(); let mut request = request0.clone();
+            let manager = manager.clone();
+            let context = context.clone();
+            let mut request = request0.clone();
             request.operation_id = "rex-human-restores-earlier-execution-again".into();
-            request.grant_approval = Some(json!({"action":"restore_name", "requested_name":target_name,
-                "authorization":"user restores earlier running session again"}));
+            request.grant_approval = Some(
+                json!({"action":"restore_name", "requested_name":target_name,
+                "authorization":"user restores earlier running session again"}),
+            );
             move || manager.mapped_context(context, request)
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(restored_again.ok, "{restored_again:?}");
         let (_, associated_again) = tokio::task::spawn_blocking({
-            let manager = manager.clone(); let context = context.clone(); let mut request = request0.clone();
+            let manager = manager.clone();
+            let context = context.clone();
+            let mut request = request0.clone();
             request.operation_id = "rex-human-current-associated-again".into();
             move || manager.mapped_context(context, request)
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(associated_again.ok, "{associated_again:?}");
         std::env::set_var("COLLAB_TEST_REX_OWNER_PID", owner1.owner_pid.to_string());
         let (_, displaced_return) = tokio::task::spawn_blocking({
@@ -1955,10 +2110,20 @@ mod anchor_provenance_tests {
             let mut request = request1.clone();
             request.operation_id = "rex-displaced-later-execution-returns".into();
             move || manager.mapped_context(context, request)
-        }).await.unwrap();
-        assert!(displaced_return.ok, "the verified displaced caller must register normally: {displaced_return:?}");
-        let returned_name = displaced_return.data["result"]["snapshot"]["name"].as_str().unwrap();
-        assert_ne!(returned_name, target_name, "ordinary registration must not reclaim the human-selected target");
+        })
+        .await
+        .unwrap();
+        assert!(
+            displaced_return.ok,
+            "the verified displaced caller must register normally: {displaced_return:?}"
+        );
+        let returned_name = displaced_return.data["result"]["snapshot"]["name"]
+            .as_str()
+            .unwrap();
+        assert_ne!(
+            returned_name, target_name,
+            "ordinary registration must not reclaim the human-selected target"
+        );
         let control = manager.binding_control_store().load().unwrap();
         let target_slot = control.slot(&target_key).unwrap();
         assert_eq!(
@@ -1969,7 +2134,12 @@ mod anchor_provenance_tests {
             .reference_previous()
             .expect("the displaced target binding is preserved");
         assert_eq!(
-            target_previous.binding.session_id.as_ref().unwrap().as_str(),
+            target_previous
+                .binding
+                .session_id
+                .as_ref()
+                .unwrap()
+                .as_str(),
             "session-s0"
         );
         assert_eq!(
@@ -1977,17 +2147,19 @@ mod anchor_provenance_tests {
             owner0.owner_pid
         );
         let returned = control
-            .current_for_name(
-                &context.project_scope,
-                &context.app_scope_id,
-                returned_name,
-            )
+            .current_for_name(&context.project_scope, &context.app_scope_id, returned_name)
             .unwrap()
             .unwrap()
             .active_binding()
             .unwrap();
-        assert_eq!(returned.binding.session_id.as_ref().unwrap().as_str(), "session-s1");
-        assert_eq!(returned.transport.as_ref().unwrap().kind, TransportKind::Rex);
+        assert_eq!(
+            returned.binding.session_id.as_ref().unwrap().as_str(),
+            "session-s1"
+        );
+        assert_eq!(
+            returned.transport.as_ref().unwrap().kind,
+            TransportKind::Rex
+        );
         assert_eq!(
             returned.transport.as_ref().unwrap().rex_endpoint,
             target_previous.transport.as_ref().unwrap().rex_endpoint
@@ -2006,15 +2178,37 @@ mod anchor_provenance_tests {
             1,
             "the later successful publication is the block's only current owner"
         );
-        assert_eq!(control.lookup(&context.project_scope, &context.app_scope_id, &request1.facts, None)
-            .unwrap().unwrap().identity_key.name, returned_name);
+        assert_eq!(
+            control
+                .lookup(
+                    &context.project_scope,
+                    &context.app_scope_id,
+                    &request1.facts,
+                    None
+                )
+                .unwrap()
+                .unwrap()
+                .identity_key
+                .name,
+            returned_name
+        );
         let (_, returned_again) = tokio::task::spawn_blocking({
-            let manager = manager.clone(); let context = context.clone(); let mut request = request1.clone();
+            let manager = manager.clone();
+            let context = context.clone();
+            let mut request = request1.clone();
             request.operation_id = "rex-displaced-ordinary-name-usable".into();
             move || manager.mapped_context(context, request)
-        }).await.unwrap();
-        assert!(returned_again.ok, "ordinary name must remain usable: {returned_again:?}");
-        assert_eq!(returned_again.data["result"]["snapshot"]["name"], returned_name);
+        })
+        .await
+        .unwrap();
+        assert!(
+            returned_again.ok,
+            "ordinary name must remain usable: {returned_again:?}"
+        );
+        assert_eq!(
+            returned_again.data["result"]["snapshot"]["name"],
+            returned_name
+        );
         let final_control = manager.binding_control_store().load().unwrap();
         assert!(
             final_control
@@ -2025,11 +2219,7 @@ mod anchor_provenance_tests {
         );
         assert_eq!(
             final_control
-                .current_for_name(
-                    &context.project_scope,
-                    &context.app_scope_id,
-                    returned_name,
-                )
+                .current_for_name(&context.project_scope, &context.app_scope_id, returned_name,)
                 .unwrap()
                 .unwrap()
                 .active_binding()
@@ -2087,6 +2277,128 @@ mod anchor_provenance_tests {
             pane_anchor.is_none(),
             "no live pane observation may produce a name anchor from request facts"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rex_agy_caller_recovers_with_antigravity_agent_kind_and_rejects_cross_kind() {
+        use crate::client::adapters::rex::{set_test_cli, set_test_timeout, TEST_FIXTURE_LOCK};
+
+        let _guard = TEST_FIXTURE_LOCK.lock().await;
+        let (server, root) = test_server();
+        let fixture_dir = root.join("rex-fixture");
+        std::fs::create_dir_all(&fixture_dir).unwrap();
+        let fixture = fixture_dir.join("rex-cli");
+        std::fs::write(&fixture, include_str!("../../adapters/rex/fixture_rex.py")).unwrap();
+        let mut permissions = std::fs::metadata(&fixture).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&fixture, permissions).unwrap();
+        set_test_cli(Some(fixture));
+        set_test_timeout(Some(std::time::Duration::from_secs(5)));
+        std::env::set_var("REXPRIMITIVE_LOG_DIR", &fixture_dir);
+        let socket_path = format!("/tmp/collab-agy-rex-{}.sock", std::process::id());
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        let host_paths = server.host_paths.clone();
+        let manager = Arc::new(ProjectRuntimeManager::new(Arc::new(server), &host_paths).unwrap());
+        let context = recovery_context(&root);
+
+        let agy_owner = spawn_named_caller(&root, "agy-owner", "agy");
+        std::env::set_var("COLLAB_TEST_REX_OWNER_PID", agy_owner.owner_pid.to_string());
+        std::env::set_var("COLLAB_TEST_REX_OWNER_NAME", "agy");
+
+        let register_request = IdentityContextRequest {
+            operation_id: "rex-agy-register".into(),
+            action: "context".into(),
+            invocation: "automatic".into(),
+            facts: IdentityFacts {
+                agent_kind: Some("antigravity".into()),
+                rex: Some(crate::proto::RexCandidate {
+                    server: format!("unix://{socket_path}"),
+                    session_id: "session:11111111-1111-1111-1111-111111111111".into(),
+                    block_id: "block:22222222-2222-2222-2222-222222222222".into(),
+                    cwd: root.display().to_string(),
+                }),
+                session_id: Some("agy-conv-1".into()),
+                caller_pid: Some(agy_owner.caller_pid),
+                ..IdentityFacts::default()
+            },
+            invocation_cwd: Some(root.display().to_string()),
+            approval: None,
+            grant_approval: None,
+            query: false,
+        };
+        let (_, registered) = tokio::task::spawn_blocking({
+            let manager = manager.clone();
+            let context = context.clone();
+            let request = register_request.clone();
+            move || manager.mapped_context(context, request)
+        })
+        .await
+        .unwrap();
+        assert!(
+            registered.ok,
+            "AGY Rex registration must succeed: {registered:?}"
+        );
+
+        let control = manager.binding_control_store().load().unwrap();
+        let name = registered.data["result"]["snapshot"]["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let current = control
+            .current_for_name(&context.project_scope, &context.app_scope_id, &name)
+            .unwrap()
+            .unwrap()
+            .active_binding()
+            .unwrap();
+        assert_eq!(current.host.agent_kind.as_deref(), Some("antigravity"));
+        assert_eq!(current.host.host_type, "rex");
+        assert_eq!(
+            current.rex_execution.as_ref().unwrap().owner_pid,
+            agy_owner.owner_pid
+        );
+
+        // Cross-kind mismatch: a Codex caller claiming antigravity must not be admitted on AGY foreground.
+        let codex_caller = spawn_codex_caller(&root, "codex-nested");
+        let mismatch = tokio::task::spawn_blocking({
+            let manager = manager.clone();
+            let context = context.clone();
+            let rex = register_request.facts.rex.clone();
+            let root = root.clone();
+            let caller_pid = codex_caller.caller_pid;
+            move || {
+                manager
+                    .observe_rex_recovery(
+                        &context,
+                        &IdentityFacts {
+                            agent_kind: Some("codex".into()),
+                            rex,
+                            session_id: Some("codex-session-1".into()),
+                            caller_pid: Some(caller_pid),
+                            ..IdentityFacts::default()
+                        },
+                        Some(root.to_str().unwrap()),
+                    )
+                    .unwrap()
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(mismatch.admission, RexRecoveryAdmission::Missing(_)),
+            "Codex caller must not match an Antigravity Rex foreground"
+        );
+
+        codex_caller.stop();
+        agy_owner.stop();
+        drop(listener);
+        std::env::remove_var("COLLAB_TEST_REX_OWNER_PID");
+        std::env::remove_var("COLLAB_TEST_REX_OWNER_NAME");
+        std::env::remove_var("REXPRIMITIVE_LOG_DIR");
+        set_test_cli(None);
+        set_test_timeout(None);
+        let _ = std::fs::remove_file(socket_path);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

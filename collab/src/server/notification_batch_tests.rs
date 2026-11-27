@@ -1758,7 +1758,12 @@ fn rex_current_owner_busy_publication_queues_the_same_message() {
     assert!(response.ok, "{response:?}");
     assert_eq!(response.data["durable"], true);
     assert_eq!(response.data["notification"], "queued");
-    for key in ["notification_error", "failure", "repair_required", "escalation"] {
+    for key in [
+        "notification_error",
+        "failure",
+        "repair_required",
+        "escalation",
+    ] {
         assert!(response.data.get(key).is_none(), "{response:?}");
     }
     assert_eq!(response.data["consumed"], false);
@@ -2941,11 +2946,14 @@ async fn rex_service_generation_change_refreshes_same_block_and_retries_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rex_routed_send_refuses_non_agent_foreground_with_online_monitor() {
-    let _env_guard = crate::scope::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _env_guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let _fixture_guard = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
     let (mut server, root) = test_server();
-    Arc::get_mut(&mut server).unwrap().appserver_notification_sink =
-        default_appserver_notification_sink();
+    Arc::get_mut(&mut server)
+        .unwrap()
+        .appserver_notification_sink = default_appserver_notification_sink();
     let fixture = RexCliFixture::new(&root, "normal");
     let route = seed_rex_route(&server);
     let transport = rex_transport(
@@ -2959,15 +2967,20 @@ async fn rex_routed_send_refuses_non_agent_foreground_with_online_monitor() {
     persist_rex_worker_binding(&server, &route, "a", &transport);
     let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
     let send_root = root.clone();
-    let response = tokio::task::spawn_blocking(move || manager_send_to_rex(&manager, &send_root, "a"))
-        .await.unwrap();
+    let response =
+        tokio::task::spawn_blocking(move || manager_send_to_rex(&manager, &send_root, "a"))
+            .await
+            .unwrap();
     assert!(response.ok, "{response:?}");
     assert_eq!(response.data["durable"], true);
     assert_eq!(response.data["notification"], "queued-recipient-offline");
     let calls = fixture.calls();
-    assert!(calls.iter().any(|call| rex_method(call) == "com.superlogical.terminal.process"));
+    assert!(calls
+        .iter()
+        .any(|call| rex_method(call) == "com.superlogical.terminal.process"));
     assert!(!calls.iter().any(|call| matches!(
-        rex_method(call).as_str(), "com.superlogical.terminal.write" | "send-key"
+        rex_method(call).as_str(),
+        "com.superlogical.terminal.write" | "send-key"
     )));
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -3285,7 +3298,9 @@ async fn rex_status_error_with_service_marker_but_no_typed_change_is_not_recover
         let state = server.state.lock().unwrap();
         assert_eq!(state.msgs[message_id].state, "pending");
         assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
-        assert!(state.notification_delivery_failures.contains_key(message_id));
+        assert!(state
+            .notification_delivery_failures
+            .contains_key(message_id));
     }
     let calls = fixture.calls();
     assert!(calls.iter().any(|call| rex_method(call) == "server.status"));
@@ -3312,41 +3327,76 @@ fn rex_input_receipt_names_the_actual_transport_without_consuming_mail() {
 
 #[test]
 fn guarded_rex_submission_and_routed_recv_finish_with_one_daemon_worker() {
-    let _environment = crate::scope::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _environment = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1).enable_all().build().unwrap();
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let _rex = crate::client::adapters::rex::TEST_FIXTURE_LOCK.lock().await;
         let (server, root) = test_server();
         let fixture = RexCliFixture::new(&root, "normal").with_codex_foreground();
         let barrier = fixture.dir.join("barrier");
         std::fs::create_dir(&barrier).unwrap();
-        std::fs::write(barrier.join("pause-method"), "com.superlogical.terminal.write").unwrap();
+        std::fs::write(
+            barrier.join("pause-method"),
+            "com.superlogical.terminal.write",
+        )
+        .unwrap();
         let previous = std::env::var_os("REXPRIMITIVE_BARRIER_DIR");
         std::env::set_var("REXPRIMITIVE_BARRIER_DIR", &barrier);
 
         let peer = "guarded-recv-peer";
         assert!(peer_tests::register_synthetic_peer(&server, peer, "guarded-recv-thread").ok);
-        let binding = server.state.lock().unwrap().global.current_thread_routes.values()
-            .find(|binding| binding.agent_id.as_str() == peer).unwrap().clone();
+        let binding = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .current_thread_routes
+            .values()
+            .find(|binding| binding.agent_id.as_str() == peer)
+            .unwrap()
+            .clone();
         let identity = crate::identity::RuntimeIdentity {
-            agent_id: binding.agent_id, runtime_id: binding.runtime_id,
-            appserver_id: binding.app_scope_id, binding_id: binding.binding_id,
-            session_id: binding.session_id, native_thread_id: binding.native_thread_id,
+            agent_id: binding.agent_id,
+            runtime_id: binding.runtime_id,
+            appserver_id: binding.app_scope_id,
+            binding_id: binding.binding_id,
+            session_id: binding.session_id,
+            native_thread_id: binding.native_thread_id,
         };
         let context = ProjectContext::for_registered_route(&root, &identity).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
         manager.install_runtime(
-            &(context.app_scope_id.as_str().into(), context.project_scope.as_str().into()),
-            server.clone(), None,
+            &(
+                context.app_scope_id.as_str().into(),
+                context.project_scope.as_str().into(),
+            ),
+            server.clone(),
+            None,
         );
         let native = tokio::task::spawn_blocking(move || {
             let _state = server.state.lock().unwrap();
-            let transport = rex_transport("agent-session", "unix:///tmp/rex-fixture.sock", "test", "block-a");
+            let transport = rex_transport(
+                "agent-session",
+                "unix:///tmp/rex-fixture.sock",
+                "test",
+                "block-a",
+            );
             default_appserver_notification_sink()(
-                &transport, None, "body", "guarded-rex-input",
+                &transport,
+                None,
+                "body",
+                "guarded-rex-input",
                 NotificationDispatchContext {
-                    explicit: false, guarded_one_shot: false, guarded_goal: true,
+                    explicit: false,
+                    guarded_one_shot: false,
+                    guarded_goal: true,
+                    expected_agent_kind: None,
                 },
                 "immediate",
             )
@@ -3355,15 +3405,25 @@ fn guarded_rex_submission_and_routed_recv_finish_with_one_daemon_worker() {
             while !barrier.join("method-entered").is_file() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await;
+        })
+        .await;
         let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
         let (contended, waiting) = std::sync::mpsc::channel();
         *ROUTED_POLL_CONTENTION.lock().unwrap() = Some((root.clone(), contended));
         let receive = tokio::spawn(async move {
-            dispatch_wire_routed(manager, Some(context), Req::Poll {
-                worker_id: peer.into(), token: format!("token-{peer}"),
-                timeout_ms: 0, receive_id: None,
-            }, shutdown).await.1
+            dispatch_wire_routed(
+                manager,
+                Some(context),
+                Req::Poll {
+                    worker_id: peer.into(),
+                    token: format!("token-{peer}"),
+                    timeout_ms: 0,
+                    receive_id: None,
+                },
+                shutdown,
+            )
+            .await
+            .1
         });
         let contended = waiting.recv_timeout(Duration::from_secs(5));
         std::fs::write(barrier.join("method-release"), "").unwrap();
@@ -3374,7 +3434,10 @@ fn guarded_rex_submission_and_routed_recv_finish_with_one_daemon_worker() {
             Some(value) => std::env::set_var("REXPRIMITIVE_BARRIER_DIR", value),
             None => std::env::remove_var("REXPRIMITIVE_BARRIER_DIR"),
         }
-        assert!(entered.is_ok() && contended.is_ok(), "{entered:?} {contended:?}");
+        assert!(
+            entered.is_ok() && contended.is_ok(),
+            "{entered:?} {contended:?}"
+        );
         assert_eq!(receipt.unwrap()["enter_accepted"], true);
         assert!(response.ok, "{response:?}");
         assert_eq!(response.data["count"], 0);
@@ -3410,6 +3473,7 @@ fn rex_sink_uses_only_the_selected_rex_arm() {
             explicit: false,
             guarded_one_shot: false,
             guarded_goal: false,
+            expected_agent_kind: None,
         },
         "immediate",
     )
@@ -3987,6 +4051,7 @@ fn default_appserver_sink_does_not_fallback_to_tmux() {
             explicit: true,
             guarded_one_shot: false,
             guarded_goal: false,
+            expected_agent_kind: None,
         },
         "immediate",
     )

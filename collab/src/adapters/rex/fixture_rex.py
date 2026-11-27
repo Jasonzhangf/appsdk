@@ -330,6 +330,10 @@ def process() -> None:
         owner = (4243, "zsh")
     if owner:
         pid, name = owner
+        foreground = {"pid": pid, "user_id": 501, "name": name}
+        argv0 = os.environ.get("COLLAB_TEST_REX_OWNER_ARGV0")
+        if argv0:
+            foreground["argv0"] = argv0
         emit(
             {
                 "last_exit": None,
@@ -340,7 +344,7 @@ def process() -> None:
                     "path": f"/tmp/{name}",
                     "cwd": "/tmp/rex-fixture-cwd",
                 },
-                "foreground": {"pid": pid, "user_id": 501, "name": name},
+                "foreground": foreground,
                 "home": "/Users/fixture",
             }
         )
@@ -370,15 +374,20 @@ def program_status() -> None:
     owner = configured_owner()
     if owner:
         pid, name = owner
+        argv0 = os.environ.get("COLLAB_TEST_REX_OWNER_ARGV0")
+        owner_name = argv0 if argv0 else name
+        app = os.environ.get("COLLAB_TEST_REX_OWNER_APP") or (
+            "antigravity" if owner_name in ("agy", "antigravity") else "codex"
+        )
         emit(
             {
                 "records": [
                     {
                         "id": "agent",
                         "state": "working",
-                        "app": "codex",
+                        "app": app,
                         "msg": "busy",
-                        "owner": {"pid": pid, "name": name},
+                        "owner": {"pid": pid, "name": owner_name},
                         "updated_at": "2026-11-12T00:00:00Z",
                     }
                 ]

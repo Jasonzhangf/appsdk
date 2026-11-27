@@ -344,6 +344,41 @@ pub(crate) enum AgentKind {
     Codex,
 }
 
+impl AgentKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Antigravity => "antigravity",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "antigravity" => Some(Self::Antigravity),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn rex_program_app(self) -> &'static str {
+        self.as_str()
+    }
+
+    pub(crate) fn display_name(self) -> &'static str {
+        match self {
+            Self::Antigravity => "Antigravity",
+            Self::Codex => "Codex",
+        }
+    }
+
+    pub(crate) fn matches_command(self, name: &str) -> bool {
+        match self {
+            Self::Codex => is_codex_command(name),
+            Self::Antigravity => is_antigravity_command(name),
+        }
+    }
+}
+
 /// Return host runtime facts. Only when the nearest agent host is confirmed
 /// to be Antigravity (`Some(AgentKind::Antigravity)`) does `agy_session_id`
 /// carry `ANTIGRAVITY_CONVERSATION_ID`. Unknown host or nested Codex cannot
@@ -393,11 +428,27 @@ pub(crate) fn classify_nearest_agent<'a>(
     None
 }
 
+pub(crate) fn strip_old_update_suffix(name: &str) -> &str {
+    let Some(stem) = name.strip_suffix(".old") else {
+        return name;
+    };
+    let Some((base, timestamp)) = stem.rsplit_once('.') else {
+        return name;
+    };
+    if !base.is_empty() && !timestamp.is_empty() && timestamp.bytes().all(|b| b.is_ascii_digit()) {
+        base
+    } else {
+        name
+    }
+}
+
 pub(crate) fn is_codex_command(name: &str) -> bool {
+    let name = strip_old_update_suffix(name);
     name == "codex" || name == "codex-tui" || name == "codexcli" || name == "codex-cli"
 }
 
 pub(crate) fn is_antigravity_command(name: &str) -> bool {
+    let name = strip_old_update_suffix(name);
     name == "agy"
         || name == "antigravity"
         || name.starts_with("agy-")
@@ -781,6 +832,11 @@ mod tests {
             classify_nearest_agent(["/Applications/Antigravity App/Contents/MacOS/agy"]),
             Some(AgentKind::Antigravity)
         );
+        assert_eq!(
+            classify_nearest_agent(["/Users/fanzhang/.local/bin/agy.1795769233322723000.old"]),
+            Some(AgentKind::Antigravity)
+        );
+        assert_eq!(classify_nearest_agent(["agy.notdigits.old"]), None);
         assert_eq!(
             classify_nearest_agent(["zsh", "codex", "agy"]),
             Some(AgentKind::Codex)

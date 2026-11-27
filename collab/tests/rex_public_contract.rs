@@ -591,7 +591,107 @@ fn rex_public_activity_preserves_error_and_unknown() {
     assert_eq!(ready_again["activity"], "idle");
 
     let errors = fixture.finish();
-    assert!(errors.is_empty(), "owned Rex session cleanup failed: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "owned Rex session cleanup failed: {errors:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires an explicitly selected Rex server"]
+fn rex_public_agy_activity_and_delivery() {
+    let mut fixture = RexLiveFixture::new("agy-live");
+    let receiver = fixture.create_agy_receiver_session("agy-receiver");
+    let sender = fixture.create_codex_receiver_session("codex-sender");
+    fixture.wait_receiver_ready(&receiver, Duration::from_secs(20));
+    fixture.wait_receiver_ready(&sender, Duration::from_secs(20));
+    fixture.start_daemon();
+
+    let agy_ctx = fixture.context_provide(&receiver);
+    let agy_name = snapshot(&agy_ctx)["name"].as_str().unwrap().to_owned();
+    let sender_ctx = fixture.context_provide(&sender);
+    let _sender_id = worker_id(snapshot(&sender_ctx));
+
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=working:id=collab-live:app=antigravity",
+    );
+    let busy = fixture.wait_agent_state(&receiver, "working");
+    assert_eq!(busy["activity"], "busy");
+    assert_eq!(busy["agent_presence"], "online");
+
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=blocked:kind=permission:id=collab-live:app=antigravity",
+    );
+    let blocked = fixture.wait_agent_state(&receiver, "waiting_user");
+    assert_eq!(blocked["activity"], "waiting_user");
+
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=error:id=collab-live:app=antigravity",
+    );
+    let err = fixture.wait_agent_state(&receiver, "error");
+    assert_eq!(err["activity"], "error");
+
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=done:id=collab-live:app=antigravity",
+    );
+    let done = fixture.wait_agent_state(&receiver, "idle");
+    assert_eq!(done["activity"], "idle");
+
+    let body = format!("agy-live-message-{}", fixture.unique_token());
+    let sent = fixture.run_ok(
+        &[
+            "send",
+            "--to",
+            &agy_name,
+            "--subject",
+            "agy-rex-live",
+            "--content",
+            &body,
+        ],
+        Some(&sender.agent_session_id),
+    );
+    let message_id = sent["msg_id"]
+        .as_str()
+        .or_else(|| sent["message_id"].as_str())
+        .unwrap_or_else(|| panic!("send has no durable message id: {sent}"))
+        .to_owned();
+    let raw_input = fixture.wait_receiver_document(&receiver, Duration::from_secs(20), |value| {
+        value["kind"] == "test_receiver_raw_input"
+            && value["received"]
+                .as_str()
+                .is_some_and(|received| received.contains(&message_id))
+    });
+    assert!(raw_input["received"]
+        .as_str()
+        .unwrap()
+        .contains(&message_id));
+
+    let received = fixture.run_ok(
+        &["recv", "--timeout", "0"],
+        Some(&receiver.agent_session_id),
+    );
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|msg| msg["id"] == message_id && msg["body"] == body),
+        "{received}"
+    );
+
+    let errors = fixture.finish();
+    assert!(
+        errors.is_empty(),
+        "owned Rex session cleanup failed: {errors:?}"
+    );
 }
 
 #[test]
@@ -604,30 +704,71 @@ fn rex_periodic_goal_wakes_only_after_current_idle() {
     let registered = fixture.context_provide(&receiver);
     let name = snapshot(&registered)["name"].as_str().unwrap();
     let actor = Some(receiver.agent_session_id.as_str());
-    fixture.write_frame_and_enter(&receiver, "osc-status", "state=working:id=collab-live:app=codex");
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=working:id=collab-live:app=codex",
+    );
     fixture.wait_agent_state(&receiver, "working");
     let trigger = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() + 90_000).to_string();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 90_000)
+        .to_string();
     let goal = "rex-positive-idle";
-    fixture.run_ok(&[
-        "goal", "reconcile", "--goal-id", goal, "--owner", name, "--desired", "active",
-        "--content", "Resume the Rex goal", "--at-ms", &trigger, "--every-ms", "90000",
-        "--repeat", "2", "--ttl-seconds", "300",
-    ], actor);
+    fixture.run_ok(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            goal,
+            "--owner",
+            name,
+            "--desired",
+            "active",
+            "--content",
+            "Resume the Rex goal",
+            "--at-ms",
+            &trigger,
+            "--every-ms",
+            "90000",
+            "--repeat",
+            "2",
+            "--ttl-seconds",
+            "300",
+        ],
+        actor,
+    );
     let subject = format!("deadline:goal:{goal}");
     let before = fixture.run_ok(&["recv", "--timeout", "0"], actor);
     assert!(!before.to_string().contains(&subject), "{before}");
-    fixture.write_frame_and_enter(&receiver, "osc-status", "state=idle:id=collab-live:app=codex");
+    fixture.write_frame_and_enter(
+        &receiver,
+        "osc-status",
+        "state=idle:id=collab-live:app=codex",
+    );
     fixture.wait_agent_state(&receiver, "idle");
     let input = fixture.wait_receiver_document(&receiver, Duration::from_secs(20), |value| {
         value["kind"] == "test_receiver_raw_input"
-            && value["received"].as_str().is_some_and(|received| received.contains(&subject))
+            && value["received"]
+                .as_str()
+                .is_some_and(|received| received.contains(&subject))
     });
     let receipt = fixture.run_ok(&["recv", "--timeout", "0"], actor);
-    assert!(receipt.to_string().contains("GOAL_READY_ON_IDLE"), "{receipt}");
-    fixture.evidence("rex_goal_idle_input_and_consume", json!({"input": input, "receipt": receipt}));
+    assert!(
+        receipt.to_string().contains("GOAL_READY_ON_IDLE"),
+        "{receipt}"
+    );
+    fixture.evidence(
+        "rex_goal_idle_input_and_consume",
+        json!({"input": input, "receipt": receipt}),
+    );
     let errors = fixture.finish();
-    assert!(errors.is_empty(), "owned Rex session cleanup failed: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "owned Rex session cleanup failed: {errors:?}"
+    );
 }
 
 #[test]

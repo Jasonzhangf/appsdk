@@ -115,67 +115,14 @@ fn unknown_workspace_view(project_root: Option<String>) -> serde_json::Value {
     })
 }
 
-fn live_idle_capacity_keys(
-    server: &Server,
-    state: &State,
-) -> (
-    std::collections::BTreeSet<String>,
-    std::collections::BTreeSet<String>,
-) {
-    let live_idle_subagents = state
-        .subagents
-        .values()
-        .filter(|record| record.status == "idle")
-        .filter(|record| {
-            state.workers.get(&record.peer).is_some_and(|worker| {
-                worker_presence_in_state(server, state, worker) == IdentityPresence::Present
-            })
-        })
-        .filter(|record| !board_peer_has_execution_reservation(state, &record.peer, None))
-        .map(|record| record.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    let live_idle_workers = state
-        .workers
-        .values()
-        .filter(|worker| {
-            worker_presence_in_state(server, state, worker) == IdentityPresence::Present
-        })
-        .filter(|worker| {
-            state
-                .keepalives
-                .get(&worker.id)
-                .is_some_and(|record| record.observed == "idle")
-        })
-        .filter(|worker| !board_peer_has_execution_reservation(state, &worker.id, None))
-        .map(|worker| worker.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    (live_idle_workers, live_idle_subagents)
-}
-
 pub(crate) fn project_master_wake_idle_capacity(
-    server: &Server,
+    _server: &Server,
     state: &State,
 ) -> crate::server::notification_state::MasterWakeAccumulator {
-    let (live_idle_workers, live_idle_subagents) = live_idle_capacity_keys(server, state);
-    let mut accumulator = state.master_wake.clone();
-    notification_state::retain_live_idle_workers(
-        &mut accumulator,
-        &live_idle_workers,
-        &live_idle_subagents,
-    );
-    accumulator
-}
-
-fn prune_master_wake_idle_capacity(server: &Server) {
-    let mut state = server.state.lock().unwrap();
-    let accumulator = project_master_wake_idle_capacity(server, &state);
-    if accumulator != state.master_wake {
-        server.commit_locked_reporting(&mut state, &[Event::MasterWakeUpdated { accumulator }]);
-    }
+    state.master_wake.clone()
 }
 
 fn handle_master_status(server: &Server) -> Resp {
-    prune_master_wake_idle_capacity(server);
     // The typed grant is the only authority source. A route, reducer or scope
     // failure is an explicit error; a transport observation is reported
     // separately and never removes the holder. The endpoint probe must run

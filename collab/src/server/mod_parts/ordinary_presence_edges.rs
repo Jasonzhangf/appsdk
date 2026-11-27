@@ -45,7 +45,6 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
     .collect();
 
     for (worker, observed_presence) in observations {
-        let now = now_ms();
         let mut state = server.state.lock().unwrap();
         let Some(current_worker) = state.workers.get(&worker.id) else {
             continue;
@@ -75,70 +74,12 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
             continue;
         }
 
-        let previous_presence = old.notified_presence.clone();
         let mut record = old;
         record.notified_presence = observed_presence.into();
-        let mut events = vec![Event::KeepaliveUpdated {
+        let events = vec![Event::KeepaliveUpdated {
             worker_id: worker.id.clone(),
             record,
         }];
-        if !previous_presence.is_empty() {
-            let offline = observed_presence == "offline";
-            events.push(Event::MasterWakeSignal {
-                signal: if offline {
-                    state::MasterWakeSignal::WorkerUnresponsive {
-                        worker_id: worker.id.clone(),
-                    }
-                } else {
-                    state::MasterWakeSignal::WorkerRecovered {
-                        worker_id: worker.id.clone(),
-                    }
-                },
-                at_ms: now,
-            });
-            if server.config.notifications.enabled {
-                if let Some(subscription) = state
-                    .matching_subscription(&master.id, "direct-message", None, now)
-                    .cloned()
-                {
-                    let message_id = gen_msg_id();
-                    events.push(Event::Sent {
-                        msg: Message {
-                            id: message_id.clone(),
-                            from: "collab-server".into(),
-                            to: master.id.clone(),
-                            mtype: "notify".into(),
-                            subject: Some(if offline {
-                                format!("worker-unresponsive: {}", worker.id)
-                            } else {
-                                format!("worker-recovered: {}", worker.id)
-                            }),
-                            body: if offline {
-                                format!(
-                                    "Worker {} changed from online to offline. Action required: inspect its durable tasks with `collab task status` and mailbox with `collab inbox`; reassign or close stale work only with evidence.",
-                                    worker.id
-                                )
-                            } else {
-                                format!(
-                                    "Worker {} changed from offline to online. Action required: resume eligible assigned work or refresh scheduling evidence before dispatch.",
-                                    worker.id
-                                )
-                            },
-                            in_reply_to: None,
-                            created_ms: now,
-                            state: "pending".into(),
-                            wake_attempt_count: 0,
-                            last_wake_attempt_ms: 0,
-                    retry_attempted: false,
-                        },
-                    });
-                    events.push(Event::WakeBound {
-                        message_id,
-                        subscription_id: subscription.id,
-                    });
-                }
-            }
-        }
         server.commit_locked_reporting(&mut state, &events);
     }
 }

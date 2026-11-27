@@ -1233,7 +1233,7 @@ fn board_auto_notice_events_for_recipient(
         },
         Event::DeliveryMode {
             msg_id: message_id.clone(),
-            mode: "explicit-notification".into(),
+            mode: "queued".into(),
             source_thread_id: None,
         },
     ];

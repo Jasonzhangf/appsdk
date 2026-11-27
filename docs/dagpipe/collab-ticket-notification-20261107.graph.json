@@ -1,7 +1,7 @@
 {
   "id": "collab-ticket-notification-design",
-  "version": "0.1.0",
-  "description": "目标设计。一次队列或可信运行状态事件到一次处理结果。入队只做内部调度且不提醒，idle 自动接续。运行任务变更直接提醒执行者，worker idle 提醒 manager，manager idle 提醒巡检员，worker 同一 idle 阶段严格超过 10 分钟提醒双方。事件去重及阈值状态由 daemon 持久状态 owner 处理。算子尚未绑定运行实现。",
+  "version": "0.2.0",
+  "description": "目标设计。一次队列或可信运行状态事件到一次处理结果。入队与普通空闲状态仅作为 daemon 自动调度输入（ticket 自动接续与 board-idle-patrol 自动驱使 peer），不再向上生成普通 peer idle->master 汇报；运行任务与通知投递遵循统一准入策略（周期角色保护与全传输 2 分钟批量合并）。算子尚未绑定运行实现。",
   "inputs": [{"id": "队列或运行状态事件", "schema": "Object"}],
   "nodes": [
     {
@@ -18,6 +18,7 @@
       "id": "分类事件并核对本次空闲阶段",
       "operator": "collab.ticket_notification_design.classify",
       "operator_version": "1",
+      "description": "将 peer 空闲状态分类为自动接续或 board-idle-patrol 内部调度输入，不转为向上报告的 master idle 通知；运行任务变更按接收方角色与 2 分钟窗口分类准入。",
       "inputs": ["提醒事件准入结果"],
       "output": {"id": "接续与提醒决策", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

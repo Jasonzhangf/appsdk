@@ -178,21 +178,26 @@ Up to three active subscriptions exist per agent.
   consumes the batch without a follow-up ACK; DSH gateway owns consumption.
   Explicit ACK is for already-delivered recovery, never discarding unread content.
   Messages remain safely buffered in the durable mailbox.
-- The bound subscription event policy supplies the automatic retry window: the
-  default `direct-message` batch window is 120 seconds, while an event configured
-  as `immediate` has a zero retry delay. At dispatch, include eligible unsent
-  messages for the recipient, capped at 3 previews per batch knock. Excess
-  messages remain in the inbox with `[+N more pending in inbox]`. When unacked
-  notifications reach the throttle cap, the batch preview appends an
-  `[ACK REQUIRED: ...]` notice. Combine previews into the selected transport
-  operation and reserve attempts before sending. Failed, absent, unknown, or uncertain
-  ordinary delivery remains pending; automatic eligibility still respects the
-  bound event window and the lifetime attempt cap. Explicit notification
-  delivery is never an automatic timer candidate; a later explicit operation
-  must be used when the failure proves submission did not occur. An ambiguous
-  post-submit transport outcome is not automatically retried for that
-  message: the mailbox entry remains durable, and the recipient should run
-  `collab recv`; send a new message if another wake is needed. The send error
+- The bound subscription event policy supplies the coalescing collection window:
+  automatic and `queued` dispatches share a fixed 120-second `[t0, t0 + 120_000)`
+  collection window across transports before firing one combined wake, while
+  explicit manual `send` (`explicit-notification`), due periodic/deadline
+  triggers, and auto-claim `ticket-claim-*` wakes run immediately. Protected
+  periodic-first roles (`master`, `patrol`, `memory`) defer non-scheduled system
+  events until their periodic patrol is due and fold pending mailbox events into
+  that periodic wake without mid-turn steering. At dispatch, include all eligible
+  messages in the closed window for the recipient together (no 3-preview batch
+  cap stranding). When unacked notifications reach the throttle cap, the batch
+  preview appends an `[ACK REQUIRED: ...]` notice. Combine previews into the
+  selected transport operation and reserve attempts before sending. Failed, absent,
+  unknown, or uncertain ordinary delivery remains pending; automatic eligibility
+  still respects the bound event window and the lifetime attempt cap. Explicit
+  notification delivery is never an automatic timer candidate (except `ticket-claim-*`
+  continuation); a later explicit operation must be used when the failure proves
+  submission did not occur. An ambiguous post-submit transport outcome is not
+  automatically retried for that message: the mailbox entry remains durable, and
+  the recipient should run `collab recv`; send a new message if another wake is
+  needed. The send error
   includes the durable message ID and states this recovery path.
 - P0 urgency is explicit: only a typed goal/deadline interrupt is marked P0. A blocked
   task, wait-timeout, or scheduling blocker is P1 operational work and must not be

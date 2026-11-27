@@ -124,7 +124,7 @@ enum ExecutionCandidateIneligible {
     ProtectedRole,
 }
 
-fn protected_specialty(role: &str) -> Option<&'static str> {
+pub(super) fn protected_specialty(role: &str) -> Option<&'static str> {
     workflow_canonical_specialty(role)
         .filter(|specialty| matches!(*specialty, "patrol" | "memory"))
 }

@@ -349,10 +349,6 @@ fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() 
     assert!(state.msgs.values().all(|m| {
         !(m.to == "master-worker" && m.subject == Some("worker-unresponsive: edge-worker".into()))
     }));
-    assert!(!state
-        .master_wake
-        .unresponsive_workers
-        .contains(&"edge-worker".into()));
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

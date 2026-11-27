@@ -235,11 +235,29 @@ fn dispatch_gap_reminder_is_delivered_once_and_idempotent_for_600000ms() {
         state["master_wake"]["last_dispatch_gap_notice_ms"] = json!(now - 600_000);
     });
     fixture.observe_native_agent(&facts.peer, "online", "idle");
+    thread::sleep(SETTLE);
+    assert_eq!(
+        dispatch_gap_notices(&fixture.current_state(), &facts.master).len(),
+        1,
+        "an unconsumed master-dispatch-gap reminder must be reused instead of duplicating"
+    );
+
+    let first_id = notices[0]["id"].as_str().unwrap().to_owned();
+    let recv = fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
+    assert!(recv["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == first_id));
+    fixture.update_current_state(|state| {
+        state["master_wake"]["last_dispatch_gap_notice_ms"] = json!(now - 600_000);
+    });
+    fixture.observe_native_agent(&facts.peer, "online", "idle");
     let notices = wait_for_gap_notices(&fixture, &facts.master, 2);
     assert_eq!(
         notices.len(),
         2,
-        "the condition may notify again once the 600000ms window closes"
+        "after consumption, the condition may notify again once the 600000ms window closes"
     );
     let wake = fixture.current_state()["master_wake"].clone();
     assert_eq!(wake["dispatch_gap_task_ids"], json!([task_id]));

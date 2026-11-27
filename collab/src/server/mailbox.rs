@@ -259,18 +259,18 @@ pub fn select_batch(
     delay: i64,
     window_start_ms: i64,
 ) -> (Vec<(i64, String, String, String, String)>, usize) {
-    const MAX_BATCH_DELIVERY: usize = 3;
     let window_end = window_start_ms.saturating_add(delay);
-    let mut batch: Vec<_> = candidates
+    let batch: Vec<_> = candidates
         .into_iter()
-        .filter(|candidate| candidate.0 <= window_end)
+        .filter(|candidate| {
+            if delay > 0 {
+                candidate.0 < window_end
+            } else {
+                candidate.0 <= window_end
+            }
+        })
         .collect();
-    let total_pending = batch.len();
-    let remaining = total_pending.saturating_sub(MAX_BATCH_DELIVERY);
-    if remaining > 0 {
-        batch.drain(..remaining);
-    }
-    (batch, remaining)
+    (batch, 0)
 }
 
 pub fn max_wake_attempts() -> u32 {

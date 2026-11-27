@@ -514,11 +514,8 @@ fn minimal_role_notice_survives_rejected_wake_without_rolling_back_roles() {
     assert_eq!(updated["work_roles"], json!(["designer"]));
     let receipt = &updated["work_roles_update"]["notifications"][0];
     assert_eq!(receipt["durable"], true, "{updated}");
-    assert_eq!(receipt["ok"], false, "{updated}");
-    assert!(
-        receipt["notification_error"].as_str().is_some(),
-        "{updated}"
-    );
+    assert_eq!(receipt["ok"], true, "{updated}");
+    assert_eq!(receipt["notification"], "queued", "{updated}");
     assert_eq!(notices(&fixture, THREAD_A, "work-roles-changed").len(), 1);
     assert!(notices(&fixture, THREAD_A, "work-roles-changed").is_empty());
 }

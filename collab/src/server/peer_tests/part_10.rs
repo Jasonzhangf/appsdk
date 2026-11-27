@@ -2231,9 +2231,7 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
             },
         },
         Event::MasterWakeSignal {
-            signal: crate::server::state::MasterWakeSignal::WorkerIdle {
-                worker_id: "worker".into(),
-            },
+            signal: crate::server::state::MasterWakeSignal::GoalDue { revision: 1 },
             at_ms: now,
         },
         Event::Sent {
@@ -2241,8 +2239,8 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
                 id: "master-wake".into(),
                 from: "collab-server".into(),
                 to: "master".into(),
-                mtype: "notify".into(),
-                subject: Some("worker-idle: worker".into()),
+                mtype: "notification".into(),
+                subject: Some("goal:plan.md".into()),
                 body: "wake".into(),
                 in_reply_to: None,
                 created_ms: now,
@@ -2305,9 +2303,7 @@ fn typed_master_wake_delivery_does_not_depend_on_legacy_master_projection() {
     let now = now_ms();
     server.commit(&[
         Event::MasterWakeSignal {
-            signal: crate::server::state::MasterWakeSignal::WorkerIdle {
-                worker_id: "worker".into(),
-            },
+            signal: crate::server::state::MasterWakeSignal::GoalDue { revision: 1 },
             at_ms: now,
         },
         Event::Sent {
@@ -2315,8 +2311,8 @@ fn typed_master_wake_delivery_does_not_depend_on_legacy_master_projection() {
                 id: "master-wake-typed".into(),
                 from: "collab-server".into(),
                 to: "master".into(),
-                mtype: "notify".into(),
-                subject: Some("worker-idle: worker".into()),
+                mtype: "notification".into(),
+                subject: Some("goal:plan.md".into()),
                 body: "wake".into(),
                 in_reply_to: None,
                 created_ms: now,
@@ -2483,26 +2479,14 @@ fn worker_freed_transitions_notify_live_master() {
     crate::server::keepalive::tick_at(&server_arc, now + 60_002);
 
     let state = server_arc.state.lock().unwrap();
-    let idle_alert = state
-        .msgs
-        .values()
-        .find(|m| m.to == "master-worker" && m.subject == Some("subagent-status".into()));
     assert!(
-        idle_alert.is_some(),
-        "expected managed subagent-status alert sent to master"
+        !state
+            .msgs
+            .values()
+            .any(|m| m.to == "master-worker" && matches!(m.subject.as_deref(), Some("subagent-status" | "worker-idle" | "master-wake-batch"))),
+        "idle transitions must no longer push idle alerts to master"
     );
-    let alert = idle_alert.unwrap();
-    assert!(alert.body.contains("newly_idle=subagent:managed-worker"));
-    assert!(alert.body.contains("live_idle=subagent:managed-worker"));
-    assert!(alert.body.contains("Long-horizon orchestration"));
-    assert!(alert.body.contains("verified idle capacity"));
-    assert!(alert.body.contains("one complete independent contract per task"));
-    assert!(alert.body.contains("Each owner handles their own Codex"));
-    assert!(!alert
-        .body
-        .contains("regardless of whether other peers are busy"));
-    assert!(!alert.body.contains("only after confirming no peer can take it"));
-    assert!(!alert.body.contains("saturate live present peers first"));
+    assert_eq!(state.keepalives["task-worker"].observed, "idle");
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -2682,22 +2666,14 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
             m.to == "master-worker" && m.subject == Some("worker-unresponsive: stuck-worker".into())
         })
         .collect();
-    assert_eq!(offline_alerts.len(), 1);
-    assert!(offline_alerts[0]
-        .body
-        .contains("durable tasks with `collab task status`"));
-    assert!(offline_alerts[0]
-        .body
-        .contains("mailbox with `collab inbox`"));
-    assert!(!offline_alerts[0].body.contains("snapshot"));
+    assert!(
+        offline_alerts.is_empty(),
+        "ordinary presence edges must not push worker-unresponsive alerts to master"
+    );
     assert_eq!(
         state.keepalives["stuck-worker"].notified_presence,
         "offline"
     );
-    assert!(state
-        .master_wake
-        .unresponsive_workers
-        .contains(&"stuck-worker".into()));
     drop(state);
 
     for request in [
@@ -2738,8 +2714,8 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
                     && m.subject == Some("worker-unresponsive: stuck-worker".into())
             })
             .count(),
-        1,
-        "unchanged offline status, status-all, workers, and ack must not duplicate"
+        0,
+        "unchanged offline status, status-all, workers, and ack must not emit alerts"
     );
 
     // Re-creating the pane restores an address only. The agent runtime stays

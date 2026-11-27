@@ -596,7 +596,7 @@ fn enqueue(
         },
         Event::DeliveryMode {
             msg_id: id.into(),
-            mode: "explicit-notification".into(),
+            mode: "queued".into(),
             source_thread_id: None,
         },
         Event::WakeBound {

@@ -1,69 +1,45 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(from = "MasterWakeSignalRepr")]
 pub enum MasterWakeSignal {
     GoalDue {
         revision: u64,
     },
-    WorkerIdle {
-        worker_id: String,
+    #[serde(skip_serializing)]
+    LegacyIgnored,
+}
+
+#[derive(Deserialize)]
+struct GoalDueRepr {
+    revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MasterWakeSignalRepr {
+    GoalDue {
+        #[serde(rename = "GoalDue")]
+        goal_due: GoalDueRepr,
     },
-    /// A scheduler-owned task revision change re-qualifies one idle notice for
-    /// a worker that stayed in the live idle set. Unlike `WorkerIdle`, it
-    /// enters `newly_idle_workers` even when the worker is already live idle,
-    /// so a genuine revision change is not suppressed by same-set idempotence.
-    WorkerIdleRequalify {
-        worker_id: String,
-    },
-    /// A same-episode return to idle after a transient Working flap. `key` is
-    /// the accumulator idle key (a worker id or `subagent:<id>`). It keeps the
-    /// live idle projection truthful (`idle_workers`) without qualifying a new
-    /// notice, so `newly_idle_workers` stays untouched.
-    IdleMembership {
-        key: String,
-    },
-    MasterIdle {
-        worker_id: String,
-    },
-    WorkerUnresponsive {
-        worker_id: String,
-    },
-    WorkerRecovered {
-        worker_id: String,
-    },
-    WorkerWorking {
-        worker_id: String,
-    },
-    TaskBlocked {
-        task_id: String,
-    },
-    TaskFreed {
-        task_id: String,
-    },
-    SubagentStatus {
-        subagent_id: String,
-    },
-    SubagentWorking {
-        subagent_id: String,
-    },
+    Legacy(serde::de::IgnoredAny),
+}
+
+impl From<MasterWakeSignalRepr> for MasterWakeSignal {
+    fn from(repr: MasterWakeSignalRepr) -> Self {
+        match repr {
+            MasterWakeSignalRepr::GoalDue { goal_due } => Self::GoalDue {
+                revision: goal_due.revision,
+            },
+            MasterWakeSignalRepr::Legacy(_) => Self::LegacyIgnored,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MasterWakeAccumulator {
     pub generation: u64,
     pub goal_due: bool,
-    #[serde(default)]
-    pub idle_workers: Vec<String>,
-    /// Idle-capacity additions accumulated since the last master-idle batch.
-    #[serde(default)]
-    pub newly_idle_workers: Vec<String>,
-    #[serde(default)]
-    pub unresponsive_workers: Vec<String>,
-    #[serde(default)]
-    pub blocked_or_timed_out_tasks: Vec<String>,
-    #[serde(default)]
-    pub completed_or_freed_tasks: Vec<String>,
     #[serde(default)]
     pub highest_bug_revision: Option<u64>,
     #[serde(default)]
@@ -83,7 +59,8 @@ pub struct MasterWakeAccumulator {
     #[serde(default)]
     pub last_dispatch_gap_notice_key: Option<String>,
     /// Durable commit time of the last dispatch-gap reminder. A local check,
-    /// skip or failed delivery must not move it.
+    /// skip or failed delivery must not move it, and transient gap resolution
+    /// preserves the monotonic cooldown timestamp.
     #[serde(default)]
     pub last_dispatch_gap_notice_ms: i64,
     /// `clean`, `delivered` or `delivery_failed`.
@@ -92,14 +69,6 @@ pub struct MasterWakeAccumulator {
     pub scheduling_decision_revision: u64,
     pub first_pending_ms: i64,
     pub last_updated_ms: i64,
-    /// Idle set of the last notification actually generated for the master.
-    /// A repeated `WorkerIdle` signal for an already idle worker must not
-    /// rebuild the batch after [`mark_idle_batch_delivered`] clears
-    /// `newly_idle_workers`.
-    #[serde(default)]
-    pub last_notified_newly_idle: Vec<String>,
-    #[serde(default)]
-    pub last_notified_live_idle: Vec<String>,
     #[serde(default)]
     pub wake_hold: Option<WakeHold>,
     #[serde(default = "default_delivery_state")]
@@ -176,15 +145,6 @@ pub fn mark_dispatch_gap_delivery_failed(accumulator: &mut MasterWakeAccumulator
     accumulator.dispatch_gap_delivery_state = "delivery_failed".into();
 }
 
-fn add_unique(items: &mut Vec<String>, value: String) -> bool {
-    if items.contains(&value) {
-        return false;
-    }
-    items.push(value);
-    items.sort();
-    true
-}
-
 pub fn accumulate_master_wake(
     accumulator: &mut MasterWakeAccumulator,
     signal: &MasterWakeSignal,
@@ -201,116 +161,7 @@ pub fn accumulate_master_wake(
             }
             changed
         }
-        MasterWakeSignal::WorkerIdle { worker_id } => {
-            let already_idle = accumulator.idle_workers.contains(worker_id);
-            let added = add_unique(&mut accumulator.idle_workers, worker_id.clone());
-            // A worker already in the live idle set is not a new idle edge.
-            // Rebuilding `newly_idle_workers` here would re-notify the same
-            // idle set after the previous batch was delivered.
-            let newly_added = if already_idle {
-                false
-            } else {
-                add_unique(&mut accumulator.newly_idle_workers, worker_id.clone())
-            };
-            let recovered = accumulator
-                .unresponsive_workers
-                .iter()
-                .position(|id| id == worker_id)
-                .map(|index| accumulator.unresponsive_workers.remove(index))
-                .is_some();
-            added || newly_added || recovered
-        }
-        MasterWakeSignal::WorkerIdleRequalify { worker_id } => {
-            // A requalified revision is a new notification edge even when the
-            // worker's visible idle set is unchanged. Invalidate the prior
-            // same-set latch so an unconsumed older notice cannot suppress it.
-            let invalidated = !accumulator.last_notified_newly_idle.is_empty()
-                || !accumulator.last_notified_live_idle.is_empty();
-            accumulator.last_notified_newly_idle.clear();
-            accumulator.last_notified_live_idle.clear();
-            let added = add_unique(&mut accumulator.idle_workers, worker_id.clone());
-            let newly_added = add_unique(&mut accumulator.newly_idle_workers, worker_id.clone());
-            let recovered = accumulator
-                .unresponsive_workers
-                .iter()
-                .position(|id| id == worker_id)
-                .map(|index| accumulator.unresponsive_workers.remove(index))
-                .is_some();
-            added || newly_added || recovered || invalidated
-        }
-        MasterWakeSignal::IdleMembership { key } => {
-            let added = add_unique(&mut accumulator.idle_workers, key.clone());
-            let recovered = accumulator
-                .unresponsive_workers
-                .iter()
-                .position(|id| id == key)
-                .map(|index| accumulator.unresponsive_workers.remove(index))
-                .is_some();
-            added || recovered
-        }
-        MasterWakeSignal::MasterIdle { worker_id } => {
-            // The master is the consumer, not idle worker capacity. Its idle
-            // edge flushes the accumulated batch instead of joining it.
-            accumulator
-                .unresponsive_workers
-                .iter()
-                .position(|id| id == worker_id)
-                .map(|index| accumulator.unresponsive_workers.remove(index))
-                .is_some()
-                || (accumulator.generation == 0 && accumulator.last_updated_ms == 0)
-        }
-        MasterWakeSignal::WorkerUnresponsive { worker_id } => {
-            accumulator.idle_workers.retain(|id| id != worker_id);
-            accumulator.newly_idle_workers.retain(|id| id != worker_id);
-            add_unique(&mut accumulator.unresponsive_workers, worker_id.clone())
-        }
-        MasterWakeSignal::WorkerRecovered { worker_id }
-        | MasterWakeSignal::WorkerWorking { worker_id } => {
-            let idle_removed = accumulator
-                .idle_workers
-                .iter()
-                .position(|id| id == worker_id);
-            if let Some(index) = idle_removed {
-                accumulator.idle_workers.remove(index);
-            }
-            accumulator.newly_idle_workers.retain(|id| id != worker_id);
-            let unresponsive_removed = accumulator
-                .unresponsive_workers
-                .iter()
-                .position(|id| id == worker_id);
-            if let Some(index) = unresponsive_removed {
-                accumulator.unresponsive_workers.remove(index);
-            }
-            idle_removed.is_some() || unresponsive_removed.is_some()
-        }
-        MasterWakeSignal::TaskBlocked { task_id } => {
-            add_unique(&mut accumulator.blocked_or_timed_out_tasks, task_id.clone())
-        }
-        MasterWakeSignal::TaskFreed { task_id } => {
-            add_unique(&mut accumulator.completed_or_freed_tasks, task_id.clone())
-        }
-        MasterWakeSignal::SubagentStatus { subagent_id } => {
-            let id = format!("subagent:{subagent_id}");
-            let added = add_unique(&mut accumulator.idle_workers, id.clone());
-            let newly_added = add_unique(&mut accumulator.newly_idle_workers, id);
-            added || newly_added
-        }
-        MasterWakeSignal::SubagentWorking { subagent_id } => {
-            let id = format!("subagent:{subagent_id}");
-            let idle_removed = accumulator
-                .idle_workers
-                .iter()
-                .position(|existing| existing == &id)
-                .map(|index| accumulator.idle_workers.remove(index))
-                .is_some();
-            let newly_removed = accumulator
-                .newly_idle_workers
-                .iter()
-                .position(|existing| existing == &id)
-                .map(|index| accumulator.newly_idle_workers.remove(index))
-                .is_some();
-            idle_removed || newly_removed
-        }
+        MasterWakeSignal::LegacyIgnored => false,
     };
     if changed {
         if accumulator.generation == 0 {
@@ -345,57 +196,8 @@ pub fn mark_master_wake_skipped_busy(accumulator: &mut MasterWakeAccumulator) {
     accumulator.delivery_state = "skipped-busy".into();
 }
 
-pub fn mark_idle_batch_delivered(accumulator: &mut MasterWakeAccumulator) {
-    accumulator.last_notified_newly_idle = accumulator.newly_idle_workers.clone();
-    accumulator.last_notified_live_idle = accumulator.idle_workers.clone();
-    accumulator.newly_idle_workers.clear();
-}
-
-/// A message belongs to the master idle-notification contract when it is a
-/// typed `notification` or an idle batch subject. These share one idempotency
-/// and delivery-failure lifecycle, so unrelated `notify` traffic such as
-/// `reply-pending` stays outside.
-pub fn is_master_wake_notice(mtype: &str, subject: Option<&str>) -> bool {
-    mtype == "notification" || is_idle_batch_notice(mtype, subject)
-}
-
-/// Idle batch notices are selected purely by batch subject, regardless of the
-/// carrying mtype. This keeps unrelated typed `notification` traffic such as
-/// `goal:plan.md` out of idle-batch idempotency while preserving typed notice
-/// gating in state_impl.
-pub fn is_idle_batch_notice(_mtype: &str, subject: Option<&str>) -> bool {
-    matches!(
-        subject,
-        Some("worker-idle" | "master-wake-batch" | "subagent-status")
-    )
-}
-
-pub fn retain_live_idle_workers(
-    accumulator: &mut MasterWakeAccumulator,
-    live_workers: &BTreeSet<String>,
-    live_subagents: &BTreeSet<String>,
-) -> bool {
-    let before_idle = accumulator.idle_workers.clone();
-    let before_newly = accumulator.newly_idle_workers.clone();
-    accumulator.idle_workers.retain(|id| {
-        if let Some(subagent_id) = id.strip_prefix("subagent:") {
-            live_subagents.contains(subagent_id)
-        } else {
-            live_workers.contains(id)
-        }
-    });
-    accumulator.newly_idle_workers.retain(|id| {
-        if let Some(subagent_id) = id.strip_prefix("subagent:") {
-            live_subagents.contains(subagent_id)
-        } else {
-            live_workers.contains(id)
-        }
-    });
-    let changed =
-        accumulator.idle_workers != before_idle || accumulator.newly_idle_workers != before_newly;
-    if changed {
-        accumulator.generation = accumulator.generation.saturating_add(1);
-        accumulator.delivery_state = "pending".into();
-    }
-    changed
+/// A message belongs to the master goal-notification lifecycle when it is a
+/// typed `notification`, keeping unrelated `notify` traffic outside.
+pub fn is_master_wake_notice(mtype: &str, _subject: Option<&str>) -> bool {
+    mtype == "notification"
 }

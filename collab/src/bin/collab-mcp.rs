@@ -48,12 +48,12 @@ fn tools() -> Value {
         tool("collab_msg", "Read a durable notification by local ID or a full collab-ref.", json!({"id":{"type":"string"}}), &["id"]),
         tool(
             "collab_recv",
-            "Consume the durable inbox batch. receive_id is the caller-owned receive identity; repeat the same value to replay a committed receive after a lost response.",
+            "Read unread durable inbox messages and consume once. Optional receive_id is a trace identifier; repeating it does not replay consumed mail.",
             json!({
                 "timeout":{"type":"integer","minimum":0},
                 "receive_id":{"type":"string"}
             }),
-            &["receive_id"]
+            &[]
         ),
         tool("collab_subagent", "Legacy managed-child compatibility and diagnostics only; do not use start, dispatch, send, or bind for new production work. Assign ordinary long-horizon work with collab_board_publish and claim/invite; bounded execution or observation uses an independent `codex exec --profile gcm` worker. Status preserves historical mailbox, keepalive, and notification facts. Snapshot is an explicit screen-tail read, not a health probe. Rearm requires an explicit operator request after exhaustion. Managed records grant no new execution authority.", json!({"action":{"type":"string","enum":["start","dispatch","list","status","snapshot","rearm","send","ready","working","close","bind"]},"id":{"type":"string"},"create_operation_id":{"type":"string","minLength":1},"request_id":{"type":"string"},"runtime":{"type":"string","enum":["codex"]},"lines":{"type":"integer","minimum":1,"maximum":200},"subject":{"type":"string"},"body":{"type":"string"},"feature_id":{"type":"string"},"worktree_path":{"type":"string"},"branch":{"type":"string"},"base_commit":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]},"next_step":{"type":"string"}}), &["action"]),
         tool(
@@ -111,9 +111,15 @@ fn tools() -> Value {
             &["id", "blocking_task"]
         ),
         tool(
+            "collab_task_start",
+            "Start the claimed ticket using its current observed revision and execution attempt.",
+            json!({"id":{"type":"string"},"expected_revision":{"type":"integer","minimum":1},"attempt":{"type":"integer","minimum":1}}),
+            &["id", "expected_revision", "attempt"]
+        ),
+        tool(
             "collab_task_deliver",
             "Deliver a claimed task with evidence. Collab does not inspect Git or manage worktrees.",
-            json!({"id":{"type":"string"},"evidence":{"type":"string"},"worktree":{"type":"string"},"no_candidate":{"type":"boolean"}}),
+            json!({"id":{"type":"string"},"evidence":{"type":"string"},"worktree":{"type":"string"},"no_candidate":{"type":"boolean"},"attempt":{"type":"integer","minimum":1}}),
             &["id", "evidence"]
         ),
         tool(
@@ -130,7 +136,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_block",
-            "Mark an owned task blocked without notifying unrelated peers.",
+            "Request business blocking for an owned task. The request remains pending and retains its execution slot until an authorized supervisor approves blocked status.",
             json!({"id":{"type":"string"},"next":{"type":"string"}}),
             &["id"]
         ),
@@ -582,10 +588,12 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
         "collab_recv" => {
             argv.push("recv".into());
             optional_integer_flag(&mut argv, args, "timeout", "--timeout")?;
-            argv.extend([
-                "--receive-id".into(),
-                required_receive_id(args, "receive_id")?,
-            ]);
+            if args.get("receive_id").is_some() {
+                argv.extend([
+                    "--receive-id".into(),
+                    required_receive_id(args, "receive_id")?,
+                ]);
+            }
         }
         "collab_subagent" => {
             let action = required(args, "action")?;
@@ -795,10 +803,21 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             argv.extend(["task".into(), "wait".into(), required(args, "id")?]);
             argv.extend(["--for".into(), required(args, "blocking_task")?]);
         }
+        "collab_task_start" => {
+            argv.extend(["task".into(), "start".into(), required(args, "id")?]);
+            required_positive_u64_flag(
+                &mut argv,
+                args,
+                "expected_revision",
+                "--expected-revision",
+            )?;
+            required_positive_u64_flag(&mut argv, args, "attempt", "--attempt")?;
+        }
         "collab_task_deliver" => {
             argv.extend(["task".into(), "deliver".into(), required(args, "id")?]);
             argv.extend(["--evidence".into(), required(args, "evidence")?]);
             optional_flag(&mut argv, args, "worktree", "--worktree")?;
+            optional_positive_u64_flag(&mut argv, args, "attempt", "--attempt")?;
             if args
                 .get("no_candidate")
                 .and_then(Value::as_bool)
@@ -999,6 +1018,33 @@ fn optional_flag(
                 .ok_or_else(|| format!("{key} must be a string"))?
                 .into(),
         ]);
+    }
+    Ok(())
+}
+
+fn required_positive_u64_flag(
+    argv: &mut Vec<String>,
+    args: &Value,
+    key: &str,
+    flag: &str,
+) -> Result<(), String> {
+    let value = args
+        .get(key)
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("{key} must be a positive integer"))?;
+    argv.extend([flag.into(), value.to_string()]);
+    Ok(())
+}
+
+fn optional_positive_u64_flag(
+    argv: &mut Vec<String>,
+    args: &Value,
+    key: &str,
+    flag: &str,
+) -> Result<(), String> {
+    if args.get(key).is_some() {
+        required_positive_u64_flag(argv, args, key, flag)?;
     }
     Ok(())
 }
@@ -1311,3 +1357,227 @@ fn main() {
 #[cfg(test)]
 #[path = "collab-mcp/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod queue_parity_tests {
+    use super::*;
+    #[test]
+    fn queue_parity_publish_forwards_dependencies_as_separate_argv_values() {
+        let argv = build_argv(
+            "collab_board_publish",
+            &json!({
+                "id":"child",
+                "title":"Dependent work",
+                "description":"Queue after the parent",
+                "delivery_condition":"Parent completes",
+                "test_condition":"Queue advances",
+                "depends_on":["parent","other"]
+            }),
+        )
+        .unwrap();
+        assert!(argv
+            .windows(3)
+            .any(|args| args == ["--depends-on", "parent", "other"]));
+    }
+
+    #[test]
+    fn queue_parity_task_start_maps_revision_and_attempt() {
+        assert_eq!(
+            build_argv(
+                "collab_task_start",
+                &json!({"id":"ticket","expected_revision":4,"attempt":2})
+            )
+            .unwrap(),
+            [
+                "task",
+                "start",
+                "ticket",
+                "--expected-revision",
+                "4",
+                "--attempt",
+                "2"
+            ]
+        );
+    }
+
+    #[test]
+    fn queue_parity_delivery_forwards_optional_attempt() {
+        let argv = build_argv(
+            "collab_task_deliver",
+            &json!({"id":"ticket","evidence":"complete","attempt":3}),
+        )
+        .unwrap();
+        assert!(argv.windows(2).any(|args| args == ["--attempt", "3"]));
+    }
+
+    #[test]
+    fn queue_parity_task_start_and_delivery_enforce_positive_u64_attempts() {
+        assert_eq!(
+            build_argv(
+                "collab_task_start",
+                &json!({"id":"ticket","expected_revision":4,"attempt":u64::MAX})
+            )
+            .unwrap(),
+            [
+                "task",
+                "start",
+                "ticket",
+                "--expected-revision",
+                "4",
+                "--attempt",
+                &u64::MAX.to_string(),
+            ]
+        );
+        let delivered = build_argv(
+            "collab_task_deliver",
+            &json!({"id":"ticket","evidence":"complete","attempt":u64::MAX}),
+        )
+        .unwrap();
+        assert!(delivered
+            .windows(2)
+            .any(|args| args == ["--attempt", &u64::MAX.to_string()]));
+        assert_eq!(
+            build_argv(
+                "collab_task_deliver",
+                &json!({"id":"ticket","evidence":"complete"}),
+            )
+            .unwrap(),
+            ["task", "deliver", "ticket", "--evidence", "complete"]
+        );
+        for bad_attempt in [json!(0), json!(-1), json!("1"), json!(true)] {
+            assert!(
+                build_argv(
+                    "collab_task_start",
+                    &json!({"id":"ticket","expected_revision":4,"attempt":bad_attempt})
+                )
+                .is_err(),
+                "start accepted invalid attempt: {bad_attempt}"
+            );
+            assert!(
+                build_argv(
+                    "collab_task_deliver",
+                    &json!({"id":"ticket","evidence":"complete","attempt":bad_attempt})
+                )
+                .is_err(),
+                "deliver accepted invalid attempt: {bad_attempt}"
+            );
+        }
+    }
+
+    #[test]
+    fn queue_parity_invitation_omits_inline_long_horizon_and_publish_forwards_it() {
+        let definitions = tools();
+        let invite = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "collab_board_invite")
+            .unwrap();
+        let invite_props = invite["inputSchema"]["properties"].as_object().unwrap();
+        assert!(invite_props.contains_key("one_shot"));
+        for field in [
+            "long_horizon_content",
+            "long_horizon_every_ms",
+            "long_horizon_repeat",
+            "long_horizon_ttl_seconds",
+        ] {
+            assert!(
+                !invite_props.contains_key(field),
+                "invite schema unexpectedly exposes {field}"
+            );
+        }
+        let one_shot = build_argv(
+            "collab_board_invite",
+            &json!({"id":"ticket","to":"peer","expected_revision":1,"one_shot":true}),
+        )
+        .unwrap();
+        assert!(one_shot.iter().any(|argument| argument == "--one-shot"));
+        assert!(build_argv(
+            "collab_board_invite",
+            &json!({
+                "id":"ticket",
+                "to":"peer",
+                "expected_revision":1,
+                "long_horizon_content":"rejected"
+            }),
+        )
+        .is_err());
+
+        let publish = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "collab_board_publish")
+            .unwrap();
+        let publish_props = publish["inputSchema"]["properties"].as_object().unwrap();
+        for field in [
+            "long_horizon_content",
+            "long_horizon_every_ms",
+            "long_horizon_repeat",
+            "long_horizon_ttl_seconds",
+        ] {
+            assert!(
+                publish_props.contains_key(field),
+                "publish schema missing {field}"
+            );
+        }
+        let long_horizon = build_argv(
+            "collab_board_publish",
+            &json!({
+                "id":"ticket",
+                "title":"Title",
+                "description":"Desc",
+                "delivery_condition":"Deliv",
+                "test_condition":"Test",
+                "long_horizon_content":"Continue the queue flow",
+                "long_horizon_every_ms":3600000,
+                "long_horizon_repeat":3,
+                "long_horizon_ttl_seconds":7200
+            }),
+        )
+        .unwrap();
+        for expected in [
+            ["--long-horizon-content", "Continue the queue flow"],
+            ["--long-horizon-every-ms", "3600000"],
+            ["--long-horizon-repeat", "3"],
+            ["--long-horizon-ttl-seconds", "7200"],
+        ] {
+            assert!(long_horizon.windows(2).any(|args| args == expected));
+        }
+    }
+
+    #[test]
+    fn queue_parity_receive_is_optional_and_consume_once() {
+        assert_eq!(build_argv("collab_recv", &json!({})).unwrap(), ["recv"]);
+        let definitions = tools();
+        let recv = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "collab_recv")
+            .unwrap();
+        assert_eq!(recv["inputSchema"]["required"], json!([]));
+        assert!(recv["description"]
+            .as_str()
+            .unwrap()
+            .contains("consume once"));
+        assert!(!recv["description"]
+            .as_str()
+            .unwrap()
+            .contains("replay a committed receive"));
+    }
+
+    #[test]
+    fn queue_parity_block_description_distinguishes_request_and_approved_state() {
+        let definitions = tools();
+        let block = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "collab_task_block")
+            .unwrap();
+        let description = block["description"].as_str().unwrap();
+        assert!(description.contains("remains pending"));
+        assert!(description.contains("approves blocked status"));
+    }
+}

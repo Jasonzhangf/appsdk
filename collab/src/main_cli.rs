@@ -771,7 +771,7 @@ pub(crate) enum Cmd {
         /// Seconds to opt in to waiting for new mail; 0 checks once
         #[arg(long, default_value_t = 0)]
         timeout: u64,
-        /// Replay one committed receive identity instead of consuming new mail
+        /// Optional trace identifier for this consume-once receive; repeating it does not replay consumed mail
         #[arg(long = "receive-id")]
         receive_id: Option<String>,
     },

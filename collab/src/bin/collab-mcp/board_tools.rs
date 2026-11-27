@@ -27,11 +27,9 @@ pub fn tools() -> Vec<Value> {
         .iter_mut()
         .find(|entry| entry["name"] == "collab_board_publish")
         .unwrap();
-    for field in [
-        "work_kind",
-        "prefer_role",
-        "executor",
-    ] {
+    publish["inputSchema"]["properties"]["depends_on"] =
+        json!({"type":"array","items":{"type":"string"}});
+    for field in ["work_kind", "prefer_role", "executor"] {
         publish["inputSchema"]["properties"][field] = json!({"type":"string"});
     }
     for entry in tools.iter_mut().filter(|entry| {
@@ -46,6 +44,10 @@ pub fn tools() -> Vec<Value> {
         fields["long_horizon_repeat"] = json!({"type":"integer","minimum":1,"maximum":100});
         fields["long_horizon_ttl_seconds"] = json!({"type":"integer","minimum":1});
     }
+    tools
+        .iter_mut()
+        .find(|entry| entry["name"] == "collab_board_invite")
+        .unwrap()["inputSchema"]["properties"]["one_shot"] = json!({"type":"boolean"});
     tools
 }
 
@@ -166,10 +168,31 @@ pub fn argv(name: &str, args: &Value) -> Result<Option<Vec<String>>, String> {
                 ] {
                     optional_flag(&mut argv, args, key, flag)?;
                 }
+                if let Some(dependencies) = args.get("depends_on") {
+                    let dependencies = dependencies
+                        .as_array()
+                        .ok_or("depends_on must be an array of task IDs")?;
+                    if !dependencies.is_empty() {
+                        argv.push("--depends-on".into());
+                        for dependency in dependencies {
+                            argv.push(
+                                dependency
+                                    .as_str()
+                                    .ok_or("depends_on must contain task ID strings")?
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                }
             }
         }
         "claim" | "dispatch" => {}
-        "invite" => argv.extend(["--to".into(), required(args, "to")?]),
+        "invite" => {
+            argv.extend(["--to".into(), required(args, "to")?]);
+            if boolean(args, "one_shot")? {
+                argv.push("--one-shot".into());
+            }
+        }
         "respond" => {
             let accept = boolean(args, "accept")?;
             let decline = boolean(args, "decline")?;

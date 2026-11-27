@@ -497,6 +497,12 @@ fn board_patrol_worker_checked(
             .filter(|gate| gate.last_poll_idle)
             .and_then(|gate| gate.idle_episode_start_ms)
             .filter(|start| *start > 0 && *start <= now)
+            .or_else(|| {
+                super::worker_agent_facts(server, &state, worker)
+                    .1
+                    .and_then(|fact| fact.idle_since_ms)
+                    .filter(|start| *start > 0 && *start <= now)
+            })
             .unwrap_or(now)
     } else {
         0
@@ -1154,22 +1160,7 @@ pub(super) fn current_board_patrol_activity(
             })
         }
         crate::proto::TransportKind::Rex => {
-            // Rex self-report does not carry a trusted idle interval. Report
-            // the current non-idle projection, and never synthesize Idle.
-            let Ok(scope) = super::GlobalState::canonical_project_scope(&server.root) else {
-                return Ok(AgentActivity::Unknown);
-            };
-            let state = server.state.lock().unwrap();
-            let activity = state
-                .agent_activity
-                .get(scope.as_str())
-                .and_then(|workers| workers.get(&worker.id))
-                .map(|record| record.activity)
-                .unwrap_or(AgentActivity::Unknown);
-            Ok(match activity {
-                AgentActivity::Idle => AgentActivity::Unknown,
-                other => other,
-            })
+            super::rex_monitor::observe_current_patrol_activity(server, worker)
         }
     }
 }
@@ -4054,5 +4045,135 @@ mod tests {
             Some("key")
         );
         assert_eq!(accumulator.dispatch_gap_delivery_state, "delivered");
+    }
+
+    #[test]
+    fn board_idle_patrol_seeds_first_poll_from_fresh_activity_idle_since() {
+        use super::super::name_state::{AgentActivity, AgentActivityRecord};
+        let (mut server, root) = test_server();
+        let worker = seed_board_patrol_owner(&server, "alice", "thread-alice-seeded");
+        occupy_board_patrol_name(&server, &worker, "Alice");
+        let session_id = worker
+            .transport
+            .as_ref()
+            .unwrap()
+            .session_id
+            .clone()
+            .unwrap();
+        add_board_patrol_task(&server, "T1", "alice", "Alice", &session_id, 1);
+        install_appserver_statuses(
+            &mut server,
+            vec![("thread-alice-seeded".into(), "idle".into())],
+        );
+        let scope = super::super::global_state::GlobalState::canonical_project_scope(&server.root)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        let now = super::super::state::now_ms();
+        let observed_idle_since = now - 1_900_000;
+        server
+            .commit(&[super::super::state::Event::AgentActivityObserved {
+                activity: AgentActivityRecord {
+                    project_scope: scope,
+                    worker_id: "alice".into(),
+                    session_id,
+                    activity: AgentActivity::Idle,
+                    background: false,
+                    reason: "fresh live idle observation".into(),
+                    observed_ms: now,
+                    idle_since_ms: Some(observed_idle_since),
+                },
+            }]);
+        tick_at(&server, now);
+        assert_eq!(
+            server.state.lock().unwrap().board_patrol_notice_ids.len(),
+            1,
+            "first patrol poll must seed idle episode from fresh activity.idle_since_ms"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn waiting_and_blocked_tasks_free_slot_for_queued_ticket_continuation() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+
+        for paused_status in ["waiting", "blocked"] {
+            let (server, root) = test_server();
+            seed_master(&server);
+            seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+            seed_undispatched_public_ticket(&server, "T1", "master", true);
+            seed_undispatched_public_ticket(&server, "T2", "master", true);
+            let slot = peer_stable_name(&server, "peer");
+            {
+                let mut state = server.state.lock().unwrap();
+                let t1 = state.tasks.get_mut("T1").unwrap();
+                t1.owner = "peer".into();
+                t1.status = paused_status.into();
+                let t2 = state.tasks.get_mut("T2").unwrap();
+                t2.status = "pending".into();
+                state.ticket_phases.retain(|p| p.task_id != "T1" && p.task_id != "T2");
+                if let Some(workers) = state
+                    .agent_activity
+                    .values_mut()
+                    .find(|workers| workers.contains_key("peer"))
+                {
+                    if let Some(act) = workers.get_mut("peer") {
+                        act.idle_since_ms = Some(act.observed_ms);
+                    }
+                }
+                state.ticket_phases.push(TicketPhaseRecord {
+                    task_id: "T1".into(),
+                    phase: TicketPhaseKind::Execute,
+                    batch: 1,
+                    priority: "p0".into(),
+                    status: TicketPhaseStatus::Running,
+                    slot_name: Some(slot.clone()),
+                    binding_generation: 1,
+                    enqueue_seq: 1,
+                    attempt_generation: 1,
+                    depends_on: Vec::new(),
+                    route_group: None,
+                    wait_reason: None,
+                    result: None,
+                });
+                state.ticket_phases.push(TicketPhaseRecord {
+                    task_id: "T2".into(),
+                    phase: TicketPhaseKind::Execute,
+                    batch: 1,
+                    priority: "p2".into(),
+                    status: TicketPhaseStatus::Queued,
+                    slot_name: Some(slot.clone()),
+                    binding_generation: 0,
+                    enqueue_seq: 2,
+                    attempt_generation: 0,
+                    depends_on: Vec::new(),
+                    route_group: None,
+                    wait_reason: Some("queued while T1 runs".into()),
+                    result: None,
+                });
+                let control =
+                    super::super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+                        .load()
+                        .unwrap();
+                let route = super::super::server_route_scope(&server, &state)
+                    .unwrap()
+                    .unwrap();
+                let events = super::super::ticket_continuation_events(
+                    &state, &control, &route, "peer", &[], false,
+                );
+                assert!(
+                    !events.is_empty(),
+                    "paused_status={paused_status} must allow claiming queued T2"
+                );
+                server
+                    .commit_locked_checked_with_control(&mut state, &events, &control)
+                    .unwrap();
+                assert_eq!(state.tasks["T2"].owner, "peer");
+                assert_eq!(state.tasks["T2"].status, "working");
+                assert_eq!(state.tasks["T1"].status, paused_status);
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

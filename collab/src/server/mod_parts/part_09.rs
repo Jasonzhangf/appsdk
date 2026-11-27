@@ -1022,9 +1022,55 @@ fn commit_task_close_locked(
         }
     }
     commit_task_close_events(server, st, control, &close_events)?;
-    let notifications =
+    let mut notifications =
         release_dependents_of_closed_task_with_control(server, st, &closed.id, control)
             .map_err(|error| Resp::err(format!("TASK_CLOSE_RELEASE_FAILED: {error}")))?;
+    if let Ok(Some(route)) = server_route_scope(server, st) {
+        let loaded;
+        let resolved_control = match control {
+            Some(control) => Some(control),
+            None => {
+                match binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+                {
+                    Ok(control) => {
+                        loaded = control;
+                        Some(&loaded)
+                    }
+                    Err(_) => None,
+                }
+            }
+        };
+        if let Some(resolved_control) = resolved_control {
+            let mut continuation_events = ticket_continuation_events(
+                st,
+                resolved_control,
+                &route,
+                &closed.owner,
+                &[],
+                false,
+            );
+            continuation_events.extend(ticket_dependency_release_events_for_task_id(
+                st,
+                resolved_control,
+                &route,
+                &closed.id,
+                &[],
+                &closed.owner,
+            ));
+            if !continuation_events.is_empty() {
+                for event in &continuation_events {
+                    if let Event::WakeBound {
+                        message_id,
+                        subscription_id,
+                    } = event
+                    {
+                        notifications.push((message_id.clone(), subscription_id.clone()));
+                    }
+                }
+                commit_task_close_events(server, st, control, &continuation_events)?;
+            }
+        }
+    }
     let (delivery_complete, completion_missing) = st.delivery_completion_projection(&closed.id);
     let stale_workers = stale_worker_views(st, &|worker| worker_presence_in_state(server, st, worker));
     Ok(TaskCloseCommitOutcome {
@@ -1169,6 +1215,7 @@ fn release_dependents_of_closed_task_with_control(
         waiter_task.updated_ms = now_ms();
         let subscription = st
             .matching_subscription(&waiter, "resource-released", Some(closed_id), now_ms())
+            .or_else(|| st.matching_subscription(&waiter, "direct-message", None, now_ms()))
             .cloned();
         let mut events = vec![
             Event::TaskUpdated { task: waiter_task },
@@ -2645,7 +2692,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         master
     };
     let recorded_unusable = serde_json::Value::Null;
-    let next_actions: Vec<String> = tasks
+    let mut next_actions: Vec<String> = tasks
         .iter()
         .filter_map(|task| {
             task.get("next_step")
@@ -2653,6 +2700,43 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
                 .map(str::to_owned)
         })
         .collect();
+    if unread_count > 0 {
+        let is_dsh = worker
+            .transport
+            .as_ref()
+            .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Dsh);
+        if is_dsh {
+            next_actions.push(format!(
+                "Inspect {unread_count} unread message(s) via collab inbox (DSH owns delivery; do not run collab recv)"
+            ));
+        } else {
+            next_actions.push(format!(
+                "Read {unread_count} unread message(s) first: collab recv"
+            ));
+        }
+    }
+    for task in &tasks {
+        let owner_matches = task.get("owner").and_then(serde_json::Value::as_str)
+            == Some(worker_id.as_str());
+        let status = task
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let has_next_step = task
+            .get("next_step")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|step| !step.trim().is_empty());
+        if owner_matches
+            && !matches!(status, "closed" | "cancelled")
+            && !has_next_step
+        {
+            if let Some(task_id) = task.get("id").and_then(serde_json::Value::as_str) {
+                next_actions.push(format!(
+                    "Advance task {task_id} (status={status}): collab task status {task_id}"
+                ));
+            }
+        }
+    }
     let operations: Vec<serde_json::Value> = {
         let mut operations = Vec::new();
         let master_assigned = master

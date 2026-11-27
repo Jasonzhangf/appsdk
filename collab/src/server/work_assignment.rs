@@ -1542,14 +1542,27 @@ pub(crate) fn ticket_continuation_events_with_pending(
         &owned
     };
 
-    // One active claim per slot. A claimed or running phase already occupies
-    // the slot's execution capacity.
+    // One active claim per slot. A claimed or running phase occupies the slot's
+    // active execution capacity unless its task entered a paused ("waiting" or
+    // "blocked") or delivered/terminal state.
     if phases.iter().any(|phase| {
-        phase.slot_name.as_deref() == Some(slot_name.as_str())
-            && matches!(
+        if phase.slot_name.as_deref() != Some(slot_name.as_str())
+            || !matches!(
                 phase.status,
                 TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
             )
+        {
+            return false;
+        }
+        let publishing = pending_task.is_some_and(|task| task.id == phase.task_id);
+        let task_status = pending_task
+            .filter(|_| publishing)
+            .or_else(|| state.tasks.get(&phase.task_id))
+            .map(|task| task.status.as_str());
+        !matches!(
+            task_status,
+            Some("waiting" | "blocked" | "delivered" | "accepted" | "merged" | "closed" | "cancelled")
+        )
     }) {
         return Vec::new();
     }
@@ -1584,6 +1597,14 @@ pub(crate) fn ticket_continuation_events_with_pending(
         let publishing = pending_task.is_some_and(|task| task.id == *task_id);
         let task = pending_task.filter(|_| publishing).or_else(|| state.tasks.get(task_id));
         let details = pending_details.filter(|_| publishing).or_else(|| state.board_details.get(task_id));
+        if task.is_some_and(|task| {
+            matches!(
+                task.status.as_str(),
+                "waiting" | "blocked" | "closed" | "cancelled"
+            )
+        }) {
+            return false;
+        }
         !task.is_some_and(|task| task.status == "pending")
             || !details.is_some_and(|details| details.long_horizon.is_some())
     });
@@ -1736,6 +1757,24 @@ pub(crate) fn ticket_dependency_release_events(
     completed: &crate::server::ticket_state::TicketPhaseRecord,
     exclude_worker: &str,
 ) -> Vec<Event> {
+    ticket_dependency_release_events_for_task_id(
+        state,
+        control,
+        route,
+        &completed.task_id,
+        std::slice::from_ref(completed),
+        exclude_worker,
+    )
+}
+
+pub(crate) fn ticket_dependency_release_events_for_task_id(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    completed_task_id: &str,
+    pending_phases: &[crate::server::ticket_state::TicketPhaseRecord],
+    exclude_worker: &str,
+) -> Vec<Event> {
     use crate::server::ticket_state::TicketPhaseStatus;
 
     let mut slots: Vec<String> = state
@@ -1743,7 +1782,7 @@ pub(crate) fn ticket_dependency_release_events(
         .iter()
         .filter(|phase| {
             phase.status == TicketPhaseStatus::Queued
-                && phase.depends_on.iter().any(|dep| dep == &completed.task_id)
+                && phase.depends_on.iter().any(|dep| dep == completed_task_id)
         })
         .filter_map(|phase| phase.slot_name.clone())
         .collect();
@@ -1769,7 +1808,7 @@ pub(crate) fn ticket_dependency_release_events(
             control,
             route,
             &worker_id,
-            std::slice::from_ref(completed),
+            pending_phases,
             false,
         ));
     }

@@ -447,7 +447,7 @@ impl super::ProjectRuntimeManager {
         // call. Recovered or already queued occurrences are never re-attempted.
         if queued_now {
             if let Some(subscription_id) = wake_subscription {
-                let attempt = super::attempt_notification_detailed_with_at(
+                let attempt = super::attempt_notification_detailed_with_rex_recovery(
                     target,
                     message_id,
                     &subscription_id,

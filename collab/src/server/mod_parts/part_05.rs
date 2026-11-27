@@ -961,6 +961,8 @@ fn attempt_tmux_notification_with_retry(
     if !state.scheduler_message_deliverable(message_id) {
         return NotificationAttempt::NotAttempted("scheduler admission is not deliverable".into());
     }
+    let mut cached_control: Option<binding_slot::BindingControlSet> = None;
+    let mut cached_route: Option<Option<RouteScope>> = None;
     let has_patrol_notice = state.board_patrol_notice_ids.iter().any(|id| {
         state
             .msgs
@@ -968,16 +970,21 @@ fn attempt_tmux_notification_with_retry(
             .is_some_and(|message| message.to == recipient)
     });
     let patrol_current = if has_patrol_notice {
-        let control =
-            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-                Ok(control) => control,
+        let control = match cached_control.as_ref() {
+            Some(control) => control,
+            None => match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => cached_control.insert(control),
                 Err(error) => return NotificationAttempt::NotAttempted(error),
-            };
-        let route = match server_route_scope(server, &state) {
-            Ok(route) => route,
-            Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+            },
         };
-        match state::board_patrol_eligible_task_ids(&state, &control, route.as_ref(), recipient) {
+        let route = match cached_route.as_ref() {
+            Some(route) => route.as_ref(),
+            None => match server_route_scope(server, &state) {
+                Ok(route) => cached_route.insert(route).as_ref(),
+                Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+            },
+        };
+        match state::board_patrol_eligible_task_ids(&state, control, route, recipient) {
             Ok(tasks) => tasks.is_some_and(|tasks| !tasks.is_empty()),
             Err(error) => return NotificationAttempt::NotAttempted(error),
         }
@@ -998,21 +1005,36 @@ fn attempt_tmux_notification_with_retry(
         if !has_typed_wake {
             None
         } else {
-            let route = match server_route_scope(server, &state) {
-                Ok(Some(route)) => route,
-                Ok(None) => return NotificationAttempt::Rejected(
+            let route = match cached_route.as_ref() {
+                Some(Some(route)) => route.clone(),
+                Some(None) => return NotificationAttempt::Rejected(
                     "CURRENT_MAP_ROUTE_UNAVAILABLE: typed wake requires a registered project route"
                         .into(),
                 ),
-                Err(error) => return NotificationAttempt::Rejected(error.into()),
+                None => match server_route_scope(server, &state) {
+                    Ok(Some(route)) => {
+                        cached_route = Some(Some(route.clone()));
+                        route
+                    }
+                    Ok(None) => {
+                        return NotificationAttempt::Rejected(
+                            "CURRENT_MAP_ROUTE_UNAVAILABLE: typed wake requires a registered project route"
+                                .into(),
+                        );
+                    }
+                    Err(error) => return NotificationAttempt::Rejected(error.into()),
+                },
             };
-            let control = match binding_store::BindingControlStore::new(
-                server.host_paths.state_root(),
-            )
-            .load()
-            {
-                Ok(control) => control,
-                Err(error) => return NotificationAttempt::Rejected(error),
+            let control = match cached_control.take() {
+                Some(control) => control,
+                None => match binding_store::BindingControlStore::new(
+                    server.host_paths.state_root(),
+                )
+                .load()
+                {
+                    Ok(control) => control,
+                    Err(error) => return NotificationAttempt::Rejected(error),
+                },
             };
             let Some(project) = state.global.lookup_project_for_route(&route) else {
                 return NotificationAttempt::Rejected(
@@ -1103,19 +1125,30 @@ fn attempt_tmux_notification_with_retry(
         return NotificationAttempt::Consumed;
     }
     let (selected_binding, rex_expected_agent_kind) = if transport.kind == TransportKind::Rex {
-        let route = match server_route_scope(server, &state) {
-            Ok(route) => route,
-            Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+        let route = if let Some((route, _, _)) = typed_wake_authority.as_ref() {
+            Some(route.clone())
+        } else if let Some(route) = cached_route.as_ref() {
+            route.clone()
+        } else {
+            match server_route_scope(server, &state) {
+                Ok(route) => route,
+                Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+            }
         };
-        let control =
+        let control_ref = if let Some((_, control, _)) = typed_wake_authority.as_ref() {
+            control
+        } else if let Some(control) = cached_control.as_ref() {
+            control
+        } else {
             match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-                Ok(control) => control,
+                Ok(control) => cached_control.insert(control),
                 Err(error) => return NotificationAttempt::NotAttempted(error),
-            };
+            }
+        };
         let expected_kind = route
             .as_ref()
             .and_then(|route| {
-                control
+                control_ref
                     .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)
                     .ok()
                     .flatten()
@@ -1123,7 +1156,7 @@ fn attempt_tmux_notification_with_retry(
             .and_then(|slot| slot.active_binding())
             .and_then(|value| value.host.agent_kind.as_deref())
             .and_then(crate::host_runtime::AgentKind::from_str);
-        match select_current_rex_delivery_binding(&control, route.as_ref(), recipient, transport) {
+        match select_current_rex_delivery_binding(control_ref, route.as_ref(), recipient, transport) {
             Ok(binding) => (Some(binding), expected_kind),
             Err(error) => return NotificationAttempt::NotAttempted(error),
         }

@@ -917,3 +917,160 @@ fn submit_activity_persists_rex_execution_and_status_when_target_carries_agent_k
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn submit_activity_tracks_and_resets_idle_since_ms_for_rex_online_idle() {
+    let monitor_target = target();
+    let (server, root) = rex_server(&monitor_target);
+    let scope = crate::server::GlobalState::canonical_project_scope(&server.root)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    let owner = RexProgramStatusOwner {
+        pid: 4242,
+        name: "codex".into(),
+    };
+    let pre_restart_idle = AgentActivityRecord {
+        project_scope: scope.clone(),
+        worker_id: "worker".into(),
+        session_id: monitor_target.agent_session_id.clone(),
+        activity: AgentActivity::Idle,
+        background: false,
+        reason: "stale pre-restart".into(),
+        observed_ms: 1000,
+        idle_since_ms: Some(1000),
+    };
+    {
+        let mut state = server.state.lock().unwrap();
+        state.rex_executions.insert(
+            "worker".into(),
+            ObservedRexExecution {
+                endpoint: monitor_target.endpoint.clone(),
+                agent_session_id: monitor_target.agent_session_id.clone(),
+                owner: owner.clone(),
+            },
+        );
+        state
+            .agent_activity
+            .entry(scope.clone())
+            .or_default()
+            .insert("worker".into(), pre_restart_idle);
+    }
+
+    assert!(submit_activity_with_execution(
+        &server,
+        "worker",
+        &monitor_target,
+        RexProjection {
+            presence: AgentPresence::Online,
+            activity: AgentActivity::Idle,
+            reason: "first sample".into(),
+        },
+        Some(&owner),
+    ));
+    let first_start = server
+        .state
+        .lock()
+        .unwrap()
+        .agent_activity
+        .get(&scope)
+        .and_then(|workers| workers.get("worker"))
+        .and_then(|record| record.idle_since_ms)
+        .expect("first online-idle sample sets idle_since_ms");
+    assert!(first_start > 1000, "first sample must not reuse pre-restart start");
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(submit_activity_with_execution(
+        &server,
+        "worker",
+        &monitor_target,
+        RexProjection {
+            presence: AgentPresence::Online,
+            activity: AgentActivity::Idle,
+            reason: "second sample".into(),
+        },
+        Some(&owner),
+    ));
+    let continued_start = server
+        .state
+        .lock()
+        .unwrap()
+        .agent_activity
+        .get(&scope)
+        .and_then(|workers| workers.get("worker"))
+        .and_then(|record| record.idle_since_ms);
+    assert_eq!(continued_start, Some(first_start));
+
+    assert!(submit_activity_with_execution(
+        &server,
+        "worker",
+        &monitor_target,
+        RexProjection {
+            presence: AgentPresence::Online,
+            activity: AgentActivity::Busy,
+            reason: "working".into(),
+        },
+        Some(&owner),
+    ));
+    let busy_start = server
+        .state
+        .lock()
+        .unwrap()
+        .agent_activity
+        .get(&scope)
+        .and_then(|workers| workers.get("worker"))
+        .and_then(|record| record.idle_since_ms);
+    assert_eq!(busy_start, None);
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(submit_activity_with_execution(
+        &server,
+        "worker",
+        &monitor_target,
+        RexProjection {
+            presence: AgentPresence::Online,
+            activity: AgentActivity::Idle,
+            reason: "back to idle".into(),
+        },
+        Some(&owner),
+    ));
+    let reset_start = server
+        .state
+        .lock()
+        .unwrap()
+        .agent_activity
+        .get(&scope)
+        .and_then(|workers| workers.get("worker"))
+        .and_then(|record| record.idle_since_ms)
+        .expect("fresh episode after Busy");
+    assert!(reset_start > first_start);
+
+    let new_owner = RexProgramStatusOwner {
+        pid: 4243,
+        name: "codex".into(),
+    };
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(submit_activity_with_execution(
+        &server,
+        "worker",
+        &monitor_target,
+        RexProjection {
+            presence: AgentPresence::Online,
+            activity: AgentActivity::Idle,
+            reason: "restarted owner".into(),
+        },
+        Some(&new_owner),
+    ));
+    let restarted_start = server
+        .state
+        .lock()
+        .unwrap()
+        .agent_activity
+        .get(&scope)
+        .and_then(|workers| workers.get("worker"))
+        .and_then(|record| record.idle_since_ms)
+        .expect("fresh episode after owner pid change");
+    assert!(restarted_start > reset_start);
+
+    std::fs::remove_dir_all(root).unwrap();
+}

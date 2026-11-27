@@ -326,10 +326,96 @@ async fn publish_projection(
     let worker_id = worker_id.to_owned();
     let target = target.clone();
     tokio::task::spawn_blocking(move || {
-        submit_activity_with_execution(&server, &worker_id, &target, projection, execution.as_ref())
+        let (submitted, claim_notifications) = submit_activity_with_execution_and_claims(
+            &server,
+            &worker_id,
+            &target,
+            projection,
+            execution.as_ref(),
+        );
+        for (message_id, subscription_id) in claim_notifications {
+            super::attempt_notification_detailed_with_rex_recovery(
+                &server,
+                &message_id,
+                &subscription_id,
+                now_ms(),
+            );
+        }
+        submitted
     })
     .await
     .unwrap_or(false)
+}
+
+/// Live-query one Rex endpoint for idle/busy patrol when cached state is missing
+/// or stale, using the same foreground + OSC 7501 owner projection as `rex_monitor`.
+pub(super) fn observe_current_patrol_activity(
+    server: &Server,
+    worker: &super::state::WorkerRec,
+) -> Result<AgentActivity, String> {
+    let Some(endpoint) = worker
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.rex_endpoint.as_ref())
+        .cloned()
+    else {
+        return Ok(AgentActivity::Unknown);
+    };
+    let control = super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .ok();
+    let (expected_kind, mut execution) = {
+        let state = server.state.lock().unwrap();
+        let route = super::server_route_scope(server, &state).ok().flatten();
+        let expected_kind = route
+            .as_ref()
+            .zip(control.as_ref())
+            .and_then(|(route, control)| {
+                control
+                    .current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|slot| slot.active_binding())
+                    .and_then(|value| value.host.agent_kind.as_deref())
+                    .and_then(crate::host_runtime::AgentKind::from_str)
+            });
+        let execution = state
+            .rex_executions
+            .get(&worker.id)
+            .filter(|record| record.endpoint == endpoint)
+            .map(|record| record.owner.clone());
+        (expected_kind, execution)
+    };
+    let future_endpoint = endpoint.clone();
+    let observation = if tokio::runtime::Handle::try_current().is_ok() {
+        let handle = server
+            .rex_monitor
+            .runtime_handle()
+            .unwrap_or_else(tokio::runtime::Handle::current);
+        std::thread::spawn(move || handle.block_on(observe_current(&future_endpoint)))
+            .join()
+            .map_err(|_| "REX_PATROL_OBSERVE_JOIN_FAILED: worker thread panicked".to_string())?
+    } else if let Some(handle) = server.rex_monitor.runtime_handle() {
+        handle.block_on(observe_current(&future_endpoint))
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?
+            .block_on(observe_current(&future_endpoint))
+    }
+    .map_err(|error| error.to_string())?;
+    let projection = project_observation_with_execution_for(
+        &observation,
+        expected_kind,
+        &mut execution,
+        &|pid| current_process_exists(&endpoint, pid),
+    );
+    Ok(if projection.presence == AgentPresence::Online {
+        projection.activity
+    } else {
+        AgentActivity::Unknown
+    })
 }
 
 /// A local PID probe belongs only to the Rex server that owns that PID.
@@ -629,6 +715,16 @@ fn submit_activity_with_execution(
     projection: RexProjection,
     execution: Option<&RexProgramStatusOwner>,
 ) -> bool {
+    submit_activity_with_execution_and_claims(server, worker_id, target, projection, execution).0
+}
+
+fn submit_activity_with_execution_and_claims(
+    server: &Server,
+    worker_id: &str,
+    target: &MonitorTarget,
+    projection: RexProjection,
+    execution: Option<&RexProgramStatusOwner>,
+) -> (bool, Vec<(String, String)>) {
     let RexProjection {
         presence,
         activity,
@@ -639,16 +735,25 @@ fn submit_activity_with_execution(
             &server.log_path(),
             &format!("REX_MONITOR_SCOPE_UNKNOWN: {worker_id}"),
         );
-        return false;
+        return (false, Vec::new());
+    };
+    let positive_online_idle =
+        presence == AgentPresence::Online && activity == AgentActivity::Idle;
+    let control = if positive_online_idle {
+        super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load()
+            .ok()
+    } else {
+        None
     };
     let observed_ms = now_ms();
     let mut state = server.state.lock().unwrap();
     if !current_target(&state, worker_id)
         .is_some_and(|current| current.matches_state_target(target))
     {
-        return false;
+        return (false, Vec::new());
     }
-    let presence = AgentPresenceRecord {
+    let presence_record = AgentPresenceRecord {
         project_scope: scope.as_str().into(),
         worker_id: worker_id.to_owned(),
         session_id: target.agent_session_id.clone(),
@@ -659,7 +764,44 @@ fn submit_activity_with_execution(
         ),
         observed_ms,
     };
-    let activity = AgentActivityRecord {
+    let same_execution = match execution {
+        Some(owner) => state.rex_executions.get(worker_id).is_some_and(|old| {
+            old.endpoint == target.endpoint
+                && old.agent_session_id == target.agent_session_id
+                && old.owner == *owner
+        }),
+        None => state.rex_executions.get(worker_id).is_none_or(|old| {
+            old.endpoint == target.endpoint && old.agent_session_id == target.agent_session_id
+        }),
+    };
+    let old_activity = state
+        .agent_activity
+        .get(scope.as_str())
+        .and_then(|workers| workers.get(worker_id))
+        .cloned();
+    let idle_since_ms = if positive_online_idle {
+        // Never extend a pre-restart idle episode across daemon restarts.
+        let is_first = super::observation_epoch::first_observation_since_start(
+            &server.root,
+            &format!("rex-activity:{worker_id}"),
+        );
+        match old_activity.as_ref() {
+            Some(old)
+                if !is_first
+                    && same_execution
+                    && old.session_id == target.agent_session_id
+                    && old.activity == AgentActivity::Idle
+                    && old.observed_ms <= observed_ms
+                    && old.idle_since_ms.is_some_and(|start| observed_ms >= start) =>
+            {
+                old.idle_since_ms
+            }
+            _ => Some(observed_ms),
+        }
+    } else {
+        None
+    };
+    let activity_record = AgentActivityRecord {
         project_scope: scope.as_str().into(),
         worker_id: worker_id.to_owned(),
         session_id: target.agent_session_id.clone(),
@@ -667,7 +809,7 @@ fn submit_activity_with_execution(
         background: false,
         reason,
         observed_ms,
-        idle_since_ms: None,
+        idle_since_ms,
     };
     let mut events = Vec::new();
     if let Some(owner) = execution {
@@ -688,32 +830,68 @@ fn submit_activity_with_execution(
         .get(scope.as_str())
         .and_then(|workers| workers.get(worker_id));
     if old_presence.is_none_or(|old| {
-        old.session_id != presence.session_id
-            || old.presence != presence.presence
-            || old.reason != presence.reason
+        old.session_id != presence_record.session_id
+            || old.presence != presence_record.presence
+            || old.reason != presence_record.reason
     }) {
-        events.push(Event::AgentPresenceObserved { presence });
+        events.push(Event::AgentPresenceObserved {
+            presence: presence_record,
+        });
     }
-    let old_activity = state
-        .agent_activity
-        .get(scope.as_str())
-        .and_then(|workers| workers.get(worker_id));
-    if old_activity.is_none_or(|old| {
-        old.session_id != activity.session_id
-            || old.activity != activity.activity
-            || old.background != activity.background
-            || old.reason != activity.reason
-            || old.idle_since_ms.is_some()
+    if old_activity.as_ref().is_none_or(|old| {
+        old.session_id != activity_record.session_id
+            || old.activity != activity_record.activity
+            || old.background != activity_record.background
+            || old.reason != activity_record.reason
+            || old.idle_since_ms != activity_record.idle_since_ms
     }) {
-        events.push(Event::AgentActivityObserved { activity });
+        events.push(Event::AgentActivityObserved {
+            activity: activity_record,
+        });
     }
-    if !events.is_empty() {
-        if let Err(error) = server.commit_locked_checked(&mut state, &events) {
-            server.report_state_error(&error);
-            return false;
+    let mut claim_notifications = Vec::new();
+    let mut has_continuation = false;
+    if positive_online_idle {
+        if let (Ok(Some(route)), Some(control)) = (super::server_route_scope(server, &state), control.as_ref()) {
+            let continuation = super::ticket_continuation_events(
+                &state,
+                control,
+                &route,
+                worker_id,
+                &[],
+                true,
+            );
+            if !continuation.is_empty() {
+                has_continuation = true;
+                for event in &continuation {
+                    if let Event::WakeBound {
+                        message_id,
+                        subscription_id,
+                    } = event
+                    {
+                        claim_notifications.push((message_id.clone(), subscription_id.clone()));
+                    }
+                }
+                events.extend(continuation);
+            }
         }
     }
-    true
+    if !events.is_empty() {
+        let commit = if has_continuation {
+            if let Some(control) = control.as_ref() {
+                server.commit_locked_checked_with_control(&mut state, &events, control)
+            } else {
+                server.commit_locked_checked(&mut state, &events)
+            }
+        } else {
+            server.commit_locked_checked(&mut state, &events)
+        };
+        if let Err(error) = commit {
+            server.report_state_error(&error);
+            return (false, Vec::new());
+        }
+    }
+    (true, claim_notifications)
 }
 
 fn retire(handle: &tokio::runtime::Handle, task: RexTask) {

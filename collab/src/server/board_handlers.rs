@@ -291,23 +291,33 @@ fn board_task_response(server: &Server, state: &State, task_id: &str, viewer: &s
         Ok(route) => route,
         Err(error) => return Resp::err(error),
     };
-    let master = current_master_worker_id(state, route.as_ref());
     let control =
         match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
             Ok(control) => control,
             Err(error) => return Resp::err(error),
         };
+    board_task_response_from_control(state, task_id, viewer, &control, route.as_ref())
+}
+
+fn board_task_response_from_control(
+    state: &State,
+    task_id: &str,
+    viewer: &str,
+    control: &binding_slot::BindingControlSet,
+    route: Option<&RouteScope>,
+) -> Resp {
+    let master = current_master_worker_id(state, route);
     let result = state
         .tasks
         .get(task_id)
         .map(|task| {
             board_task_view_with_master(
                 state,
-                &control,
+                control,
                 task,
                 Some(viewer),
                 master.as_deref(),
-                route.as_ref(),
+                route,
             )
         })
         .transpose();
@@ -669,21 +679,12 @@ struct OwnerExecution {
 }
 
 fn resolve_owner_execution(
-    server: &Server,
     state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
     id: &str,
     owner: &str,
 ) -> Result<OwnerExecution, Resp> {
-    let route = match server_route_scope(server, state) {
-        Ok(Some(route)) => route,
-        Ok(None) => return Err(Resp::err("project route is not ready")),
-        Err(error) => return Err(Resp::err(error)),
-    };
-    let control =
-        match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-            Ok(control) => control,
-            Err(error) => return Err(Resp::err(error)),
-        };
     let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, owner)
     {
         Ok(Some(slot)) => slot,
@@ -809,7 +810,18 @@ fn board_admit_legacy_locked(
     if let Err(error) = legacy_admission_eligibility(state, details, task) {
         return error;
     }
-    let execution = match resolve_owner_execution(server, state, id, &task.owner) {
+    let route = match server_route_scope(server, state) {
+        Ok(Some(route)) => route,
+        Ok(None) => return Resp::err("project route is not ready"),
+        Err(error) => return Resp::err(error),
+    };
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+    {
+        Ok(control) => control,
+        Err(error) => return Resp::err(error),
+    };
+    let execution = match resolve_owner_execution(state, &control, &route, id, &task.owner) {
         Ok(execution) => execution,
         Err(error) => return error,
     };
@@ -872,7 +884,14 @@ fn board_admit_legacy_locked(
     let mut admitted = details.clone();
     admitted.admitted = true;
     admitted.revision = revision;
-    let auto_notice = match board_auto_notice_events(server, state, None, task, actor, "legacy ticket was admitted") {
+    let auto_notice = match board_auto_notice_events_current(
+        state,
+        &control,
+        &route,
+        task,
+        actor,
+        "legacy ticket was admitted",
+    ) {
         Ok(notice) => notice,
         Err(error) => return error,
     };
@@ -884,13 +903,14 @@ fn board_admit_legacy_locked(
         Event::TicketPhaseRecorded { phase },
     ];
     events.extend(auto_notice.events.clone());
-    if let Err(error) = server.commit_locked_checked(
+    if let Err(error) = server.commit_locked_checked_with_control(
         state,
         &events,
+        &control,
     ) {
         return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
     }
-    let mut response = board_task_response(server, state, id, actor);
+    let mut response = board_task_response_from_control(state, id, actor, &control, Some(&route));
     if let Some(object) = response.data.as_object_mut() {
         object.insert("ticket".into(), ticket_projection(state, id));
         if let Some(notice) = auto_notice.notice.as_ref() {
@@ -952,8 +972,19 @@ fn board_backfill_execute_locked(
             json!({"task_id": id}),
         );
     }
+    let route = match server_route_scope(server, &state) {
+        Ok(Some(route)) => route,
+        Ok(None) => return Resp::err("project route is not ready"),
+        Err(error) => return Resp::err(error),
+    };
+    let control = match binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+    {
+        Ok(control) => control,
+        Err(error) => return Resp::err(error),
+    };
 
-    let execution = match resolve_owner_execution(server, &state, &id, &task.owner) {
+    let execution = match resolve_owner_execution(&state, &control, &route, &id, &task.owner) {
         Ok(execution) => execution,
         Err(error) => return error,
     };
@@ -1025,16 +1056,16 @@ fn board_backfill_execute_locked(
     let Some(task) = state.tasks.get(&id).cloned() else {
         return Resp::err("task not found");
     };
-    let auto_notice = match board_auto_notice_events(server, &state, None, &task, &actor, "execute phase was repaired") {
+    let auto_notice = match board_auto_notice_events_current(&state, &control, &route, &task, &actor, "execute phase was repaired") {
         Ok(notice) => notice,
         Err(error) => return error,
     };
     let mut events = vec![Event::TicketPhaseRecorded { phase }];
     events.extend(auto_notice.events.clone());
-    if let Err(error) = server.commit_locked_checked(&mut state, &events) {
+    if let Err(error) = server.commit_locked_checked_with_control(&mut state, &events, &control) {
         return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
     }
-    let mut response = board_task_response(server, &state, &id, &actor);
+    let mut response = board_task_response_from_control(&state, &id, &actor, &control, Some(&route));
     if let Some(object) = response.data.as_object_mut() {
         object.insert("ticket".into(), ticket_projection(&state, &id));
         if let Some(notice) = auto_notice.notice.as_ref() {
@@ -1070,13 +1101,25 @@ fn board_check_actor(state: &State, actor: &str, token: &str) -> Result<(), Resp
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static BOARD_ADMITTED_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&mut State)>>> =
+        std::cell::RefCell::new(None);
+}
+
 fn board_current_map_actor_gate(
-    state: &State,
+    state: &mut State,
     actor: &str,
-    token: &str,
+    _token: &str,
     task_id: &str,
 ) -> Result<(), Resp> {
-    board_check_actor(state, actor, token)?;
+    // The transaction owner authenticated this actor under the same lock.
+    #[cfg(test)]
+    BOARD_ADMITTED_TEST_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook(state);
+        }
+    });
     if let Some(task) = state.tasks.get(task_id) {
         if !board_task_visible(state, task, Some(actor)) {
             return Err(Resp::err(
@@ -1085,6 +1128,33 @@ fn board_current_map_actor_gate(
         }
     }
     Ok(())
+}
+
+fn board_task_owner_at_route(
+    server: &Server,
+    state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    route: Option<&RouteScope>,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), Resp> {
+    match control.zip(route) {
+        Some((control, route)) => task_owner_gate_with_control(state, control, route, task_id, actor),
+        None => task_owner_gate_maybe_with_control(server, state, control, task_id, actor),
+    }
+}
+
+fn board_master_at_route(
+    server: &Server,
+    state: &State,
+    route: Option<&RouteScope>,
+    actor: &str,
+) -> Result<(), Resp> {
+    match route {
+        Some(route) if current_master_worker_id(state, Some(route)).as_deref() == Some(actor) => Ok(()),
+        Some(_) => Err(Resp::err("BOARD_MASTER_REQUIRED: only the current project master may manage assignments")),
+        None => board_check_master_locked(server, state, actor),
+    }
 }
 
 fn board_task_owner_admission(
@@ -1196,6 +1266,18 @@ fn board_auto_notice_events(
     let route = server_route_scope(server, state)
         .map_err(Resp::err)?
         .ok_or_else(|| Resp::err("BOARD_NOTICE_RECIPIENT_UNRESOLVED: current project route is missing"))?;
+    board_auto_notice_events_with_route(server, state, control, &route, task, actor, change)
+}
+
+fn board_auto_notice_events_with_route(
+    server: &Server,
+    state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    route: &RouteScope,
+    task: &TaskRec,
+    actor: &str,
+    change: &str,
+) -> Result<BoardAutoNoticeEvents, Resp> {
     let loaded;
     let control = if let Some(control) = control {
         control
@@ -1205,7 +1287,7 @@ fn board_auto_notice_events(
             .map_err(Resp::err)?;
         &loaded
     };
-    board_auto_notice_events_current(state, control, &route, task, actor, change)
+    board_auto_notice_events_current(state, control, route, task, actor, change)
 }
 
 fn board_auto_notice_events_current(
@@ -1246,8 +1328,8 @@ fn board_describe_locked(
     server: &Server,
     state: &mut State,
     control: Option<&binding_slot::BindingControlSet>,
+    route: Option<&RouteScope>,
     actor: String,
-    token: String,
     id: String,
     expected_revision: u64,
     title: String,
@@ -1256,14 +1338,27 @@ fn board_describe_locked(
     test_condition: String,
     long_horizon: crate::board::LongHorizonArgs,
 ) -> Resp {
-    if let Err(error) = board_check_actor(state, &actor, &token) {
-        return error;
-    }
     let Some(mut task) = state.tasks.get(&id).cloned() else {
         return Resp::err("task not found");
     };
-    if task_owner_gate_maybe_with_control(server, state, control, &id, &actor).is_err()
-        && board_check_master_locked(server, state, &actor).is_err()
+    let owner_control;
+    let owner_route;
+    let (control, route) = if control.zip(route).is_none() && state.task_assignment(&id).is_some() {
+        owner_route = match server_route_scope(server, state) {
+            Ok(Some(route)) => route,
+            Ok(None) => return Resp::err("TASK_OWNER_PROJECT_REQUIRED"),
+            Err(error) => return Resp::err(error),
+        };
+        owner_control = match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            Ok(control) => control,
+            Err(error) => return Resp::err(error),
+        };
+        (Some(&owner_control), Some(&owner_route))
+    } else {
+        (control, route)
+    };
+    if board_task_owner_at_route(server, state, control, route, &id, &actor).is_err()
+        && board_master_at_route(server, state, route, &actor).is_err()
     {
         return Resp::err(
             "only the current task owner or current master may describe it",
@@ -1337,10 +1432,34 @@ fn board_describe_locked(
     details.public_visibility |= !is_managed_subagent(state, &actor);
     details.revision += 1;
     task.updated_ms = now_ms();
-    let auto_notice = match board_auto_notice_events(
-        server,
+    let loaded_control;
+    let loaded_route;
+    let (control, route) = match (control, route) {
+        (Some(control), Some(route)) => (control, route),
+        _ => {
+            loaded_route = match server_route_scope(server, state) {
+                Ok(Some(route)) => route,
+                Ok(None) => {
+                    return Resp::err(
+                        "BOARD_NOTICE_RECIPIENT_UNRESOLVED: current project route is missing",
+                    )
+                }
+                Err(error) => return Resp::err(error),
+            };
+            loaded_control =
+                match binding_store::BindingControlStore::new(server.host_paths.state_root())
+                    .load()
+                {
+                    Ok(control) => control,
+                    Err(error) => return Resp::err(error),
+                };
+            (&loaded_control, &loaded_route)
+        }
+    };
+    let auto_notice = match board_auto_notice_events_current(
         state,
         control,
+        route,
         &task,
         &actor,
         &format!("description revision is now {}", details.revision),
@@ -1359,20 +1478,15 @@ fn board_describe_locked(
     if let Some(event) = ticket_rework_phase_event(server, state, &id) {
         events.push(event);
     }
-    let commit = match control {
-        Some(control) => server
-            .commit_locked_checked_with_control(state, &events, control)
-            .map(|_| ())
-            .map_err(|error| error.to_string()),
-        None => server
-            .commit_locked_checked(state, &events)
-            .map(|_| ())
-            .map_err(|error| error.to_string()),
-    };
+    let commit = server
+        .commit_locked_checked_with_control_at_route(state, &events, control, Some(route))
+        .map(|_| ())
+        .map_err(|error| error.to_string());
     if let Err(error) = commit {
         return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
     }
-    let mut response = board_task_response(server, state, &id, &actor);
+    let mut response =
+        board_task_response_from_control(state, &id, &actor, control, Some(route));
     if let (Some(notice), Some(object)) =
         (auto_notice.notice.as_ref(), response.data.as_object_mut())
     {
@@ -1409,11 +1523,16 @@ fn board_update_response(
     id: &str,
     actor: &str,
     result: Resp,
+    control: Option<&binding_slot::BindingControlSet>,
+    route: Option<&RouteScope>,
 ) -> Resp {
     if !result.ok {
         return result;
     }
-    let mut response = board_task_response(server, state, id, actor);
+    let mut response = match control.zip(route) {
+        Some((control, route)) => board_task_response_from_control(state, id, actor, control, Some(route)),
+        None => board_task_response(server, state, id, actor),
+    };
     if let Some(object) = response.data.as_object_mut() {
         for field in ["block_request", "notification", "notification_message_id"] {
             if let Some(value) = result.data.get(field) {
@@ -1524,6 +1643,10 @@ fn dispatch_board_command_current_map(
                     "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
                 );
             };
+            let route = RouteScope {
+                project_scope_id: context.project_scope.clone(),
+                app_scope_id: context.app_scope_id.clone(),
+            };
             let response = manager
                 .with_current_task_state_response(
                     server,
@@ -1536,10 +1659,13 @@ fn dispatch_board_command_current_map(
                         if status.is_none() && next.is_none() {
                             return Err(Resp::err("provide --status or --next"));
                         }
-                        let result = task_update_locked(
+                        let result = task_update_locked_at_route(
                             server,
                             state,
                             Some(control),
+                            Some(&route),
+                            true,
+                            true,
                             actor.clone(),
                             token.clone(),
                             id.clone(),
@@ -1548,7 +1674,7 @@ fn dispatch_board_command_current_map(
                             None,
                             None,
                         );
-                        Ok(board_update_response(server, state, id, &actor, result))
+                        Ok(result)
                     },
                 )
                 .unwrap_or_else(|error| error);
@@ -1569,6 +1695,10 @@ fn dispatch_board_command_current_map(
                     "PROJECT_CONTEXT_REQUIRED: project-scoped task mutation requires typed runtime context",
                 );
             };
+            let route = RouteScope {
+                project_scope_id: context.project_scope.clone(),
+                app_scope_id: context.app_scope_id.clone(),
+            };
             let response = manager
                 .with_current_task_state_response(
                     server,
@@ -1581,8 +1711,8 @@ fn dispatch_board_command_current_map(
                             server,
                             state,
                             Some(control),
+                            Some(&route),
                             actor.clone(),
-                            token.clone(),
                             id.clone(),
                             *expected_revision,
                             title.clone(),
@@ -1863,10 +1993,22 @@ fn handle_board_command(
                     Err(error) => return error,
                 }
             }
-            let auto_notice = match board_auto_notice_events(
-                server,
+            let route = match server_route_scope(server, &state) {
+                Ok(Some(route)) => route,
+                Ok(None) => return Resp::err("project route is not ready"),
+                Err(error) => return Resp::err(error),
+            };
+            let control =
+                match binding_store::BindingControlStore::new(server.host_paths.state_root())
+                    .load()
+                {
+                    Ok(control) => control,
+                    Err(error) => return Resp::err(error),
+                };
+            let auto_notice = match board_auto_notice_events_current(
                 &state,
-                None,
+                &control,
+                &route,
                 &task,
                 &actor,
                 "task was published to the current board",
@@ -1875,10 +2017,13 @@ fn handle_board_command(
                 Err(error) => return error,
             };
             events.extend(auto_notice.events);
-            if let Err(error) = server.commit_locked_checked(&mut state, &events) {
+            if let Err(error) =
+                server.commit_locked_checked_with_control(&mut state, &events, &control)
+            {
                 return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}"));
             }
-            let mut response = board_task_response(server, &state, &id, &actor);
+            let mut response =
+                board_task_response_from_control(&state, &id, &actor, &control, Some(&route));
             if let Some(object) = response.data.as_object_mut() {
                 object.insert("ticket".into(), ticket_projection(&state, &id));
                 if let Some(notice) = auto_notice.notice.as_ref() {
@@ -1915,10 +2060,13 @@ fn handle_board_command(
             if status.is_none() && next.is_none() {
                 return Resp::err("provide --status or --next");
             }
-            let result = task_update_locked(
+            let result = task_update_locked_at_route(
                 server,
                 &mut state,
                 None,
+                None,
+                true,
+                true,
                 actor.clone(),
                 token,
                 id.clone(),
@@ -1927,10 +2075,9 @@ fn handle_board_command(
                 None,
                 None,
             );
-            let response = board_update_response(server, &state, &id, &actor, result);
             drop(state);
-            deliver_board_auto_notice(server, &response);
-            response
+            deliver_board_auto_notice(server, &result);
+            result
         }
         BoardCommand::Describe {
             id,
@@ -1950,8 +2097,8 @@ fn handle_board_command(
                     server,
                     &mut state,
                     None,
+                    None,
                     actor,
-                    token,
                     id,
                     expected_revision,
                     title,

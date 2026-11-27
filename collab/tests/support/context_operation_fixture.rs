@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-#[path = "daemon_readiness.rs"]
-mod daemon_readiness;
 #[path = "codex_pane_interpreter.rs"]
 mod codex_pane_interpreter;
+#[path = "daemon_readiness.rs"]
+mod daemon_readiness;
 
 /// Fixture roots live under `/var/tmp` so the AF_UNIX socket stays inside
 /// `SUN_LEN`. The macOS default temp dir is long enough to make every daemon
@@ -264,13 +264,19 @@ impl Fixture {
         );
         let capture = || {
             String::from_utf8_lossy(
-                &tmux(&self.tmux_socket, &["capture-pane", "-p", "-t", &pane.pane_id]).stdout,
+                &tmux(
+                    &self.tmux_socket,
+                    &["capture-pane", "-p", "-t", &pane.pane_id],
+                )
+                .stdout,
             )
             .into_owned()
         };
         assert!(
             wait_until(Duration::from_secs(3), || {
-                capture().lines().any(|line| line.starts_with("> fixture idle"))
+                capture()
+                    .lines()
+                    .any(|line| line.starts_with("> fixture idle"))
             }),
             "Codex fixture did not render an idle prompt: stdout={:?}, stderr={:?}, pane={}",
             std::fs::read_to_string(output.stdout),
@@ -405,17 +411,18 @@ impl Fixture {
             include_str!("../../src/adapters/rex/fixture_rex.py"),
         )
         .expect("write Rex CLI fixture");
-        let installed = self
-            .root
-            .join("home/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex");
+        let installed = self.root.join(
+            "home/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex",
+        );
         std::fs::create_dir_all(installed.parent().expect("Rex CLI parent"))
             .expect("create isolated Rex CLI directory");
         std::fs::write(
             &installed,
             format!(
-                "#!/bin/sh\nexport REXPRIMITIVE_LOG_DIR={}\nexport REXPRIMITIVE_SCENARIO_FILE={}\nexec python3 {} \"$@\"\n",
+                "#!/bin/sh\nexport REXPRIMITIVE_LOG_DIR={}\nexport REXPRIMITIVE_SCENARIO_FILE={}\nexport REXPRIMITIVE_BARRIER_DIR={}\nexec python3 {} \"$@\"\n",
                 shell_quote(&self.root.to_string_lossy()),
                 shell_quote(&self.root.join("rex-scenario").to_string_lossy()),
+                shell_quote(&self.root.to_string_lossy()),
                 shell_quote(&script.to_string_lossy()),
             ),
         )

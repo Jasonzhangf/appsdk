@@ -31,6 +31,7 @@ preflight_method = {
 if mode == "cancel_preflight" and method == "server.status":
     preflight_method = method
 if method == preflight_method:
+    (root / "preflight-child-pid").write_text(str(os.getpid()))
     (root / "preflight-inflight").write_text(method)
     release = root / "release-create"
     deadline = time.monotonic() + 10

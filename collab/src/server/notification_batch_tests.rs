@@ -168,6 +168,21 @@ fn mark_agent_online(server: &Server, worker: &str, session_id: &str) {
     }]);
 }
 
+fn bind_typed_name(server: &Server, project_scope: &str, name: &str, worker: &str, session_id: &str) {
+    server.commit(&[Event::NameResolutionCommitted {
+        occupancy: crate::server::name_state::NameOccupancy {
+            name: name.into(),
+            worker_id: worker.into(),
+            session_id: session_id.into(),
+            occupancy_revision: 1,
+            updated_ms: now_ms(),
+            pane_anchor: None,
+        },
+        project_scope: project_scope.into(),
+        assignments: Vec::new(),
+    }]);
+}
+
 fn mark_agent_offline(server: &Server, worker: &str, session_id: &str) {
     let project_scope = crate::server::GlobalState::canonical_project_scope(&server.root)
         .unwrap()
@@ -2354,6 +2369,162 @@ fn guarded_dsh_and_desktop_timeouts_release_publication() {
         },
         false,
     );
+}
+
+#[test]
+fn binding_change_across_unguarded_delivery_prevents_false_receipt() {
+    let (mut server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let subscription = register_and_subscribe(&server, "recipient");
+    let transport = server.state.lock().unwrap().workers["recipient"]
+        .transport
+        .clone()
+        .unwrap();
+    mark_agent_online(&server, "recipient", "session-recipient");
+    seed_current_rex_bindings(&server, &route, &[("Alice", "recipient", &transport)]);
+    persist_rex_worker_binding(&server, &route, "recipient", &transport);
+
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let control = store.load().unwrap();
+    let slot = control
+        .current_for_worker(&route.project_scope_id, &route.app_scope_id, "recipient")
+        .unwrap()
+        .unwrap();
+    let key = slot.identity_key.clone();
+    let generation = slot.generation();
+    let mut refreshed = slot.active_binding().unwrap().clone();
+    refreshed.binding.runtime_id =
+        crate::identity::RuntimeId::new("runtime-recipient-refreshed").unwrap();
+    Arc::get_mut(&mut server)
+        .expect("unique test server")
+        .appserver_notification_sink = Arc::new(move |_, _, _, message_id, _, _| {
+        store
+            .commit(binding_store::ControlChange::Commit {
+                key: key.clone(),
+                value: refreshed.clone(),
+                expected_generation: Some(generation),
+            })
+            .unwrap();
+        Ok(json!({"accepted": true, "messageId": message_id}))
+    });
+
+    let now = now_ms();
+    queue_message(
+        &server,
+        "recipient",
+        &subscription,
+        "unguarded-delivery",
+        now,
+    );
+    let attempt_at = now + server.config.notifications.delay_ms("direct-message");
+    let attempt = attempt_notification_detailed_with_at(
+        &server,
+        "unguarded-delivery",
+        &subscription,
+        attempt_at,
+    );
+
+    assert!(matches!(attempt, NotificationAttempt::StaleAccepted), "{attempt:?}");
+    let state = server.state.lock().unwrap();
+    assert!(!state
+        .notification_delivery_accepted
+        .contains_key("unguarded-delivery"));
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn typed_wake_non_rex_uses_one_admission_control_snapshot() {
+    let (server, root) = test_server();
+    let route = seed_rex_route(&server);
+    let subscription = register_and_subscribe(&server, "recipient");
+    let transport = server.state.lock().unwrap().workers["recipient"]
+        .transport
+        .clone()
+        .unwrap();
+    mark_agent_online(&server, "recipient", "session-recipient");
+    seed_current_rex_bindings(&server, &route, &[("Alice", "recipient", &transport)]);
+    persist_rex_worker_binding(&server, &route, "recipient", &transport);
+    bind_typed_name(
+        &server,
+        route.project_scope_id.as_str(),
+        "Alice",
+        "recipient",
+        "session-recipient",
+    );
+    let now = now_ms();
+    queue_message(&server, "recipient", &subscription, "typed-wake", now);
+    server.commit(&[Event::MailboxNameAddressed {
+        message_id: "typed-wake".into(),
+        address: super::name_mailbox::MailboxNameAddress {
+            project_scope: route.project_scope_id.as_str().into(),
+            name: "Alice".into(),
+        },
+    }]);
+
+    reset_notification_control_loads();
+    let attempt_at = now + server.config.notifications.delay_ms("direct-message");
+    let attempt = attempt_notification_detailed_with_at(
+        &server,
+        "typed-wake",
+        &subscription,
+        attempt_at,
+    );
+
+    assert!(attempt.accepted(), "{attempt:?}");
+    assert_eq!(
+        notification_control_loads(),
+        1,
+        "typed wake admission and non-Rex binding selection must share one control snapshot"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn send_name_resolution_uses_the_callers_route() {
+    let (server, root) = test_server();
+    let current_route = seed_rex_route(&server);
+    let route = crate::scope::RouteScope {
+        project_scope_id: current_route.project_scope_id.clone(),
+        app_scope_id: AppServerId::new("worker-b-route").unwrap(),
+    };
+    server.commit(&[Event::GlobalProjectRegistered {
+        registration: ProjectRegistration::new(
+            route.project_scope_id.clone(),
+            route.app_scope_id.clone(),
+        )
+        .unwrap(),
+    }]);
+    register_and_subscribe(&server, "recipient");
+    let transport = server.state.lock().unwrap().workers["recipient"]
+        .transport
+        .clone()
+        .unwrap();
+    seed_current_rex_bindings(&server, &route, &[("Alice", "recipient", &transport)]);
+    persist_rex_worker_binding(&server, &route, "recipient", &transport);
+    let control =
+        binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load()
+            .unwrap();
+    let state = server.state.lock().unwrap();
+
+    let (worker, address) = resolve_send_name_address_at_route(
+        &server,
+        &state,
+        &control,
+        &route,
+        "Alice".into(),
+    )
+    .expect("caller route resolves Alice");
+
+    assert_eq!(worker, "recipient");
+    assert_eq!(
+        address.as_ref().map(|address| address.project_scope.as_str()),
+        Some(route.project_scope_id.as_str())
+    );
+    assert_ne!(route.app_scope_id, current_route.app_scope_id);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn assert_guarded_native_publication(

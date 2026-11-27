@@ -3,10 +3,14 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const WORKER: &str = "collab-restore-fixture";
@@ -20,18 +24,30 @@ struct Fixture {
     root: PathBuf,
     state: PathBuf,
     project: PathBuf,
+    create_lifetime: Mutex<Option<CreateLifetime>>,
+    cleanup_receipt: Option<PathBuf>,
+    outer_reaped: PathBuf,
+    preflight_pid: Mutex<Option<u32>>,
+}
+
+struct CreateLifetime {
+    supervisor: Option<JoinHandle<()>>,
+    pid_path: PathBuf,
+    eof_path: PathBuf,
+    outer_pid: u32,
+    outer_reaped: PathBuf,
 }
 
 struct OwnedChild {
     child: Option<std::process::Child>,
-    process_group: bool,
+    reaped_receipt: Option<PathBuf>,
 }
 
 impl OwnedChild {
-    fn new(child: std::process::Child, process_group: bool) -> Self {
+    fn new(child: std::process::Child, reaped_receipt: Option<PathBuf>) -> Self {
         Self {
             child: Some(child),
-            process_group,
+            reaped_receipt,
         }
     }
 
@@ -53,10 +69,11 @@ impl OwnedChild {
         stderr_path: &std::path::Path,
     ) -> std::io::Result<Output> {
         let mut child = self.child.take().expect("owned child is active");
-        let pid = child.id();
         loop {
             if let Some(status) = child.try_wait()? {
-                self.reap_group(pid, Instant::now() + Duration::from_secs(5))?;
+                if let Some(receipt) = &self.reaped_receipt {
+                    fs::write(receipt, b"reaped").ok();
+                }
                 return Ok(Output {
                     status,
                     stdout: fs::read(stdout_path)?,
@@ -64,44 +81,16 @@ impl OwnedChild {
                 });
             }
             if Instant::now() >= deadline {
-                if self.process_group {
-                    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
-                }
                 let _ = child.kill();
                 let status = child.wait()?;
-                self.reap_group(pid, Instant::now() + Duration::from_secs(5))?;
+                if let Some(receipt) = &self.reaped_receipt {
+                    fs::write(receipt, b"reaped-after-timeout").ok();
+                }
                 return Ok(Output {
                     status,
                     stdout: fs::read(stdout_path)?,
                     stderr: fs::read(stderr_path)?,
                 });
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    fn reap_group(&self, pid: u32, deadline: Instant) -> std::io::Result<()> {
-        if !self.process_group {
-            return Ok(());
-        }
-        let group = -(pid as libc::pid_t);
-        if unsafe { libc::kill(group, 0) } != 0
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-        {
-            return Ok(());
-        }
-        unsafe { libc::kill(group, libc::SIGKILL) };
-        loop {
-            if unsafe { libc::kill(group, 0) } != 0
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-            {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "owned process group cleanup unconfirmed",
-                ));
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -114,15 +103,12 @@ impl Drop for OwnedChild {
             return;
         };
         if child.try_wait().ok().flatten().is_none() {
-            if self.process_group {
-                unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
-            } else {
-                let _ = child.kill();
-            }
+            let _ = child.kill();
         }
-        let pid = child.id();
         let _ = child.wait();
-        let _ = self.reap_group(pid, Instant::now() + Duration::from_secs(5));
+        if let Some(receipt) = &self.reaped_receipt {
+            fs::write(receipt, b"reaped-on-drop").ok();
+        }
     }
 }
 
@@ -142,10 +128,15 @@ impl Fixture {
         let cli = root.join("rex");
         fs::write(&cli, include_str!("fixtures/restore/rex.py")).unwrap();
         fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+        let outer_reaped = root.join("outer-reaped");
         Self {
             root,
             state,
             project,
+            create_lifetime: Mutex::new(None),
+            cleanup_receipt: None,
+            outer_reaped,
+            preflight_pid: Mutex::new(None),
         }
     }
 
@@ -205,7 +196,7 @@ impl Fixture {
             .stderr(fs::File::create(&stderr_path).unwrap())
             .process_group(0);
         let child = command.spawn().unwrap();
-        let owned = OwnedChild::new(child, true);
+        let owned = OwnedChild::new(child, None);
         let output = owned
             .wait_with_output(
                 Instant::now() + Duration::from_secs(60),
@@ -233,9 +224,26 @@ impl Fixture {
     }
 
     fn spawn_interrupt_restore(&self, mode: &str) -> (OwnedChild, PathBuf, PathBuf) {
+        self.spawn_interrupt_restore_with_signal_barrier(mode, None)
+    }
+
+    fn spawn_interrupt_restore_with_signal_barrier(
+        &self,
+        mode: &str,
+        signal_barrier: Option<&std::path::Path>,
+    ) -> (OwnedChild, PathBuf, PathBuf) {
         let map = self.map();
         let map_path = self.state.join("identity-map.json");
         fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
+        let (lifecycle_reader, lifecycle_writer) = UnixStream::pair().unwrap();
+        let lifecycle_fd = lifecycle_writer.as_raw_fd();
+        let flags = unsafe { libc::fcntl(lifecycle_fd, libc::F_GETFD) };
+        assert!(flags >= 0, "read fixture lifetime fd flags");
+        assert_eq!(
+            unsafe { libc::fcntl(lifecycle_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) },
+            0,
+            "make fixture lifetime fd inheritable"
+        );
         let mut command = Command::new(env!("CARGO_BIN_EXE_collab"));
         command
             .current_dir(&self.project)
@@ -246,22 +254,29 @@ impl Fixture {
             .env("COLLAB_TEST_REX_CLI", self.root.join("rex"))
             .env("RESTORE_FIXTURE_MODE", mode)
             .env("RESTORE_FIXTURE_ROOT", &self.state)
-            .args([
-                "restore",
-                "--worker",
-                WORKER,
-                "--app",
-                "appserver-cli",
-                "--binding-id",
-                BINDING,
-                "--generation",
-                "1",
-                "--session-label",
-                "restore-fixture",
-                "--operation-id",
-                "fixture-operation",
-                "--approve",
-            ]);
+            .env("COLLAB_TEST_REX_LIFETIME_FD", lifecycle_fd.to_string());
+        if let Some(signal_barrier) = signal_barrier {
+            command.env(
+                "COLLAB_TEST_RESTORE_SIGNAL_CONSUMER_BARRIER",
+                signal_barrier,
+            );
+        }
+        command.args([
+            "restore",
+            "--worker",
+            WORKER,
+            "--app",
+            "appserver-cli",
+            "--binding-id",
+            BINDING,
+            "--generation",
+            "1",
+            "--session-label",
+            "restore-fixture",
+            "--operation-id",
+            "fixture-operation",
+            "--approve",
+        ]);
         let stdout_path = self.root.join("interrupt.stdout");
         let stderr_path = self.root.join("interrupt.stderr");
         command
@@ -269,7 +284,120 @@ impl Fixture {
             .stderr(fs::File::create(&stderr_path).unwrap())
             .process_group(0);
         let child = command.spawn().unwrap();
-        (OwnedChild::new(child, true), stdout_path, stderr_path)
+        let outer_pid = child.id();
+        drop(lifecycle_writer);
+        let pid_path = self.state.join("created-child-owned-pid");
+        let eof_path = self.state.join("create-lifetime-eof");
+        let withhold_ack = matches!(mode, "pre_marker_timeout" | "pre_marker_unwind");
+        let close_ack = mode == "pre_marker_closed_ack";
+        let invalid_ack = mode == "pre_marker_invalid_ack";
+        let supervisor = std::thread::spawn({
+            let pid_path = pid_path.clone();
+            let eof_path = eof_path.clone();
+            move || {
+                let mut lifecycle_reader = lifecycle_reader;
+                let mut pid_bytes = [0_u8; std::mem::size_of::<libc::pid_t>()];
+                if std::io::Read::read_exact(&mut lifecycle_reader, &mut pid_bytes).is_err() {
+                    let _ = fs::write(&eof_path, b"eof-before-announcement");
+                    return;
+                }
+                let pid = libc::pid_t::from_ne_bytes(pid_bytes);
+                let _ = fs::write(&pid_path, pid.to_string());
+                let _ = fs::write(eof_path.with_extension("announced"), b"owned");
+                if close_ack {
+                    lifecycle_reader
+                        .shutdown(std::net::Shutdown::Write)
+                        .unwrap();
+                } else if invalid_ack {
+                    std::io::Write::write_all(&mut lifecycle_reader, b"x").unwrap();
+                } else if !withhold_ack {
+                    let _ = std::io::Write::write_all(&mut lifecycle_reader, b"a");
+                }
+                let mut sink = [0_u8; 64];
+                loop {
+                    match std::io::Read::read(&mut lifecycle_reader, &mut sink) {
+                        Ok(0) => {
+                            let _ = fs::write(&eof_path, b"eof");
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+        *self.create_lifetime.lock().unwrap() = Some(CreateLifetime {
+            supervisor: Some(supervisor),
+            pid_path,
+            eof_path,
+            outer_pid,
+            outer_reaped: self.outer_reaped.clone(),
+        });
+        (
+            OwnedChild::new(child, Some(self.outer_reaped.clone())),
+            stdout_path,
+            stderr_path,
+        )
+    }
+
+    fn interrupt_preflight_with_withheld_consumer(&self, mode: &str) -> (i32, Value, Vec<Value>) {
+        let barrier = self.root.join("withheld-signal-consumer");
+        let (mut child, stdout_path, stderr_path) =
+            self.spawn_interrupt_restore_with_signal_barrier(mode, Some(&barrier));
+        let ready = barrier.with_extension("ready");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !ready.exists() && Instant::now() < deadline {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "restore exited before the signal consumer became ready"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ready.exists(), "signal consumer readiness timed out");
+        let in_flight = self.state.join("preflight-inflight");
+        while !in_flight.exists() && Instant::now() < deadline {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "restore exited before the preflight read was in flight"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(in_flight.exists(), "preflight read was not in flight");
+        let rex_pid = wait_for_pid(
+            &self.state.join("preflight-child-pid"),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("fixture records the exact preflight child PID");
+        *self.preflight_pid.lock().unwrap() = Some(rex_pid);
+        assert_eq!(
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+            0
+        );
+        assert_eq!(
+            unsafe { libc::kill(rex_pid as libc::pid_t, libc::SIGINT) },
+            0
+        );
+        assert!(
+            !barrier.exists(),
+            "the fixture must withhold the asynchronous flag publisher"
+        );
+        let output = child
+            .wait_with_output(
+                Instant::now() + Duration::from_secs(15),
+                &stdout_path,
+                &stderr_path,
+            )
+            .unwrap();
+        let result: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)));
+        let receipts = fs::read_to_string(self.state.join("receipts.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect::<Vec<Value>>();
+        eprintln!("{mode}: result={result} receipts={}", json!(receipts));
+        (output.status.code().unwrap(), result, receipts)
     }
 
     fn interrupt_during_create(&self, mode: &str, signal_group: bool) -> (i32, Value, Vec<Value>) {
@@ -299,9 +427,7 @@ impl Fixture {
                 );
             }
             if Instant::now() >= deadline {
-                if signal_group {
-                    unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
-                }
+                let _ = signal_group;
                 let output = child
                     .wait_with_output(
                         Instant::now() + Duration::from_secs(5),
@@ -317,13 +443,21 @@ impl Fixture {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let signal_target = if signal_group {
-            -(child.id() as libc::pid_t)
-        } else {
-            child.id() as libc::pid_t
-        };
-        let signal = unsafe { libc::kill(signal_target, libc::SIGINT) };
-        assert_eq!(signal, 0, "failed to interrupt restore");
+        assert_eq!(
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+            0,
+            "failed to interrupt restore"
+        );
+        if signal_group && preflight {
+            let rex_pid_path = self.state.join("preflight-child-pid");
+            let rex_pid = wait_for_pid(&rex_pid_path, Instant::now() + Duration::from_secs(5))
+                .expect("fixture supervisor records exact preflight child PID");
+            *self.preflight_pid.lock().unwrap() = Some(rex_pid);
+            assert_eq!(
+                unsafe { libc::kill(rex_pid as libc::pid_t, libc::SIGINT) },
+                0
+            );
+        }
         if !preflight {
             fs::write(self.state.join("release-create"), b"signal-delivered")
                 .expect("failed to release fixture create response");
@@ -347,36 +481,115 @@ impl Fixture {
     }
 
     fn reclaim_fixture_create_child(&self) -> bool {
-        let marker = self.state.join("create-child-pid");
-        let Ok(text) = fs::read_to_string(marker) else {
-            return true;
-        };
-        let Ok(pid) = text.trim().parse::<u32>() else {
-            return false;
-        };
-        if pid <= 1 || !process_is_alive(pid) {
-            return true;
-        }
-        let _ = fs::write(self.state.join("release-create"), b"fixture-unwind-cleanup");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while process_is_alive(pid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if process_is_alive(pid) && process_belongs_to_fixture(pid, &self.root) {
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-            let kill_deadline = Instant::now() + Duration::from_secs(2);
-            while process_is_alive(pid) && Instant::now() < kill_deadline {
-                std::thread::sleep(Duration::from_millis(20));
+        if let Some(pid) = self.preflight_pid.lock().unwrap().take() {
+            if pid <= 1 {
+                return false;
+            }
+            if process_is_alive(pid) {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while process_is_alive(pid) && deadline > Instant::now() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            if process_is_alive(pid) {
+                return false;
             }
         }
-        !process_is_alive(pid)
+        let Some(mut lifetime) = self.create_lifetime.lock().unwrap().take() else {
+            return true;
+        };
+        if !lifetime.outer_reaped.exists() || process_is_alive(lifetime.outer_pid) {
+            eprintln!(
+                "fixture cleanup unconfirmed: outer child {} reaped={} alive={}",
+                lifetime.outer_pid,
+                lifetime.outer_reaped.exists(),
+                process_is_alive(lifetime.outer_pid)
+            );
+            return false;
+        }
+        let _ = fs::write(self.state.join("release-create"), b"fixture-unwind-cleanup");
+        let announce_deadline = Instant::now() + Duration::from_secs(5);
+        while !lifetime.pid_path.exists()
+            && !lifetime.eof_path.exists()
+            && Instant::now() < announce_deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = wait_for_pid(&lifetime.pid_path, announce_deadline);
+        if let Some(pid) = pid {
+            if pid <= 1 {
+                eprintln!("fixture cleanup unconfirmed: invalid announced child PID {pid}");
+                return false;
+            }
+            if process_is_alive(pid) {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                let kill_deadline = Instant::now() + Duration::from_secs(5);
+                while process_is_alive(pid) && Instant::now() < kill_deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            if process_is_alive(pid) {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                let kill_deadline = Instant::now() + Duration::from_secs(2);
+                while process_is_alive(pid) && Instant::now() < kill_deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            if process_is_alive(pid) {
+                eprintln!("fixture cleanup unconfirmed: announced child {pid} remains alive");
+                return false;
+            }
+        }
+        let eof_deadline = Instant::now() + Duration::from_secs(5);
+        while !lifetime.eof_path.exists() && Instant::now() < eof_deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !lifetime.eof_path.exists() {
+            eprintln!("fixture cleanup unconfirmed: create lifetime channel did not reach EOF");
+            return false;
+        }
+        if let Some(supervisor) = lifetime.supervisor.take() {
+            if supervisor.join().is_err() {
+                return false;
+            }
+        }
+        let eof = fs::read_to_string(&lifetime.eof_path).unwrap_or_default();
+        let Some(pid) = pid else {
+            if eof != "eof-before-announcement" {
+                eprintln!("fixture cleanup unconfirmed: child announcement is missing");
+                return false;
+            }
+            if let Some(receipt) = &self.cleanup_receipt {
+                let _ = fs::write(receipt, format!("pid=none eof={eof} root_removed=true\n"));
+            }
+            return true;
+        };
+        if eof != "eof" {
+            eprintln!("fixture cleanup unconfirmed: unexpected lifetime evidence {eof:?}");
+            return false;
+        }
+        if let Some(receipt) = &self.cleanup_receipt {
+            let _ = fs::write(receipt, format!("pid={pid} eof={eof} root_removed=true\n"));
+        }
+        eprintln!(
+            "fixture cleanup confirmed: outer={} create={:?} lifetime={:?} removing {}",
+            lifetime.outer_pid,
+            pid,
+            eof,
+            self.root.display()
+        );
+        true
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         if !self.reclaim_fixture_create_child() {
-            eprintln!("fixture cleanup unconfirmed; preserving {}", self.root.display());
+            eprintln!(
+                "fixture cleanup unconfirmed; preserving {}",
+                self.root.display()
+            );
             return;
         }
         let _ = fs::remove_dir_all(&self.root);
@@ -388,6 +601,20 @@ fn process_is_alive(pid: u32) -> bool {
     result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
+fn wait_for_pid(path: &std::path::Path, deadline: Instant) -> Option<u32> {
+    loop {
+        if let Ok(text) = fs::read_to_string(path) {
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                return Some(pid);
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn process_belongs_to_fixture(pid: u32, root: &std::path::Path) -> bool {
     Command::new("/bin/ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
@@ -397,6 +624,16 @@ fn process_belongs_to_fixture(pid: u32, root: &std::path::Path) -> bool {
             output.status.success()
                 && String::from_utf8_lossy(&output.stdout).contains(root.to_string_lossy().as_ref())
         })
+}
+
+fn terminate_owned_fixture_child(pid: u32, _root: &std::path::Path) {
+    if pid > 1 && process_is_alive(pid) {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_is_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 fn methods(receipts: &[Value]) -> Vec<&str> {
@@ -693,6 +930,12 @@ fn restore_public_preserves_unknown_create_outcome_and_refuses_unsafe_retry() {
         f.has_carrier(),
         "fixture must retain the unconfirmed session"
     );
+    assert!(result.get("result").is_none(), "{result}");
+    assert!(
+        !result.to_string().contains("restored_session_id"),
+        "{result}"
+    );
+    assert!(!methods(&receipts).contains(&"kill"), "{receipts:?}");
 
     let (retry_code, retry, retry_receipts) = f.run(
         f.map(),
@@ -812,6 +1055,40 @@ fn restore_public_foreground_sigint_during_preflight_is_typed_without_mutation()
 }
 
 #[test]
+fn restore_public_status_sigint_wins_when_async_consumer_is_withheld() {
+    foreground_sigint_wins_when_async_consumer_is_withheld("cancel_preflight_status", vec![]);
+}
+
+#[test]
+fn restore_public_list_sigint_wins_when_async_consumer_is_withheld() {
+    foreground_sigint_wins_when_async_consumer_is_withheld(
+        "cancel_preflight_list",
+        vec!["server.status"],
+    );
+}
+
+fn foreground_sigint_wins_when_async_consumer_is_withheld(mode: &str, completed_reads: Vec<&str>) {
+    let f = Fixture::new();
+    let before = serde_json::to_vec(&f.map()).unwrap();
+    let (code, result, receipts) = f.interrupt_preflight_with_withheld_consumer(mode);
+    assert_eq!(code, 2, "{mode}: {result}");
+    assert_eq!(result["error"]["stage"], "cancelled", "{mode}: {result}");
+    assert!(result.get("result").is_none(), "{mode}: {result}");
+    assert!(result["error"]["cleanup"].is_null(), "{mode}: {result}");
+    assert_eq!(methods(&receipts), completed_reads, "{mode}: {receipts:?}");
+    assert!(
+        !methods(&receipts).contains(&"session.create"),
+        "{mode}: {receipts:?}"
+    );
+    assert!(
+        !methods(&receipts).contains(&"kill"),
+        "{mode}: {receipts:?}"
+    );
+    assert_eq!(fs::read(f.state.join("identity-map.json")).unwrap(), before);
+    assert!(!f.has_carrier(), "{mode}");
+}
+
+#[test]
 fn restore_public_preflight_native_errors_without_cancellation_are_preserved() {
     for (mode, stage, expected_calls) in [
         ("status_failure", "server.status", vec!["server.status"]),
@@ -839,7 +1116,7 @@ fn restore_public_preflight_native_errors_without_cancellation_are_preserved() {
 #[test]
 fn restore_public_foreground_sigint_retains_create_receipt_for_exact_cleanup() {
     let f = Fixture::new();
-    let (code, result, receipts) = f.interrupt_during_create("cancel_after_create", true);
+    let (code, result, receipts) = f.interrupt_during_create("cancel_after_create", false);
     assert_eq!(code, 2, "{result}");
     assert_eq!(result["ok"], false, "{result}");
     assert!(result.get("result").is_none(), "{result}");
@@ -870,15 +1147,94 @@ fn restore_public_foreground_sigint_retains_create_receipt_for_exact_cleanup() {
 #[test]
 fn restore_public_pending_cancel_preserves_unusable_create_reply_without_kill() {
     let f = Fixture::new();
-    let (code, result, receipts) = f.interrupt_during_create("cancel_unusable_reply", true);
+    let (code, result, receipts) = f.interrupt_during_create("cancel_unusable_reply", false);
     assert_eq!(code, 2, "{result}");
     assert_eq!(result["error"]["stage"], "cancelled", "{result}");
-    assert_eq!(result["error"]["create_outcome"]["outcome"], "unknown", "{result}");
-    assert_eq!(result["error"]["create_receipt"], receipts[2]["response"], "{result}");
-    assert_eq!(result["error"]["create_context"]["operation_id"], "fixture-operation", "{result}");
+    assert_eq!(
+        result["error"]["create_outcome"]["outcome"], "unknown",
+        "{result}"
+    );
+    assert_eq!(
+        result["error"]["create_receipt"], receipts[2]["response"],
+        "{result}"
+    );
+    assert_eq!(
+        result["error"]["create_context"]["operation_id"], "fixture-operation",
+        "{result}"
+    );
     assert!(result["error"]["cleanup"].is_null(), "{result}");
-    assert_eq!(methods(&receipts), ["server.status", "session.list", "session.create"]);
+    assert_eq!(
+        methods(&receipts),
+        ["server.status", "session.list", "session.create"]
+    );
     assert!(f.has_carrier(), "unknown ownership must prevent kill");
+    assert!(
+        !result.to_string().contains("restored_session_id"),
+        "{result}"
+    );
+}
+
+#[test]
+fn restore_public_fixture_acknowledgement_failures_exit_before_python_and_clean_up() {
+    for (mode, errno) in [
+        ("pre_marker_closed_ack", libc::EPIPE),
+        ("pre_marker_invalid_ack", libc::EINVAL),
+    ] {
+        let mut fixture = Fixture::new();
+        let root = fixture.root.clone();
+        let cleanup_receipt = std::env::temp_dir().join(format!(
+            "restore-ack-failure-cleanup-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fixture.cleanup_receipt = Some(cleanup_receipt.clone());
+        let (child, stdout, stderr) = fixture.spawn_interrupt_restore(mode);
+        let outer_pid = child.id();
+        let output = child
+            .wait_with_output(Instant::now() + Duration::from_secs(15), &stdout, &stderr)
+            .unwrap();
+        let pid = wait_for_pid(
+            &fixture.state.join("created-child-owned-pid"),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("supervisor records the exact pre-exec child PID");
+        let python_started = fixture.state.join("create-child-pid").exists();
+        let carrier_created = fixture.has_carrier();
+        let receipts = fs::read_to_string(fixture.state.join("receipts.jsonl")).unwrap();
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        drop(fixture);
+        let cleanup = fs::read_to_string(&cleanup_receipt).unwrap();
+        fs::remove_file(&cleanup_receipt).unwrap();
+        assert!(!process_is_alive(outer_pid), "{mode}: outer child remains");
+        assert!(!process_is_alive(pid), "{mode}: create child remains");
+        assert!(!root.exists(), "{mode}: fixture root remains");
+        assert!(cleanup.contains(&format!("pid={pid}")), "{cleanup}");
+        assert!(cleanup.contains("eof=eof"), "{cleanup}");
+        assert_eq!(output.status.code(), Some(2), "{mode}: {output:?}");
+        assert_eq!(result["error"]["stage"], "session.create", "{result}");
+        assert!(
+            result["error"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains(&std::io::Error::from_raw_os_error(errno).to_string()),
+            "{mode}: {result}"
+        );
+        assert!(result["error"]["cleanup"].is_null(), "{result}");
+        assert!(
+            !python_started,
+            "{mode}: Python executed despite failed ack"
+        );
+        assert!(
+            !carrier_created,
+            "{mode}: carrier created despite failed ack"
+        );
+        let receipts: Vec<Value> = receipts
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(methods(&receipts), ["server.status", "session.list"]);
+        eprintln!("{mode}: result={result} cleanup={cleanup} root_absent=true outer={outer_pid} child={pid} absent=true");
+    }
 }
 
 #[test]
@@ -893,13 +1249,72 @@ fn restore_public_fixture_timeout_reclaims_held_create_child_before_root_removal
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(marker.exists(), "create did not reach its held marker");
-    let pid: u32 = fs::read_to_string(fixture.state.join("create-child-pid"))
-        .unwrap().trim().parse().unwrap();
-    let output = child.wait_with_output(Instant::now(), &stdout, &stderr).unwrap();
-    assert!(!output.status.success(), "timeout must stop the outer child");
+    let pid = wait_for_pid(
+        &fixture.state.join("create-child-pid"),
+        Instant::now() + Duration::from_secs(5),
+    )
+    .expect("create child publishes its exact PID");
+    let output = child
+        .wait_with_output(Instant::now(), &stdout, &stderr)
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "timeout must stop the outer child"
+    );
     drop(fixture);
-    assert!(!process_is_alive(pid), "exact create child survived timeout cleanup");
+    assert!(
+        !process_is_alive(pid),
+        "exact create child survived timeout cleanup"
+    );
     assert!(!root.exists(), "root must be removed only after child exit");
+}
+
+#[test]
+fn restore_public_fixture_timeout_reclaims_child_before_python_marker() {
+    let mut fixture = Fixture::new();
+    let root = fixture.root.clone();
+    let cleanup_receipt = std::env::temp_dir().join(format!(
+        "restore-pre-marker-timeout-cleanup-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fixture.cleanup_receipt = Some(cleanup_receipt.clone());
+    let (mut child, stdout, stderr) = fixture.spawn_interrupt_restore("pre_marker_timeout");
+    let owned_pid = fixture.state.join("created-child-owned-pid");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !owned_pid.exists() && Instant::now() < deadline {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "restore exited before the pre-exec child announced ownership"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid = wait_for_pid(&owned_pid, Instant::now() + Duration::from_secs(5))
+        .expect("pre-exec supervisor records the exact child PID");
+    assert!(
+        !fixture.state.join("create-child-pid").exists(),
+        "the Python PID marker must not be published before ack"
+    );
+    let _ = child
+        .wait_with_output(Instant::now(), &stdout, &stderr)
+        .unwrap();
+    drop(fixture);
+    let cleanup = fs::read_to_string(&cleanup_receipt)
+        .expect("fixture publishes lifetime cleanup evidence before root removal");
+    let _ = fs::remove_file(&cleanup_receipt);
+    assert!(cleanup.contains(&format!("pid={pid}")), "{cleanup}");
+    assert!(cleanup.contains("eof=eof"), "{cleanup}");
+    let leaked = process_is_alive(pid);
+    let root_removed = !root.exists();
+    terminate_owned_fixture_child(pid, &root);
+    assert!(
+        !leaked,
+        "fixture removed the root before the pre-Python child exited"
+    );
+    assert!(
+        root_removed,
+        "fixture root remained after confirmed child exit"
+    );
 }
 
 #[test]
@@ -917,14 +1332,14 @@ fn restore_public_fixture_unwind_reclaims_held_create_child_before_root_removal(
             let deadline = Instant::now() + Duration::from_secs(15);
             let pid_path = fixture.state.join("create-child-pid");
             while !pid_path.exists() && Instant::now() < deadline {
-                assert!(child.try_wait().unwrap().is_none(), "restore exited before held marker");
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "restore exited before held marker"
+                );
                 std::thread::sleep(Duration::from_millis(20));
             }
-            let pid = fs::read_to_string(&pid_path)
-                .expect("create child publishes its exact PID")
-                .trim()
-                .parse::<u32>()
-                .unwrap();
+            let pid = wait_for_pid(&pid_path, Instant::now() + Duration::from_secs(5))
+                .expect("create child publishes its exact PID");
             fs::write(&receipt, format!("{} {pid}", fixture.root.display())).unwrap();
             panic!("exercise fixture unwind while create is held");
         }
@@ -942,6 +1357,70 @@ fn restore_public_fixture_unwind_reclaims_held_create_child_before_root_removal(
         }
     }
     let _ = fs::remove_file(receipt);
-    assert!(!leaked, "fixture left its exact create child alive after unwind");
-    assert!(!std::path::Path::new(root).exists(), "fixture root remained after confirmed child cleanup");
+    assert!(
+        !leaked,
+        "fixture left its exact create child alive after unwind"
+    );
+    assert!(
+        !std::path::Path::new(root).exists(),
+        "fixture root remained after confirmed child cleanup"
+    );
+}
+
+#[test]
+fn restore_public_fixture_unwind_reclaims_child_before_python_marker() {
+    let receipt = std::env::temp_dir().join(format!(
+        "restore-pre-marker-unwind-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+        let receipt = receipt.clone();
+        let cleanup_receipt = receipt.with_extension("cleanup");
+        move || {
+            let mut fixture = Fixture::new();
+            fixture.cleanup_receipt = Some(cleanup_receipt);
+            let (mut child, _, _) = fixture.spawn_interrupt_restore("pre_marker_unwind");
+            let owned_pid = fixture.state.join("created-child-owned-pid");
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !owned_pid.exists() && Instant::now() < deadline {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "restore exited before the pre-exec child announced ownership"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let pid = wait_for_pid(&owned_pid, Instant::now() + Duration::from_secs(5))
+                .expect("pre-exec supervisor records the exact child PID");
+            assert!(
+                !fixture.state.join("create-child-pid").exists(),
+                "the Python PID marker must not be published before ack"
+            );
+            fs::write(&receipt, format!("{} {pid}", fixture.root.display())).unwrap();
+            panic!("exercise fixture unwind before Python marker publication");
+        }
+    }));
+    assert!(panic.is_err());
+    let evidence = fs::read_to_string(&receipt).unwrap();
+    let (root, pid) = evidence.rsplit_once(' ').unwrap();
+    let root = std::path::PathBuf::from(root);
+    let pid = pid.parse::<u32>().unwrap();
+    let leaked = process_is_alive(pid);
+    let cleanup_receipt = receipt.with_extension("cleanup");
+    let cleanup = fs::read_to_string(&cleanup_receipt)
+        .expect("fixture publishes lifetime cleanup evidence before root removal");
+    let _ = fs::remove_file(&cleanup_receipt);
+    let root_removed = !root.exists();
+    terminate_owned_fixture_child(pid, &root);
+    assert!(cleanup.contains(&format!("pid={pid}")), "{cleanup}");
+    assert!(cleanup.contains("eof=eof"), "{cleanup}");
+    let _ = fs::remove_file(receipt);
+    assert!(
+        !leaked,
+        "fixture removed the root before the pre-Python child exited"
+    );
+    assert!(
+        root_removed,
+        "fixture root remained after confirmed child exit"
+    );
 }

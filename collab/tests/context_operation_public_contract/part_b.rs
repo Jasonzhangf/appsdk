@@ -40,7 +40,9 @@ fn bind_fixed_test_position(
     tab_id: &str,
     pane_order: u32,
 ) {
-    let path = fixture.root.join("home/.local/state/tm-iterm/manifest.json");
+    let path = fixture
+        .root
+        .join("home/.local/state/tm-iterm/manifest.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let manifest = json!([{
         "binding_id": binding_id,
@@ -161,12 +163,38 @@ fn identity_map_fixed_first_position_can_promote_without_changing_layout() {
         "tm_fixed_one"
     );
     let worker = restored["result"]["snapshot"]["identity"]["worker_id"].clone();
-    let session_id = String::from_utf8(tmux(&fixture.tmux_socket,
-        &["display-message", "-p", "-t", &pane.pane_id, "#{session_id}"]).stdout).unwrap();
-    tmux(&fixture.tmux_socket, &["rename-session", "-t", session_id.trim(), "unstructured-current-label"]);
+    let session_id = String::from_utf8(
+        tmux(
+            &fixture.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &pane.pane_id,
+                "#{session_id}",
+            ],
+        )
+        .stdout,
+    )
+    .unwrap();
+    tmux(
+        &fixture.tmux_socket,
+        &[
+            "rename-session",
+            "-t",
+            session_id.trim(),
+            "unstructured-current-label",
+        ],
+    );
     let continued = fixture.registered_context("layout-mutable-name", &pane);
-    assert_eq!(continued["result"]["snapshot"]["identity"]["worker_id"], worker);
-    assert_eq!(continued["result"]["snapshot"]["layout"]["binding_id"], "tm_fixed_one");
+    assert_eq!(
+        continued["result"]["snapshot"]["identity"]["worker_id"],
+        worker
+    );
+    assert_eq!(
+        continued["result"]["snapshot"]["layout"]["binding_id"],
+        "tm_fixed_one"
+    );
     assert_eq!(tmux_session_name(&fixture, &pane), "project_alpha_1_Jenny");
 
     // Seed the actual legacy overview-ID condition in this isolated map.
@@ -187,13 +215,22 @@ fn identity_map_fixed_first_position_can_promote_without_changing_layout() {
     fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
     fixture.restart_daemon();
     let corrected = fixture.registered_context("layout-overview-id", &pane);
-    assert_eq!(corrected["result"]["snapshot"]["identity"]["worker_id"], worker);
+    assert_eq!(
+        corrected["result"]["snapshot"]["identity"]["worker_id"],
+        worker
+    );
     assert_eq!(corrected["result"]["snapshot"]["name"], "Jenny");
-    assert_eq!(corrected["result"]["snapshot"]["layout"]["binding_id"], "tm_fixed_one");
+    assert_eq!(
+        corrected["result"]["snapshot"]["layout"]["binding_id"],
+        "tm_fixed_one"
+    );
     let stable = fs::read(&map_path).unwrap();
     fixture.registered_context("layout-overview-id-repeat", &pane);
     assert_eq!(fs::read(&map_path).unwrap(), stable);
-    assert_eq!(serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(), current_manifest);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(),
+        current_manifest
+    );
 }
 
 #[test]
@@ -540,33 +577,46 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
     );
 
     let board = fixture.run_ok(&["board", "show"], Some(&pane));
-    let shown = board["tasks"].as_array().unwrap().iter()
-        .find(|task| task["id"] == task_id).expect("Jenny sees retained Bob work");
+    let shown = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == task_id)
+        .expect("Jenny sees retained Bob work");
     assert_eq!(shown["owner_name"], "Bob", "{shown}");
     assert_eq!(shown["owner"], "", "{shown}");
     assert!(shown["owner_session_id"].is_null(), "{shown}");
-    assert_eq!(
-        shown["reassignment_reason"], "name_unoccupied", "{shown}"
-    );
+    assert_eq!(shown["reassignment_reason"], "name_unoccupied", "{shown}");
 
     // Reflow notification progresses on the daemon timer, independently of refusal.
-    assert!(wait_until(Duration::from_secs(15), || {
-        fixture.current_state()["task_assignments"][task_id]["reflow"]["reason"]
-            == "name_unoccupied"
-    }), "daemon must observe the unavailable Bob assignment");
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            fixture.current_state()["task_assignments"][task_id]["reflow"]["reason"]
+                == "name_unoccupied"
+        }),
+        "daemon must observe the unavailable Bob assignment"
+    );
     let progressed = fixture.current_state();
     let assignment = &progressed["task_assignments"][task_id];
     assert_eq!(assignment["name"], "Bob");
-    assert_eq!(assignment["session_id"], bob_assignment_before["session_id"]);
+    assert_eq!(
+        assignment["session_id"],
+        bob_assignment_before["session_id"]
+    );
     assert_eq!(
         assignment["assignment_revision"],
         bob_assignment_before["assignment_revision"]
     );
-    assert!(matches!(
-        assignment["reflow"]["delivery"].as_str(),
-        Some("pending" | "delivered" | "failed")
-    ), "{assignment}");
-    assert!(assignment["reflow"]["episode"].as_u64().is_some_and(|episode| episode > 0));
+    assert!(
+        matches!(
+            assignment["reflow"]["delivery"].as_str(),
+            Some("pending" | "delivered" | "failed")
+        ),
+        "{assignment}"
+    );
+    assert!(assignment["reflow"]["episode"]
+        .as_u64()
+        .is_some_and(|episode| episode > 0));
     assert_eq!(progressed["tasks"][task_id], before["tasks"][task_id]);
     assert_eq!(progressed["ticket_phases"], before["ticket_phases"]);
 }
@@ -575,7 +625,9 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
 fn identity_map_rejects_duplicate_project_positions_with_or_without_saved_binding() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, pane) = Fixture::isolated("identity-map-duplicate-layout");
-    let path = fixture.root.join("home/.local/state/tm-iterm/manifest.json");
+    let path = fixture
+        .root
+        .join("home/.local/state/tm-iterm/manifest.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::create_dir(fixture.root.join("foreign-project")).unwrap();
     let mut manifest = json!([
@@ -585,10 +637,15 @@ fn identity_map_rejects_duplicate_project_positions_with_or_without_saved_bindin
     ]);
     fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     let initial = fixture.registered_context("duplicate-layout-seed", &pane);
-    assert_eq!(initial["result"]["snapshot"]["layout"]["binding_id"], "project_one");
+    assert_eq!(
+        initial["result"]["snapshot"]["layout"]["binding_id"],
+        "project_one"
+    );
     let worker = initial["result"]["snapshot"]["identity"]["worker_id"].clone();
-    let physical = tmux_session_name(&fixture,&pane);
-    for entry in manifest.as_array_mut().unwrap() { entry["tmux_session"] = json!(physical); }
+    let physical = tmux_session_name(&fixture, &pane);
+    for entry in manifest.as_array_mut().unwrap() {
+        entry["tmux_session"] = json!(physical);
+    }
     let mut duplicate = manifest[0].clone();
     duplicate["binding_id"] = json!("competing_project_five");
     duplicate["pane_order"] = json!(5);
@@ -608,11 +665,23 @@ fn identity_map_rejects_duplicate_project_positions_with_or_without_saved_bindin
             fixture.restart_daemon();
         }
         let before = fs::read(&map_path).unwrap();
-        let refused = fixture.command(&["master","promote","--approval","fixture user requests project master"],Some(&pane));
+        let refused = fixture.command(
+            &[
+                "master",
+                "promote",
+                "--approval",
+                "fixture user requests project master",
+            ],
+            Some(&pane),
+        );
         assert!(!refused.status.success());
-        assert!(text(&refused).contains("TM_LAYOUT_AMBIGUOUS"),"{}",text(&refused));
-        assert_eq!(fs::read(&map_path).unwrap(),before);
-        assert_eq!(tmux_session_name(&fixture,&pane),physical);
+        assert!(
+            text(&refused).contains("TM_LAYOUT_AMBIGUOUS"),
+            "{}",
+            text(&refused)
+        );
+        assert_eq!(fs::read(&map_path).unwrap(), before);
+        assert_eq!(tmux_session_name(&fixture, &pane), physical);
     }
 }
 
@@ -620,7 +689,13 @@ fn identity_map_rejects_duplicate_project_positions_with_or_without_saved_bindin
 fn identity_map_registration_publishes_one_json_control_resource() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("identity-map-register");
-    bind_fixed_test_position(&fixture, &pane, "registration-position-eight", "registration", 8);
+    bind_fixed_test_position(
+        &fixture,
+        &pane,
+        "registration-position-eight",
+        "registration",
+        8,
+    );
     let registered = fixture.registered_context("identity-map-register", &pane);
     let path = fixture.host_state.join("identity-map.json");
     assert!(
@@ -641,10 +716,7 @@ fn identity_map_registration_publishes_one_json_control_resource() {
         slot["current"]["binding"]["agent_id"],
         registered["result"]["snapshot"]["identity"]["worker_id"]
     );
-    assert_eq!(
-        tmux_session_name(&fixture, &pane),
-        "registration_8_Alice"
-    );
+    assert_eq!(tmux_session_name(&fixture, &pane), "registration_8_Alice");
     let routes: Vec<Value> =
         serde_json::from_slice(&fs::read(fixture.host_routes()).unwrap()).unwrap();
     assert!(
@@ -901,8 +973,7 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
 
     for (index, (name, pane)) in ordinary_names.iter().zip(&panes).enumerate() {
         let operation_id = format!("generated-peer-pool-{index}");
-        let registered =
-            registered_context_in(&fixture, &fixture.root, &operation_id, pane);
+        let registered = registered_context_in(&fixture, &fixture.root, &operation_id, pane);
         assert_eq!(registered["result"]["snapshot"]["name"], *name);
         assert_eq!(
             tmux_session_name(&fixture, pane),
@@ -932,8 +1003,7 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
         .unwrap()
         .iter()
         .find(|slot| {
-            slot["identity_status"] == "active"
-                && slot["identity_key"]["name"] == "peer-1"
+            slot["identity_status"] == "active" && slot["identity_key"]["name"] == "peer-1"
         })
         .expect("generated peer has an active mapping");
     assert!(peer_slot["display_slot"].is_null());
@@ -976,8 +1046,7 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
         .unwrap()
         .iter_mut()
         .find(|slot| {
-            slot["identity_status"] == "active"
-                && slot["identity_key"]["name"] == "peer-1"
+            slot["identity_status"] == "active" && slot["identity_key"]["name"] == "peer-1"
         })
         .unwrap();
     peer_slot["current"]["layout_binding_id"] = json!("tm_fixed_22");
@@ -1023,10 +1092,7 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
         stale_layout["result"]["snapshot"]["layout"]["status"],
         "unavailable"
     );
-    assert_eq!(
-        tmux_session_name(&fixture, &peer_pane),
-        role_label
-    );
+    assert_eq!(tmux_session_name(&fixture, &peer_pane), role_label);
 
     let peer_worker = peer["result"]["snapshot"]["identity"]["worker_id"]
         .as_str()
@@ -1079,8 +1145,7 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
         .unwrap()
         .iter()
         .find(|slot| {
-            slot["identity_status"] == "active"
-                && slot["identity_key"]["name"] == "peer-1"
+            slot["identity_status"] == "active" && slot["identity_key"]["name"] == "peer-1"
         })
         .expect("ambiguous layout keeps the generated peer active");
     assert_eq!(peer_slot["current"]["layout_binding_id"], "tm_fixed_22");
@@ -1100,9 +1165,9 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
     let received = fixture.run_ok(&["recv", "--timeout", "2"], Some(&peer_pane));
     assert!(
         received["messages"].as_array().is_some_and(|messages| {
-            messages.iter().any(|message| {
-                message["subject"] == "ambiguous-layout-communication"
-            })
+            messages
+                .iter()
+                .any(|message| message["subject"] == "ambiguous-layout-communication")
         }),
         "{received}"
     );
@@ -1141,8 +1206,7 @@ fn generated_peer_without_manifest_defers_physical_position_until_bound() {
         .unwrap()
         .iter()
         .find(|slot| {
-            slot["identity_status"] == "active"
-                && slot["identity_key"]["name"] == "peer-1"
+            slot["identity_status"] == "active" && slot["identity_key"]["name"] == "peer-1"
         })
         .expect("generated peer remains active after layout recovery");
     assert_eq!(
@@ -1218,123 +1282,234 @@ fn offline_incumbent_name_change_does_not_block_current_messages() {
     let (mut fixture, _old_host, next_host, old, next) =
         lifecycle_native_pair_fixture("offline-name-effect", "ack_only");
     let sender_host = TestAppServer::start_with_effect_at(
-        &fixture.root, "sender.sock", "sender-session", "sender-thread", "ack_only",
+        &fixture.root,
+        "sender.sock",
+        "sender-session",
+        "sender-thread",
+        "ack_only",
     );
-    let seeded = fixture.context_provide("offline-effect-sender", &json!({
-        "session_id":"sender-session", "thread_id":"sender-thread",
-        "endpoint":sender_host.endpoint(), "namespace":"codex_tui"
-    }), None);
+    let seeded = fixture.context_provide(
+        "offline-effect-sender",
+        &json!({
+            "session_id":"sender-session", "thread_id":"sender-thread",
+            "endpoint":sender_host.endpoint(), "namespace":"codex_tui"
+        }),
+        None,
+    );
     let sender = lifecycle_identity(&fixture, &seeded);
     let old_worker = old["worker_id"].as_str().unwrap();
     let next_worker = next["worker_id"].as_str().unwrap();
-    let queued = fixture.configured_command(&[
-        "send", "--to", sender["worker_id"].as_str().unwrap(), "--subject", "retain-current-message",
-        "--content", "retain this message through offline incumbent takeover",
-    ], None)
-        .env("CODEX_APP_SERVER_SOCKET", next_host.endpoint().strip_prefix("unix://").unwrap())
+    let queued = fixture
+        .configured_command(
+            &[
+                "send",
+                "--to",
+                sender["worker_id"].as_str().unwrap(),
+                "--subject",
+                "retain-current-message",
+                "--content",
+                "retain this message through offline incumbent takeover",
+            ],
+            None,
+        )
+        .env(
+            "CODEX_APP_SERVER_SOCKET",
+            next_host.endpoint().strip_prefix("unix://").unwrap(),
+        )
         .env("CODEX_SESSION_ID", "lifecycle-child-session")
         .env("CODEX_THREAD_ID", "lifecycle-child-thread")
-        .output().unwrap();
-    assert!(queued.status.success(), "{}", String::from_utf8_lossy(&queued.stderr));
+        .output()
+        .unwrap();
+    assert!(
+        queued.status.success(),
+        "{}",
+        String::from_utf8_lossy(&queued.stderr)
+    );
     let queued: Value = serde_json::from_slice(&queued.stdout).unwrap();
     let queued_id = queued["msg_id"].as_str().unwrap();
-    let task = lifecycle_wire(&fixture, &sender, json!({"op":"TaskRegister",
+    let task = lifecycle_wire(
+        &fixture,
+        &sender,
+        json!({"op":"TaskRegister",
         "worker_id":sender["worker_id"], "token":sender["token"], "task_id":"retained-current-work",
         "owner":null, "feature_id":null, "worktree_path":null, "branch":null,
-        "base_commit":null, "priority":"p2", "next_step":"continue the same task"}));
+        "base_commit":null, "priority":"p2", "next_step":"continue the same task"}),
+    );
     assert_eq!(task["ok"], true, "{task}");
 
     fixture.stop_daemon();
     let map_path = fixture.host_state.join("identity-map.json");
     let mut map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
-    let value = &mut map["slots"].as_array_mut().unwrap().iter_mut()
-        .find(|slot| slot["current"]["binding"]["agent_id"] == old_worker).unwrap()["current"];
+    let value = &mut map["slots"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|slot| slot["current"]["binding"]["agent_id"] == old_worker)
+        .unwrap()["current"];
     // A current retained identity can lack delivery facts. This is not a new
     // registration and must not borrow an old pane to appear reachable.
     value["transport"]["kind"] = json!("tmux");
-    value["transport"].as_object_mut().unwrap().remove("tmux_endpoint");
+    value["transport"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tmux_endpoint");
     let transport = value["transport"].clone();
     fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
     let state_path = fixture.project_state();
     let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     state["state"]["workers"][old_worker]["transport"] = transport.clone();
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
-    let credential_path = fixture.host_state.join("identities").join(old_worker).join("identity.json");
-    let mut credential: Value = serde_json::from_slice(&fs::read(&credential_path).unwrap()).unwrap();
+    let credential_path = fixture
+        .host_state
+        .join("identities")
+        .join(old_worker)
+        .join("identity.json");
+    let mut credential: Value =
+        serde_json::from_slice(&fs::read(&credential_path).unwrap()).unwrap();
     credential["transport"] = transport;
     fs::write(&credential_path, serde_json::to_vec(&credential).unwrap()).unwrap();
     fixture.restart_daemon();
 
-    let promote = || fixture.configured_command(&[
+    let promote = || {
+        fixture.configured_command(&[
         "context", "--approve-grant",
         r#"{"action":"restore_master","authorization":"user replaces the offline incumbent","replace_confirmed":true}"#,
     ], None)
         .env("CODEX_APP_SERVER_SOCKET", next_host.endpoint().strip_prefix("unix://").unwrap())
         .env("CODEX_SESSION_ID", "lifecycle-child-session")
         .env("CODEX_THREAD_ID", "lifecycle-child-thread")
-        .output().unwrap();
+        .output().unwrap()
+    };
     let retained_credential = credential_path.with_extension("retained");
     fs::rename(&credential_path, &retained_credential).unwrap();
     fs::create_dir(&credential_path).unwrap();
     // R6 does not allocate a companion or rewrite the displaced credential.
     // An unwritable old credential must not block the current holder's work.
     let promoted = promote();
-    assert!(credential_path.is_dir(), "takeover must not rewrite the displaced credential");
+    assert!(
+        credential_path.is_dir(),
+        "takeover must not rewrite the displaced credential"
+    );
     let current_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     assert_ne!(current_state["state"]["msgs"][queued_id]["state"], "read");
     fs::remove_dir(&credential_path).unwrap();
     fs::rename(&retained_credential, &credential_path).unwrap();
-    let sent = fixture.configured_command(&[
-        "send", "--to", next_worker, "--subject", "current-after-takeover", "--content",
-        "current message must not depend on the offline incumbent address",
-    ], None)
-        .env("CODEX_APP_SERVER_SOCKET", sender_host.endpoint().strip_prefix("unix://").unwrap())
+    let sent = fixture
+        .configured_command(
+            &[
+                "send",
+                "--to",
+                next_worker,
+                "--subject",
+                "current-after-takeover",
+                "--content",
+                "current message must not depend on the offline incumbent address",
+            ],
+            None,
+        )
+        .env(
+            "CODEX_APP_SERVER_SOCKET",
+            sender_host.endpoint().strip_prefix("unix://").unwrap(),
+        )
         .env("CODEX_SESSION_ID", "sender-session")
         .env("CODEX_THREAD_ID", "sender-thread")
-        .output().unwrap();
-    assert!(sent.status.success(), "current sender was blocked: {} ; takeover: {} {}",
-        String::from_utf8_lossy(&sent.stderr), String::from_utf8_lossy(&promoted.stdout),
-        String::from_utf8_lossy(&promoted.stderr));
-    assert!(promoted.status.success(), "{} {}", String::from_utf8_lossy(&promoted.stdout),
-        String::from_utf8_lossy(&promoted.stderr));
-    let received = fixture.configured_command(&["recv", "--timeout", "1"], None)
-        .env("CODEX_APP_SERVER_SOCKET", next_host.endpoint().strip_prefix("unix://").unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        sent.status.success(),
+        "current sender was blocked: {} ; takeover: {} {}",
+        String::from_utf8_lossy(&sent.stderr),
+        String::from_utf8_lossy(&promoted.stdout),
+        String::from_utf8_lossy(&promoted.stderr)
+    );
+    assert!(
+        promoted.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&promoted.stdout),
+        String::from_utf8_lossy(&promoted.stderr)
+    );
+    let received = fixture
+        .configured_command(&["recv", "--timeout", "1"], None)
+        .env(
+            "CODEX_APP_SERVER_SOCKET",
+            next_host.endpoint().strip_prefix("unix://").unwrap(),
+        )
         .env("CODEX_SESSION_ID", "lifecycle-child-session")
         .env("CODEX_THREAD_ID", "lifecycle-child-thread")
-        .output().unwrap();
-    assert!(received.status.success(), "{}", String::from_utf8_lossy(&received.stderr));
+        .output()
+        .unwrap();
+    assert!(
+        received.status.success(),
+        "{}",
+        String::from_utf8_lossy(&received.stderr)
+    );
     let received: Value = serde_json::from_slice(&received.stdout).unwrap();
-    assert!(received["messages"].as_array().unwrap().iter()
+    assert!(received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|message| message["subject"] == "current-after-takeover"));
     let saved: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
     assert!(saved["effects"].as_array().unwrap().is_empty());
-    assert!(saved["slots"].as_array().unwrap().iter().all(|slot|
-        !(slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == old_worker)
-    ), "the displaced holder must not receive a companion current: {saved}");
+    assert!(
+        saved["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|slot| !(slot["identity_status"] == "active"
+                && slot["current"]["binding"]["agent_id"] == old_worker)),
+        "the displaced holder must not receive a companion current: {saved}"
+    );
     let master = lifecycle_wire(&fixture, &next, json!({"op":"MasterStatus"}));
     assert_eq!(master["master"]["worker_id"], next["worker_id"]);
     // The old holder has no current identity until its next ordinary context;
     // it is not a retained live worker under an eagerly allocated companion.
-    let task = lifecycle_wire(&fixture, &sender, json!({"op":"TaskStatus","task_id":"retained-current-work"}));
+    let task = lifecycle_wire(
+        &fixture,
+        &sender,
+        json!({"op":"TaskStatus","task_id":"retained-current-work"}),
+    );
     assert_eq!(task["ok"], true, "{task}");
     assert_eq!(task["owner"], sender["worker_id"]);
     assert_eq!(task["status"], "working");
-    let sender_recv = fixture.configured_command(&["recv", "--timeout", "1"], None)
-        .env("CODEX_APP_SERVER_SOCKET", sender_host.endpoint().strip_prefix("unix://").unwrap())
+    let sender_recv = fixture
+        .configured_command(&["recv", "--timeout", "1"], None)
+        .env(
+            "CODEX_APP_SERVER_SOCKET",
+            sender_host.endpoint().strip_prefix("unix://").unwrap(),
+        )
         .env("CODEX_SESSION_ID", "sender-session")
         .env("CODEX_THREAD_ID", "sender-thread")
-        .output().unwrap();
-    assert!(sender_recv.status.success(), "{}", String::from_utf8_lossy(&sender_recv.stderr));
+        .output()
+        .unwrap();
+    assert!(
+        sender_recv.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sender_recv.stderr)
+    );
     let consumed: Value = serde_json::from_slice(&sender_recv.stdout).unwrap();
-    assert!(consumed["messages"].as_array().unwrap().iter().any(|message| message["id"] == queued_id));
+    assert!(consumed["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == queued_id));
     let receive_id = consumed["receive_id"].as_str().unwrap();
     fixture.restart_daemon();
-    let replayed = fixture.configured_command(&["recv", "--receive-id", receive_id], None)
-        .env("CODEX_APP_SERVER_SOCKET", sender_host.endpoint().strip_prefix("unix://").unwrap())
+    let replayed = fixture
+        .configured_command(&["recv", "--receive-id", receive_id], None)
+        .env(
+            "CODEX_APP_SERVER_SOCKET",
+            sender_host.endpoint().strip_prefix("unix://").unwrap(),
+        )
         .env("CODEX_SESSION_ID", "sender-session")
         .env("CODEX_THREAD_ID", "sender-thread")
-        .output().unwrap();
-    assert!(replayed.status.success(), "{}", String::from_utf8_lossy(&replayed.stderr));
+        .output()
+        .unwrap();
+    assert!(
+        replayed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
     let replayed: Value = serde_json::from_slice(&replayed.stdout).unwrap();
     assert_eq!(replayed["messages"], serde_json::json!([]));
     assert_eq!(
@@ -1345,12 +1520,21 @@ fn offline_incumbent_name_change_does_not_block_current_messages() {
     let missing = fixture.command(&["context", "--provide",
         r#"{"session_id":"new-session-without-address","thread_id":"new-thread-without-address","namespace":"codex_tui"}"#,
     ], None);
-    assert_eq!(missing.status.code(), Some(2), "{} {}", String::from_utf8_lossy(&missing.stdout),
-        String::from_utf8_lossy(&missing.stderr));
+    assert_eq!(
+        missing.status.code(),
+        Some(2),
+        "{} {}",
+        String::from_utf8_lossy(&missing.stdout),
+        String::from_utf8_lossy(&missing.stderr)
+    );
     let mut forged = sender.clone();
     forged["token"] = json!("wrong-token");
-    let refused = lifecycle_wire(&fixture, &forged, json!({"op":"Inbox",
-        "worker_id":sender["worker_id"],"token":"wrong-token"}));
+    let refused = lifecycle_wire(
+        &fixture,
+        &forged,
+        json!({"op":"Inbox",
+        "worker_id":sender["worker_id"],"token":"wrong-token"}),
+    );
     assert_eq!(refused["ok"], false);
 }
 
@@ -1479,7 +1663,8 @@ fn daemon_startup_accepts_current_identity_without_transport_and_context_repairs
             .lines()
             .find_map(|line| line.strip_prefix("collab response: "))
             .expect("Send must return an explicit durable response"),
-    ).unwrap();
+    )
+    .unwrap();
     let message_id = sent["msg_id"].as_str().unwrap();
     assert_eq!(sent["durable"], true, "{sent}");
     assert_eq!(sent["notification"], "subscribed-not-sent", "{sent}");
@@ -1499,13 +1684,11 @@ fn daemon_startup_accepts_current_identity_without_transport_and_context_repairs
         fixture.registered_context("identity-map-current-without-transport-restore", &pane);
     assert_eq!(restored["result"]["outcome"], "completed", "{restored}");
     assert_eq!(
-        restored["result"]["snapshot"]["identity"]["worker_id"],
-        worker,
+        restored["result"]["snapshot"]["identity"]["worker_id"], worker,
         "{restored}"
     );
     assert_eq!(
-        restored["result"]["snapshot"]["identity"]["transport"]["kind"],
-        "tmux",
+        restored["result"]["snapshot"]["identity"]["transport"]["kind"], "tmux",
         "{restored}"
     );
     let repaired: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
@@ -1519,9 +1702,11 @@ fn daemon_startup_accepts_current_identity_without_transport_and_context_repairs
         .expect("the repaired worker still owns the current slot");
     assert_eq!(current["current"]["transport"]["kind"], "tmux");
     let received = fixture.run_ok(&["recv", "--timeout", "2"], Some(&pane));
-    assert!(received["messages"].as_array().unwrap().iter().any(|message| {
-        message["id"] == message_id && message["body"] == body
-    }));
+    assert!(received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| { message["id"] == message_id && message["body"] == body }));
 }
 
 #[test]
@@ -1536,11 +1721,15 @@ fn endpointless_startup_does_not_rearm_or_report_stale_transport() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    let subscribed = lifecycle_wire(&fixture, &identity, json!({
-        "op":"NotificationSubscribe","worker_id":worker,"token":identity["token"],
-        "event":"deadline","subject":"endpointless-timer",
-        "trigger_ms":trigger_ms+60_000,"repeat_count":1,"ttl_seconds":3600
-    }));
+    let subscribed = lifecycle_wire(
+        &fixture,
+        &identity,
+        json!({
+            "op":"NotificationSubscribe","worker_id":worker,"token":identity["token"],
+            "event":"deadline","subject":"endpointless-timer",
+            "trigger_ms":trigger_ms+60_000,"repeat_count":1,"ttl_seconds":3600
+        }),
+    );
     assert_eq!(subscribed["ok"], true, "{subscribed}");
     let deadline_id = subscribed["subscription"]["id"].as_str().unwrap();
     fixture.stop_daemon();
@@ -1551,7 +1740,10 @@ fn endpointless_startup_does_not_rearm_or_report_stale_transport() {
     let state = &mut saved["state"];
     assert!(state["workers"][worker]["transport"].is_object());
     let subscriptions = state["notification_subscriptions"].as_object_mut().unwrap();
-    assert!(subscriptions.remove(&lease_id).is_some(), "{subscriptions:?}");
+    assert!(
+        subscriptions.remove(&lease_id).is_some(),
+        "{subscriptions:?}"
+    );
     // The saved deadline becomes due while the fixture daemon is stopped.
     subscriptions.get_mut(deadline_id).unwrap()["trigger_ms"] = json!(trigger_ms);
     let expected_subscriptions = subscriptions.clone();
@@ -1559,18 +1751,30 @@ fn endpointless_startup_does_not_rearm_or_report_stale_transport() {
 
     let map_path = fixture.host_state.join("identity-map.json");
     let mut map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
-    let slot = map["slots"].as_array_mut().unwrap().iter_mut().find(|slot| {
-        slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == worker
-    }).unwrap();
+    let slot = map["slots"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|slot| {
+            slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == worker
+        })
+        .unwrap();
     slot["current"].as_object_mut().unwrap().remove("transport");
     fs::write(&map_path, serde_json::to_vec_pretty(&map).unwrap()).unwrap();
     fixture.restart_after_external_stop();
 
     let old_route = lifecycle_wire(&fixture, &identity, route_request);
     assert_eq!(old_route["ok"], false, "{old_route}");
-    assert!(old_route["error"].as_str().unwrap().starts_with("ROUTE_RESOLVE_NOT_FOUND:"));
+    assert!(old_route["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("ROUTE_RESOLVE_NOT_FOUND:"));
 
-    let status = lifecycle_wire(&fixture, &identity, json!({"op":"WorkerStatus","worker_id":worker}));
+    let status = lifecycle_wire(
+        &fixture,
+        &identity,
+        json!({"op":"WorkerStatus","worker_id":worker}),
+    );
     assert_eq!(status["ok"], true, "{status}");
     let row = unmapped_worker_row(&status, worker);
     assert!(row["transport"].is_null(), "{row}");
@@ -1579,19 +1783,32 @@ fn endpointless_startup_does_not_rearm_or_report_stale_transport() {
     assert_eq!(row["identity_valid"], true, "{row}");
     assert_eq!(row["status"], "unknown", "{row}");
 
-    let context = lifecycle_wire(&fixture, &identity, json!({
-        "op":"Context","worker_id":worker,"token":identity["token"]
-    }));
+    let context = lifecycle_wire(
+        &fixture,
+        &identity,
+        json!({
+            "op":"Context","worker_id":worker,"token":identity["token"]
+        }),
+    );
     assert_eq!(context["ok"], true, "{context}");
-    assert!(wait_until(Duration::from_secs(15), || {
-        fixture.current_state()["wake_bindings"].as_object().unwrap().iter().any(
-            |(_, subscription)| subscription == deadline_id
-        )
-    }), "the deadline must enter the durable mailbox while the endpoint is absent");
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            fixture.current_state()["wake_bindings"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .any(|(_, subscription)| subscription == deadline_id)
+        }),
+        "the deadline must enter the durable mailbox while the endpoint is absent"
+    );
     let after = fixture.current_state();
-    let message_id = after["wake_bindings"].as_object().unwrap().iter()
+    let message_id = after["wake_bindings"]
+        .as_object()
+        .unwrap()
+        .iter()
         .find(|(_, subscription)| *subscription == deadline_id)
-        .map(|(id, _)| id).unwrap();
+        .map(|(id, _)| id)
+        .unwrap();
     assert_eq!(after["msgs"][message_id]["state"], "pending");
     assert_eq!(after["msgs"][message_id]["wake_attempt_count"], 0);
     assert!(after["notification_delivery_accepted"][message_id].is_null());
@@ -1851,9 +2068,11 @@ fn current_state_restart_preserves_identity_roles_messages_and_open_tasks() {
     drop(native);
 
     fixture.stop_daemon();
-    let mut obsolete_fields: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let mut obsolete_fields: Value =
+        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     obsolete_fields["state"]["migration"] = json!({"phase":"applied", "admission_frozen":true});
-    obsolete_fields["state"]["global"]["migration_commit_evidence"] = json!({"unused":"not a current proof"});
+    obsolete_fields["state"]["global"]["migration_commit_evidence"] =
+        json!({"unused":"not a current proof"});
     fs::write(&state_path, serde_json::to_vec(&obsolete_fields).unwrap()).unwrap();
     fixture.start_daemon();
     let restored = fixture.context_provide(
@@ -1920,11 +2139,19 @@ fn current_state_restart_preserves_identity_roles_messages_and_open_tasks() {
         json!({"op":"TaskUpdate", "worker_id":recipient, "token":current_identity["token"],
             "task_id":"open-current-task", "status":"verifying", "next_step":"current mutation after restart"}),
     );
-    assert_eq!(updated["ok"], true, "obsolete inner fields must not freeze current admission: {updated}");
+    assert_eq!(
+        updated["ok"], true,
+        "obsolete inner fields must not freeze current admission: {updated}"
+    );
     let saved: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     assert!(saved["state"].get("migration").is_none());
-    assert!(saved["state"]["global"].get("migration_commit_evidence").is_none());
-    assert_eq!(saved["state"]["tasks"]["open-current-task"]["status"], "verifying");
+    assert!(saved["state"]["global"]
+        .get("migration_commit_evidence")
+        .is_none());
+    assert_eq!(
+        saved["state"]["tasks"]["open-current-task"]["status"],
+        "verifying"
+    );
     assert_eq!(saved["state"]["msgs"][first_id]["state"], "read");
     assert_ne!(saved["state"]["msgs"][second_id]["state"], "read");
 }
@@ -2048,8 +2275,7 @@ fn identity_map_missing_does_not_infer_assignment_for_legacy_task() {
 
     fixture.stop_daemon();
     let state_path = fixture.project_state();
-    let mut document: Value =
-        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let mut document: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     let state = document["state"].as_object_mut().unwrap();
     state["task_assignments"]
         .as_object_mut()
@@ -2123,7 +2349,9 @@ fn project_prefixed_names_coexist_and_restore_on_one_tmux_server() {
         session_anchor: "second-project-session".into(),
         thread_anchor: "second-project-thread".into(),
     };
-    let manifest_path = fixture.root.join("home/.local/state/tm-iterm/manifest.json");
+    let manifest_path = fixture
+        .root
+        .join("home/.local/state/tm-iterm/manifest.json");
     fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
     let manifest = json!([
         {
@@ -2233,7 +2461,13 @@ fn public_context_fixes_the_tmux_session_name_and_restores_by_it() {
     let (mut fixture, pane) = Fixture::isolated("session-name-anchor");
     let original = tmux_session_name(&fixture, &pane);
     assert_ne!(original, "Alice");
-    bind_fixed_test_position(&fixture, &pane, "session-anchor-position-seven", "session_anchor", 7);
+    bind_fixed_test_position(
+        &fixture,
+        &pane,
+        "session-anchor-position-seven",
+        "session_anchor",
+        7,
+    );
 
     let first = success_payload(&run_context_cli(
         &fixture,
@@ -2355,7 +2589,13 @@ fn public_context_rename_failure_reports_physical_error_and_keeps_current_identi
     let original = tmux_session_name(&fixture, &pane);
     let occupied = project_tmux_name(&fixture.root, 8, "Alice");
     let tab_id = fixture.root.file_name().unwrap().to_str().unwrap();
-    bind_fixed_test_position(&fixture, &pane, "initial-conflict-position-eight", tab_id, 8);
+    bind_fixed_test_position(
+        &fixture,
+        &pane,
+        "initial-conflict-position-eight",
+        tab_id,
+        8,
+    );
     tmux(
         &fixture.tmux_socket,
         &["new-session", "-d", "-s", &occupied, "sleep 600"],
@@ -2376,24 +2616,38 @@ fn public_context_rename_failure_reports_physical_error_and_keeps_current_identi
         false,
     );
     assert!(
-        text(&output).contains(&format!("TMUX_SESSION_RENAME_FAILED: duplicate session: {occupied}")),
+        text(&output).contains(&format!(
+            "TMUX_SESSION_RENAME_FAILED: duplicate session: {occupied}"
+        )),
         "{}",
         text(&output)
     );
     assert_eq!(tmux_session_name(&fixture, &pane), original);
     let query = fixture.context_query("ctxop-session-name-conflict-readback", Some(&pane));
     assert_eq!(query["result"]["outcome"], "incomplete", "{query}");
-    assert_eq!(query["result"]["snapshot"]["physical_anchor"]["status"], "incomplete", "{query}");
+    assert_eq!(
+        query["result"]["snapshot"]["physical_anchor"]["status"], "incomplete",
+        "{query}"
+    );
     assert_eq!(query["result"]["snapshot"]["name"], "Alice", "{query}");
     assert!(query["result"]["snapshot"]["master"].is_null(), "{query}");
     let current = current_map_holder(&fixture, "Alice");
     assert_eq!(
-        current["binding"]["agent_id"],
-        query["result"]["snapshot"]["identity"]["worker_id"],
+        current["binding"]["agent_id"], query["result"]["snapshot"]["identity"]["worker_id"],
         "{current}"
     );
-    assert_eq!(String::from_utf8(tmux(&fixture.tmux_socket,
-        &["display-message", "-p", "-t", &occupied, "#{session_name}"]).stdout).unwrap().trim(), occupied);
+    assert_eq!(
+        String::from_utf8(
+            tmux(
+                &fixture.tmux_socket,
+                &["display-message", "-p", "-t", &occupied, "#{session_name}"]
+            )
+            .stdout
+        )
+        .unwrap()
+        .trim(),
+        occupied
+    );
 }
 
 #[test]
@@ -2401,26 +2655,66 @@ fn public_context_replaces_the_physical_session_for_the_same_agent() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, first) = Fixture::isolated("session-refresh-name-conflict");
     let tab_id = fixture.root.file_name().unwrap().to_str().unwrap();
-    bind_fixed_test_position(&fixture, &first, "refresh-conflict-position-eight", tab_id, 8);
-    let registered = success_payload(&run_context_cli(&fixture, Some(&first),
-        Some("refresh-conflict-register"), None, None, None, None, None, false));
-    let worker = registered["result"]["snapshot"]["identity"]["worker_id"].as_str().unwrap();
+    bind_fixed_test_position(
+        &fixture,
+        &first,
+        "refresh-conflict-position-eight",
+        tab_id,
+        8,
+    );
+    let registered = success_payload(&run_context_cli(
+        &fixture,
+        Some(&first),
+        Some("refresh-conflict-register"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    ));
+    let worker = registered["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
     let occupied = tmux_session_name(&fixture, &first);
     let mut moved = second_pane(&fixture, "refresh-conflict-incoming", first.server_pid);
     moved.session_anchor = first.session_anchor.clone();
     fixture.start_pane_runner_on_socket(&fixture.tmux_socket, &moved.pane_id, "sleep 600");
-    bind_fixed_test_position(&fixture, &moved, "refresh-conflict-position-eight", tab_id, 8);
-    let refreshed = success_payload(&run_context_cli(&fixture, Some(&moved),
-        Some("refresh-conflict-current"), None, None, None, None, None, false));
+    bind_fixed_test_position(
+        &fixture,
+        &moved,
+        "refresh-conflict-position-eight",
+        tab_id,
+        8,
+    );
+    let refreshed = success_payload(&run_context_cli(
+        &fixture,
+        Some(&moved),
+        Some("refresh-conflict-current"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    ));
     assert_eq!(refreshed["result"]["outcome"], "completed");
-    assert!(tmux_session_name(&fixture, &first).bytes().all(|byte| byte.is_ascii_digit()));
+    assert!(tmux_session_name(&fixture, &first)
+        .bytes()
+        .all(|byte| byte.is_ascii_digit()));
     assert_eq!(tmux_session_name(&fixture, &moved), occupied);
     let query = fixture.context_query("refresh-conflict-readback", Some(&moved));
     assert_eq!(query["result"]["outcome"], "completed", "{query}");
-    assert_eq!(query["result"]["snapshot"]["identity"]["worker_id"], worker, "{query}");
+    assert_eq!(
+        query["result"]["snapshot"]["identity"]["worker_id"], worker,
+        "{query}"
+    );
     let current = current_map_holder(&fixture, "Alice");
     assert_eq!(current["binding"]["agent_id"], worker, "{current}");
-    assert_eq!(current["transport"]["tmux_endpoint"]["pane_id"], moved.pane_id, "{current}");
+    assert_eq!(
+        current["transport"]["tmux_endpoint"]["pane_id"], moved.pane_id,
+        "{current}"
+    );
 }
 
 #[test]
@@ -2620,17 +2914,47 @@ fn persisted_context_uses_daemon_observation_without_adjacent_admission() {
     );
     let master = master_status(&fixture, &pane);
     let binding = seed["result"]["snapshot"]["binding"].clone();
-    let worker = seed["result"]["snapshot"]["identity"]["worker_id"].as_str().unwrap();
-    let credential = fixture.host_state.join("identities").join(worker).join("identity.json");
-    let original_credential: Value = serde_json::from_slice(&fs::read(&credential).unwrap()).unwrap();
+    let worker = seed["result"]["snapshot"]["identity"]["worker_id"]
+        .as_str()
+        .unwrap();
+    let credential = fixture
+        .host_state
+        .join("identities")
+        .join(worker)
+        .join("identity.json");
+    let original_credential: Value =
+        serde_json::from_slice(&fs::read(&credential).unwrap()).unwrap();
     let original_state = fixture.current_state();
     let original_worker = original_state["workers"][worker].clone();
-    let original_grants = original_state["global"]["projects"][canonical_root(&fixture)]["master_grants"].clone();
-    let original_map: Value = serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap()).unwrap();
-    let original_slot = original_map["slots"].as_array().unwrap().iter().find(|slot|
-        slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == worker).unwrap().clone();
-    let subscription_routes = |state: &Value| state["notification_subscriptions"].as_object().unwrap().iter()
-        .map(|(id, subscription)| json!([id, subscription["worker_id"], subscription["target"], subscription["method"]])).collect::<Vec<_>>();
+    let original_grants =
+        original_state["global"]["projects"][canonical_root(&fixture)]["master_grants"].clone();
+    let original_map: Value =
+        serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap())
+            .unwrap();
+    let original_slot = original_map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active" && slot["current"]["binding"]["agent_id"] == worker
+        })
+        .unwrap()
+        .clone();
+    let subscription_routes = |state: &Value| {
+        state["notification_subscriptions"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(id, subscription)| {
+                json!([
+                    id,
+                    subscription["worker_id"],
+                    subscription["target"],
+                    subscription["method"]
+                ])
+            })
+            .collect::<Vec<_>>()
+    };
     let original_subscriptions = subscription_routes(&original_state);
     let wrapper_dir = fixture.root.join("failed-display");
     fs::create_dir(&wrapper_dir).unwrap();
@@ -2674,18 +2998,38 @@ fn persisted_context_uses_daemon_observation_without_adjacent_admission() {
             master["worker_id"]
         );
         assert!(result["result"]["nested_command_id"].is_null());
-        assert_eq!(serde_json::from_slice::<Value>(&fs::read(&credential).unwrap()).unwrap(), original_credential);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&credential).unwrap()).unwrap(),
+            original_credential
+        );
         let state = fixture.current_state();
         assert_eq!(state["workers"][worker], original_worker);
-        assert_eq!(state["global"]["projects"][canonical_root(&fixture)]["master_grants"], original_grants);
+        assert_eq!(
+            state["global"]["projects"][canonical_root(&fixture)]["master_grants"],
+            original_grants
+        );
         assert_eq!(subscription_routes(&state), original_subscriptions);
-        let map: Value = serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap()).unwrap();
-        let current_slot = map["slots"].as_array().unwrap().iter().find(|slot| {
-            slot["identity_status"] == "active"
-                && slot["identity_key"] == original_slot["identity_key"]
-        }).expect("the same logical name remains current");
-        assert_eq!(current_slot["current"]["binding"], original_slot["current"]["binding"]);
-        assert_eq!(current_slot["current"]["transport"], original_slot["current"]["transport"]);
+        let map: Value = serde_json::from_slice(
+            &fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        )
+        .unwrap();
+        let current_slot = map["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|slot| {
+                slot["identity_status"] == "active"
+                    && slot["identity_key"] == original_slot["identity_key"]
+            })
+            .expect("the same logical name remains current");
+        assert_eq!(
+            current_slot["current"]["binding"],
+            original_slot["current"]["binding"]
+        );
+        assert_eq!(
+            current_slot["current"]["transport"],
+            original_slot["current"]["transport"]
+        );
         assert_eq!(master_status(&fixture, &pane), master);
     }
 }
@@ -3271,7 +3615,9 @@ fn session_recovery_no_target_peer_intent_uses_current_carrier() {
     );
     let before_denial = identity_tree(&fixture.host_state);
     let before_map = fs::read(fixture.host_state.join("identity-map.json")).unwrap();
-    let before_grants = fixture.current_state()["global"]["projects"][canonical_root(&fixture)]["master_grants"].clone();
+    let before_grants = fixture.current_state()["global"]["projects"][canonical_root(&fixture)]
+        ["master_grants"]
+        .clone();
     let denied = fixture.command(&[
         "context", "--op", "peer-intent-explicit-denial", "--approve-grant",
         r#"{"decision":"denied","action":"restore_master","authorization":"user did not approve master"}"#,
@@ -3282,8 +3628,14 @@ fn session_recovery_no_target_peer_intent_uses_current_carrier() {
     );
     assert!(text(&denied).contains("NAME_AUTHORIZATION_REQUIRED"));
     assert_eq!(identity_tree(&fixture.host_state), before_denial);
-    assert_eq!(fs::read(fixture.host_state.join("identity-map.json")).unwrap(), before_map);
-    assert_eq!(fixture.current_state()["global"]["projects"][canonical_root(&fixture)]["master_grants"], before_grants);
+    assert_eq!(
+        fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        before_map
+    );
+    assert_eq!(
+        fixture.current_state()["global"]["projects"][canonical_root(&fixture)]["master_grants"],
+        before_grants
+    );
 }
 
 #[test]
@@ -3529,9 +3881,14 @@ fn b07_missing_facts_are_exact_and_fresh_supplement_registers_through_public_cli
         completed["result"]["snapshot"]["registered"], true,
         "{completed}"
     );
-    let current: Value = serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap()).unwrap();
+    let current: Value =
+        serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap())
+            .unwrap();
     assert_eq!(current["slots"].as_array().unwrap().len(), 1);
-    assert_eq!(current["slots"][0]["current"]["binding"]["session_id"], session_id);
+    assert_eq!(
+        current["slots"][0]["current"]["binding"]["session_id"],
+        session_id
+    );
     drop(appserver);
 }
 
@@ -3556,7 +3913,10 @@ fn b08_profile_persistence_register_and_query_ignore_query_override() {
         None,
     );
     assert_eq!(registered["result"]["outcome"], "completed", "{registered}");
-    assert!(registered["result"]["snapshot"]["identity"]["profile"].is_null(), "{registered}");
+    assert!(
+        registered["result"]["snapshot"]["identity"]["profile"].is_null(),
+        "{registered}"
+    );
 
     let map_path = fixture.host_state.join("identity-map.json");
     let map_after_registration: Value =
@@ -3572,7 +3932,10 @@ fn b08_profile_persistence_register_and_query_ignore_query_override() {
     });
     let saved = fixture.context_provide("ctxop-profile-persistence-save", &facts, None);
     assert_eq!(saved["result"]["outcome"], "completed", "{saved}");
-    assert_eq!(saved["result"]["snapshot"]["identity"]["profile"], profile, "{saved}");
+    assert_eq!(
+        saved["result"]["snapshot"]["identity"]["profile"], profile,
+        "{saved}"
+    );
 
     let map_after_save = fs::read(&map_path).unwrap();
     let saved_map: Value = serde_json::from_slice(&map_after_save).unwrap();
@@ -3592,8 +3955,7 @@ fn b08_profile_persistence_register_and_query_ignore_query_override() {
     assert!(queried_output.status.success(), "{queried_output:?}");
     let queried = json_stdout(&queried_output);
     assert_eq!(
-        queried["result"]["snapshot"]["identity"]["profile"],
-        profile,
+        queried["result"]["snapshot"]["identity"]["profile"], profile,
         "{queried}"
     );
     assert_eq!(fs::read(&map_path).unwrap(), map_after_save);
@@ -3620,8 +3982,7 @@ fn b08_profile_persistence_register_and_query_ignore_query_override() {
     assert!(override_output.status.success(), "{override_output:?}");
     let override_result = json_stdout(&override_output);
     assert_eq!(
-        override_result["result"]["snapshot"]["identity"]["profile"],
-        profile,
+        override_result["result"]["snapshot"]["identity"]["profile"], profile,
         "{override_result}"
     );
     assert_eq!(fs::read(&map_path).unwrap(), map_after_save);
@@ -3648,7 +4009,8 @@ fn b08_profile_persistence_register_and_query_ignore_query_override() {
         );
         assert!(!invalid_output.status.success(), "{invalid_output:?}");
         assert!(
-            String::from_utf8_lossy(&invalid_output.stderr).contains("IDENTITY_FACT_INVALID: profile"),
+            String::from_utf8_lossy(&invalid_output.stderr)
+                .contains("IDENTITY_FACT_INVALID: profile"),
             "{}",
             String::from_utf8_lossy(&invalid_output.stderr)
         );
@@ -3668,10 +4030,36 @@ fn rex_layout_public_fixture(label: &str) -> (Fixture, std::os::unix::net::UnixL
     (fixture, listener, server)
 }
 
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn current_rex_name(fixture: &Fixture) -> String {
+    let map: Value =
+        serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap())
+            .unwrap();
+    map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| slot["current"].is_object())
+        .and_then(|slot| slot["identity_key"]["name"].as_str())
+        .expect("one current Rex name")
+        .to_owned()
+}
+
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn retirement_approval(name: &str) -> String {
+    json!({
+        "action": "retire_name",
+        "requested_name": name,
+        "authorization": "isolated public Save admission regression",
+    })
+    .to_string()
+}
+
 #[test]
 #[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
 fn b08_rex_layout_inherits_existing_profile_and_public_query_reads_authoritative_record() {
-    let (fixture, _rex_listener, rex_server) = rex_layout_public_fixture("rex-layout-public-profile");
+    let (fixture, _rex_listener, rex_server) =
+        rex_layout_public_fixture("rex-layout-public-profile");
     let suffix = std::process::id();
     let agent_session = format!("rex-layout-agent-{suffix}");
     let thread_id = format!("rex-layout-thread-{suffix}");
@@ -3692,7 +4080,10 @@ fn b08_rex_layout_inherits_existing_profile_and_public_query_reads_authoritative
     assert_eq!(registered["result"]["outcome"], "completed", "{registered}");
     let map_path = fixture.host_state.join("identity-map.json");
     let before_rex: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
-    assert_eq!(before_rex["slots"][0]["current"]["host"]["profile"], profile);
+    assert_eq!(
+        before_rex["slots"][0]["current"]["host"]["profile"],
+        profile
+    );
     assert!(before_rex["slots"][0]["current"]["rex_layout"].is_null());
 
     let rex = json!({
@@ -3708,8 +4099,7 @@ fn b08_rex_layout_inherits_existing_profile_and_public_query_reads_authoritative
     );
     assert_eq!(saved["result"]["outcome"], "completed", "{saved}");
     assert_eq!(
-        saved["result"]["snapshot"]["identity"]["profile"],
-        profile,
+        saved["result"]["snapshot"]["identity"]["profile"], profile,
         "{saved}"
     );
 
@@ -3726,28 +4116,23 @@ fn b08_rex_layout_inherits_existing_profile_and_public_query_reads_authoritative
         .expect("Rex layout binding is current");
     assert_eq!(slot["current"]["host"]["profile"], profile, "{slot}");
     assert_eq!(
-        slot["current"]["binding"]["session_id"],
-        agent_session,
+        slot["current"]["binding"]["session_id"], agent_session,
         "{slot}"
     );
     assert_eq!(
-        slot["current"]["transport"]["rex_endpoint"]["server"],
-        rex["server"],
+        slot["current"]["transport"]["rex_endpoint"]["server"], rex["server"],
         "{slot}"
     );
     assert_eq!(
-        slot["current"]["rex_layout"]["session_id"],
-        rex["session_id"],
+        slot["current"]["rex_layout"]["session_id"], rex["session_id"],
         "{slot}"
     );
     assert_eq!(
-        slot["current"]["rex_layout"]["block_id"],
-        rex["block_id"],
+        slot["current"]["rex_layout"]["block_id"], rex["block_id"],
         "{slot}"
     );
     assert_eq!(
-        slot["current"]["rex_layout"]["layout"]["block_id"],
-        rex["block_id"],
+        slot["current"]["rex_layout"]["layout"]["block_id"], rex["block_id"],
         "{slot}"
     );
 
@@ -3771,8 +4156,7 @@ fn b08_rex_layout_inherits_existing_profile_and_public_query_reads_authoritative
     assert!(queried_output.status.success(), "{queried_output:?}");
     let queried: Value = serde_json::from_slice(&queried_output.stdout).unwrap();
     assert_eq!(
-        queried["result"]["snapshot"]["identity"]["profile"],
-        profile,
+        queried["result"]["snapshot"]["identity"]["profile"], profile,
         "{queried}"
     );
     assert_eq!(
@@ -3827,14 +4211,29 @@ fn b08_rex_first_registration_save_rejects_without_publication() {
             "block_id": "block:22222222-2222-2222-2222-222222222222",
             "cwd": fixture.root.to_string_lossy(),
         }
-    }).to_string();
+    })
+    .to_string();
     let output = fixture.command(
-        &["context", "--op", "ctxop-first-save", "--provide", &provide, "--save"],
+        &[
+            "context",
+            "--op",
+            "ctxop-first-save",
+            "--provide",
+            &provide,
+            "--save",
+        ],
         None,
     );
     assert!(!output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("REX_SAVE_REQUIRES_EXISTING_BINDING"), "{output:?}");
-    assert_eq!(fs::read(&map_path).ok(), before, "rejected Save must not publish a binding");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("REX_SAVE_REQUIRES_EXISTING_BINDING"),
+        "{output:?}"
+    );
+    assert_eq!(
+        fs::read(&map_path).ok(),
+        before,
+        "rejected Save must not publish a binding"
+    );
     let facts: Value = serde_json::from_str(&provide).unwrap();
     let registered = fixture.context_provide("ctxop-first-register", &facts, None);
     assert_eq!(registered["result"]["outcome"], "completed", "{registered}");
@@ -3844,10 +4243,212 @@ fn b08_rex_first_registration_save_rejects_without_publication() {
     assert_eq!(saved["result"]["outcome"], "completed", "{saved}");
     let saved_map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
     let current = &saved_map["slots"][0]["current"];
-    assert_eq!(current["binding"]["session_id"], facts["session_id"], "{current}");
+    assert_eq!(
+        current["binding"]["session_id"], facts["session_id"],
+        "{current}"
+    );
     assert_eq!(current["host"]["profile"], facts["profile"], "{current}");
-    assert_eq!(current["rex_layout"]["block_id"], facts["rex"]["block_id"], "{current}");
-    assert_eq!(current["rex_layout"]["layout"]["block_id"], facts["rex"]["block_id"], "{current}");
+    assert_eq!(
+        current["rex_layout"]["block_id"], facts["rex"]["block_id"],
+        "{current}"
+    );
+    assert_eq!(
+        current["rex_layout"]["layout"]["block_id"], facts["rex"]["block_id"],
+        "{current}"
+    );
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn b08_rex_save_racing_retirement_cannot_publish_a_replacement() {
+    let (fixture, _listener, server) = rex_layout_public_fixture("rex-save-race-retirement");
+    let facts = json!({
+        "session_id": "rex-save-race-agent",
+        "profile": "gcm",
+        "rex": {
+            "server": server,
+            "session_id": "session:11111111-1111-1111-1111-111111111111",
+            "block_id": "block:22222222-2222-2222-2222-222222222222",
+            "cwd": fixture.root.to_string_lossy(),
+        }
+    });
+    let registered = fixture.context_provide("save-race-register", &facts, None);
+    assert_eq!(registered["result"]["outcome"], "completed", "{registered}");
+    let name = current_rex_name(&fixture);
+    let provide = facts.to_string();
+    fs::write(fixture.root.join("pause-method"), "session.view").unwrap();
+    let mut save = fixture.spawn_command(
+        &[
+            "context",
+            "--op",
+            "save-race-observation",
+            "--provide",
+            &provide,
+            "--save",
+        ],
+        None,
+    );
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            fixture.root.join("method-entered").exists()
+        }),
+        "Save never reached the Rex layout observation barrier"
+    );
+
+    let approval = retirement_approval(&name);
+    let retired = fixture.command(
+        &[
+            "context",
+            "--op",
+            "save-race-retire",
+            "--approve-grant",
+            &approval,
+        ],
+        None,
+    );
+    assert!(
+        retired.status.success(),
+        "standalone retirement failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&retired.stdout),
+        String::from_utf8_lossy(&retired.stderr)
+    );
+    let retirement_baseline = fs::read(fixture.host_state.join("identity-map.json")).unwrap();
+
+    fs::write(fixture.root.join("method-release"), b"continue").unwrap();
+    let saved = save.wait_with_output().unwrap();
+    let saved_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&saved.stdout),
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert!(
+        !saved.status.success(),
+        "Save republished a retired current: {saved_text}"
+    );
+    assert!(
+        saved_text.contains("REX_SAVE_REQUIRES_EXISTING_BINDING"),
+        "{saved_text}"
+    );
+    assert_eq!(
+        fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
+        retirement_baseline,
+        "the rejected Save must leave the post-retirement map unchanged"
+    );
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn b08_rex_save_rejects_grant_retirement_approval_before_mutation() {
+    rex_save_rejects_retirement_approval_before_mutation("--approve-grant");
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn b08_rex_save_rejects_identity_retirement_approval_before_mutation() {
+    rex_save_rejects_retirement_approval_before_mutation("--approve-identity");
+}
+
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn rex_save_rejects_retirement_approval_before_mutation(flag: &str) {
+    let label = format!(
+        "rex-save-retirement-{}",
+        flag.trim_start_matches('-').replace('-', "-")
+    );
+    let (fixture, _listener, server) = rex_layout_public_fixture(&label);
+    let facts = json!({
+        "session_id": format!("rex-save-retirement-agent-{flag}"),
+        "profile": "gcm",
+        "rex": {
+            "server": server,
+            "session_id": "session:11111111-1111-1111-1111-111111111111",
+            "block_id": "block:22222222-2222-2222-2222-222222222222",
+            "cwd": fixture.root.to_string_lossy(),
+        }
+    });
+    let registered = fixture.context_provide("save-retirement-register", &facts, None);
+    assert_eq!(registered["result"]["outcome"], "completed", "{registered}");
+    let name = current_rex_name(&fixture);
+    let map_path = fixture.host_state.join("identity-map.json");
+    let before = fs::read(&map_path).unwrap();
+    let approval = retirement_approval(&name);
+    let provide = facts.to_string();
+    let rejected = fixture.command(
+        &[
+            "context",
+            "--op",
+            &format!("save-retirement-{flag}"),
+            "--provide",
+            &provide,
+            "--save",
+            flag,
+            &approval,
+        ],
+        None,
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(!rejected.status.success(), "{flag}: {text}");
+    assert!(
+        text.contains("REX_SAVE_INCOMPATIBLE_RETIREMENT"),
+        "{flag}: {text}"
+    );
+    assert_eq!(
+        fs::read(&map_path).unwrap(),
+        before,
+        "{flag}: map must remain exact"
+    );
+    let baseline: Value = serde_json::from_slice(&before).unwrap();
+    let after: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let current = &after["slots"].as_array().unwrap()[0]["current"];
+    assert_eq!(
+        after["slots"], baseline["slots"],
+        "{flag}: holder, generation and work ownership"
+    );
+    assert!(current["rex_layout"].is_null(), "{flag}: {current}");
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn b08_rex_standalone_retirement_remains_legal() {
+    let (fixture, _listener, server) = rex_layout_public_fixture("rex-standalone-retirement");
+    let facts = json!({
+        "session_id": "rex-standalone-retirement-agent",
+        "profile": "gcm",
+        "rex": {
+            "server": server,
+            "session_id": "session:11111111-1111-1111-1111-111111111111",
+            "block_id": "block:22222222-2222-2222-2222-222222222222",
+            "cwd": fixture.root.to_string_lossy(),
+        }
+    });
+    fixture.context_provide("standalone-retirement-register", &facts, None);
+    let name = current_rex_name(&fixture);
+    let approval = retirement_approval(&name);
+    let retired = fixture.run_ok(
+        &[
+            "context",
+            "--op",
+            "standalone-retirement",
+            "--approve-grant",
+            &approval,
+        ],
+        None,
+    );
+    assert_eq!(retired["result"]["outcome"], "completed", "{retired}");
+    let map: Value =
+        serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap())
+            .unwrap();
+    assert!(
+        map["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|slot| slot["current"].is_null()),
+        "{map}"
+    );
 }
 
 #[test]
@@ -3856,12 +4457,16 @@ fn b08_rex_save_rejects_non_rex_without_publication() {
     let fixture = Fixture::without_tmux("rex-save-non-rex");
     let host = TestAppServer::start(&fixture.root, "non-rex-save", "non-rex-thread");
     let provide = json!({"session_id":"non-rex-save", "thread_id":"non-rex-thread",
-        "endpoint":host.endpoint(), "namespace":"codex_tui", "profile":"gcm"}).to_string();
+        "endpoint":host.endpoint(), "namespace":"codex_tui", "profile":"gcm"})
+    .to_string();
     let map = fixture.host_state.join("identity-map.json");
     let before = fs::read(&map).ok();
     let output = fixture.command(&["context", "--provide", &provide, "--save"], None);
     assert!(!output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("REX_SAVE_REQUIRES_REX"), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("REX_SAVE_REQUIRES_REX"),
+        "{output:?}"
+    );
     assert_eq!(fs::read(map).ok(), before);
 }
 
@@ -3872,10 +4477,14 @@ fn rex_owned_public_call(fixture: &Fixture, args: &[&str]) -> Output {
     let mut command = Command::new(codex);
     command.current_dir(&fixture.root).env_clear();
     for (key, value) in base.get_envs() {
-        if let Some(value) = value { command.env(key, value); }
+        if let Some(value) = value {
+            command.env(key, value);
+        }
     }
-    command.args(["-c", "echo $$ > rex-owner-pid; \"$@\"; s=$?; exit $s", "_"])
-        .arg(base.get_program()).args(base.get_args());
+    command
+        .args(["-c", "echo $$ > rex-owner-pid; \"$@\"; s=$?; exit $s", "_"])
+        .arg(base.get_program())
+        .args(base.get_args());
     command.output().unwrap()
 }
 
@@ -3887,8 +4496,13 @@ fn b08_rex_changed_session_successor_requires_fresh_save() {
         "session_id":"session:11111111-1111-1111-1111-111111111111",
         "block_id":"block:22222222-2222-2222-2222-222222222222",
         "cwd":fixture.root.to_string_lossy()});
-    let original = json!({"session_id":"rex-saved-original", "profile":"gcm", "rex":rex}).to_string();
-    fixture.context_provide("successor-seed", &serde_json::from_str(&original).unwrap(), None);
+    let original =
+        json!({"session_id":"rex-saved-original", "profile":"gcm", "rex":rex}).to_string();
+    fixture.context_provide(
+        "successor-seed",
+        &serde_json::from_str(&original).unwrap(),
+        None,
+    );
     let saved = rex_owned_public_call(&fixture, &["context", "--provide", &original, "--save"]);
     assert!(saved.status.success(), "{saved:?}");
     let map_path = fixture.host_state.join("identity-map.json");
@@ -3897,20 +4511,45 @@ fn b08_rex_changed_session_successor_requires_fresh_save() {
     let refresh = rex_owned_public_call(&fixture, &["context", "--provide", &original]);
     assert!(refresh.status.success(), "{refresh:?}");
     let refreshed: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
-    assert_eq!(refreshed["slots"][0]["current"]["rex_layout"], saved_map["slots"][0]["current"]["rex_layout"]);
+    assert_eq!(
+        refreshed["slots"][0]["current"]["rex_layout"],
+        saved_map["slots"][0]["current"]["rex_layout"]
+    );
     std::thread::sleep(Duration::from_millis(20));
     let successor = json!({"session_id":"rex-successor", "profile":"gcm", "rex":rex}).to_string();
     let output = rex_owned_public_call(&fixture, &["context", "--provide", &successor]);
     assert!(output.status.success(), "{output:?}");
     let current: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
     let slot = &current["slots"][0];
-    assert_eq!(slot["current"]["binding"]["session_id"], "rex-successor", "{current}");
-    assert!(slot["current"]["rex_layout"].is_null(), "successor must Save its own association: {current}");
-    let restore = fixture.command(&["restore", "--worker", slot["current"]["binding"]["agent_id"].as_str().unwrap(),
-        "--app", "appserver-cli", "--binding-id", slot["current"]["binding"]["binding_id"].as_str().unwrap(),
-        "--generation", &slot["generation"].to_string(), "--session-label", "must-not-create", "--approve"], None);
+    assert_eq!(
+        slot["current"]["binding"]["session_id"], "rex-successor",
+        "{current}"
+    );
+    assert!(
+        slot["current"]["rex_layout"].is_null(),
+        "successor must Save its own association: {current}"
+    );
+    let restore = fixture.command(
+        &[
+            "restore",
+            "--worker",
+            slot["current"]["binding"]["agent_id"].as_str().unwrap(),
+            "--app",
+            "appserver-cli",
+            "--binding-id",
+            slot["current"]["binding"]["binding_id"].as_str().unwrap(),
+            "--generation",
+            &slot["generation"].to_string(),
+            "--session-label",
+            "must-not-create",
+            "--approve",
+        ],
+        None,
+    );
     assert!(!restore.status.success(), "{restore:?}");
-    assert!(!fs::read_to_string(fixture.root.join("invocations.jsonl")).unwrap().contains("session.create"));
+    assert!(!fs::read_to_string(fixture.root.join("invocations.jsonl"))
+        .unwrap()
+        .contains("session.create"));
     let fresh = rex_owned_public_call(&fixture, &["context", "--provide", &successor, "--save"]);
     assert!(fresh.status.success(), "{fresh:?}");
 }
@@ -3922,8 +4561,13 @@ fn b08_rex_displaced_save_rejects_without_publication() {
     let original = json!({"session_id":"rex-displaced-original", "profile":"gcm", "rex":{
         "server":server, "session_id":"session:11111111-1111-1111-1111-111111111111",
         "block_id":"block:22222222-2222-2222-2222-222222222222",
-        "cwd":fixture.root.to_string_lossy()}}).to_string();
-    fixture.context_provide("displaced-seed", &serde_json::from_str(&original).unwrap(), None);
+        "cwd":fixture.root.to_string_lossy()}})
+    .to_string();
+    fixture.context_provide(
+        "displaced-seed",
+        &serde_json::from_str(&original).unwrap(),
+        None,
+    );
     let saved = rex_owned_public_call(&fixture, &["context", "--provide", &original, "--save"]);
     assert!(saved.status.success(), "{saved:?}");
     let map_path = fixture.host_state.join("identity-map.json");
@@ -3937,10 +4581,14 @@ fn b08_rex_displaced_save_rejects_without_publication() {
     let displaced = json!({"session_id":"rex-displaced-caller", "profile":"gcm", "rex":{
         "server":server, "session_id":"session:11111111-1111-1111-1111-111111111111",
         "block_id":"block:22222222-2222-2222-2222-222222222222",
-        "cwd":fixture.root.to_string_lossy()}}).to_string();
+        "cwd":fixture.root.to_string_lossy()}})
+    .to_string();
     let output = rex_owned_public_call(&fixture, &["context", "--provide", &displaced, "--save"]);
     assert!(!output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("REX_SAVE_REQUIRES_CALLER_BINDING"), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("REX_SAVE_REQUIRES_CALLER_BINDING"),
+        "{output:?}"
+    );
     assert_eq!(fs::read(map_path).unwrap(), rejected_baseline);
 }
 
@@ -4107,20 +4755,22 @@ fn b08_rex_registration_keeps_restore_metadata_optional_and_save_requires_comple
     let saved = fs::read(&map_path).unwrap();
     let saved_map: Value = serde_json::from_slice(&saved).unwrap();
     let current = &saved_map["slots"][0]["current"];
-    assert_eq!(current["host"]["profile"], "profile-rex-layout", "{current}");
     assert_eq!(
-        current["rex_layout"]["layout"]["block_id"],
-        rex["block_id"],
+        current["host"]["profile"], "profile-rex-layout",
+        "{current}"
+    );
+    assert_eq!(
+        current["rex_layout"]["layout"]["block_id"], rex["block_id"],
         "{current}"
     );
 
     fs::write(fixture.root.join("rex-scenario"), "layout_block_missing\n").unwrap();
     let incomplete_provide = json!({
-            "session_id": agent_session,
-            "profile": "profile-rex-layout",
-            "rex": rex,
-        })
-        .to_string();
+        "session_id": agent_session,
+        "profile": "profile-rex-layout",
+        "rex": rex,
+    })
+    .to_string();
     let incomplete = fixture.command(
         &[
             "context",
@@ -4224,14 +4874,21 @@ fn c03_unapproved_unique_pane_stale_recovery_repairs_without_approval() {
         automatic_payload["result"]["snapshot"]["identity"]["worker_id"], fence.worker_id,
         "{automatic_payload}"
     );
-    let map: Value = serde_json::from_slice(
-        &fs::read(fixture.host_state.join("identity-map.json")).unwrap(),
-    ).unwrap();
-    let active: Vec<&Value> = map["slots"].as_array().unwrap().iter()
-        .filter(|slot| slot["identity_status"] == "active").collect();
+    let map: Value =
+        serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap())
+            .unwrap();
+    let active: Vec<&Value> = map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|slot| slot["identity_status"] == "active")
+        .collect();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0]["current"]["binding"]["agent_id"], fence.worker_id);
-    assert_eq!(active[0]["current"]["binding"]["binding_id"], fence.binding_id);
+    assert_eq!(
+        active[0]["current"]["binding"]["binding_id"],
+        fence.binding_id
+    );
     assert_eq!(
         automatic_payload["result"]["snapshot"]["binding"]["binding_id"],
         fence.binding_id
@@ -4261,7 +4918,13 @@ fn pane_identity_context(
     operation_id: &str,
 ) -> Value {
     success_payload(&pane_identity_command(
-        fixture, pane, label, cwd, session, thread, operation_id,
+        fixture,
+        pane,
+        label,
+        cwd,
+        session,
+        thread,
+        operation_id,
     ))
 }
 
@@ -4307,12 +4970,18 @@ fn pane_identity_command(
 }
 
 fn current_map_holder(fixture: &Fixture, name: &str) -> Value {
-    let map: Value = serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap()).unwrap();
+    let map: Value =
+        serde_json::from_slice(&fs::read(fixture.host_state.join("identity-map.json")).unwrap())
+            .unwrap();
     let slots = map["slots"].as_array().unwrap();
-    let slot = slots.iter().find(|slot| slot["identity_status"] == "active"
-        && slot["identity_key"]["project_scope"] == canonical_root(fixture)
-        && slot["identity_key"]["app_scope_id"] == "appserver-cli"
-        && slot["identity_key"]["name"] == name)
+    let slot = slots
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["identity_key"]["project_scope"] == canonical_root(fixture)
+                && slot["identity_key"]["app_scope_id"] == "appserver-cli"
+                && slot["identity_key"]["name"] == name
+        })
         .unwrap_or_else(|| panic!("name {name} has no active current mapping"));
     slot["current"].clone()
 }
@@ -4565,7 +5234,11 @@ fn cross_subject_anchor_match_is_rejected_before_publication() {
     let root = PathBuf::from(canonical_root(&fixture));
     let seed = fixture.registered_context("cross-subject-anchor-conflict-seed", &pane);
     let (seed_name, seed_worker) = seeded_name_and_worker(&seed);
-    let other_pane = second_pane(&fixture, "cross-subject-anchor-conflict-other", pane.server_pid);
+    let other_pane = second_pane(
+        &fixture,
+        "cross-subject-anchor-conflict-other",
+        pane.server_pid,
+    );
     let other = pane_identity_context(
         &fixture,
         &other_pane,
@@ -4766,16 +5439,28 @@ fn public_goal_schedule_and_pending_wake_move_across_agent_session_to_new_jenny(
         assert!(
             wait_until(Duration::from_secs(15), || {
                 let state = fixture.current_state();
-                state["wake_bindings"].as_object().unwrap().iter().any(|(id, subscription)|
-                    subscription == &subscription_id && state["msgs"][id]["state"] == "pending")
+                state["wake_bindings"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .any(|(id, subscription)| {
+                        subscription == &subscription_id && state["msgs"][id]["state"] == "pending"
+                    })
             }),
             "the real daemon did not commit a pending goal wake"
         );
 
         let state = fixture.current_state();
-        state["wake_bindings"].as_object().unwrap().iter().find(|(id, subscription)|
-            *subscription == &subscription_id && state["msgs"][*id]["state"] == "pending")
-            .expect("current pending wake names its goal subscription").0.clone()
+        state["wake_bindings"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(id, subscription)| {
+                *subscription == &subscription_id && state["msgs"][*id]["state"] == "pending"
+            })
+            .expect("current pending wake names its goal subscription")
+            .0
+            .clone()
     };
 
     let state = fixture.current_state();
@@ -5036,13 +5721,15 @@ fn public_context_restricted_cwd_uses_authenticated_pwd_and_rejects_forged_paths
     );
     let valid_payload = json_stdout(&valid);
     assert_eq!(
-        valid_payload.pointer("/result/snapshot/identity/worker_id")
+        valid_payload
+            .pointer("/result/snapshot/identity/worker_id")
             .and_then(Value::as_str),
         Some(seed_worker.as_str()),
         "restricted cwd must resolve to the same registered identity: {valid_payload}"
     );
     assert_eq!(
-        valid_payload.pointer("/result/snapshot/binding/project_scope")
+        valid_payload
+            .pointer("/result/snapshot/binding/project_scope")
             .and_then(Value::as_str),
         Some(root.as_str()),
         "authenticated PWD must resolve to the same registered project: {valid_payload}"
@@ -5219,7 +5906,10 @@ fn role_name_r6_takeover_defers_displaced_holder_registration() {
         String::from_utf8_lossy(&takeover.stderr)
     );
     let takeover: Value = serde_json::from_slice(&takeover.stdout).unwrap();
-    assert_eq!(takeover["result"]["snapshot"]["name"], "Jenny", "{takeover}");
+    assert_eq!(
+        takeover["result"]["snapshot"]["name"], "Jenny",
+        "{takeover}"
+    );
     assert_eq!(
         takeover["result"]["snapshot"]["identity"]["worker_id"],
         successor_worker.as_str(),
@@ -5239,10 +5929,14 @@ fn role_name_r6_takeover_defers_displaced_holder_registration() {
         .filter(|slot| slot["identity_key"]["name"] == "Jenny")
         .collect();
     assert_eq!(jenny.len(), 1, "one current Jenny: {map}");
-    assert_eq!(jenny[0]["current"]["binding"]["agent_id"], successor_worker.as_str());
+    assert_eq!(
+        jenny[0]["current"]["binding"]["agent_id"],
+        successor_worker.as_str()
+    );
     assert!(
-        active.iter().all(|slot| slot["current"]["binding"]["agent_id"]
-            != displaced_worker.as_str()),
+        active
+            .iter()
+            .all(|slot| slot["current"]["binding"]["agent_id"] != displaced_worker.as_str()),
         "the displaced holder must not receive an auto-assigned ordinary name: {map}"
     );
     let outgoing: Vec<_> = map["effects"]
@@ -5304,15 +5998,14 @@ fn role_name_r6_takeover_defers_displaced_holder_registration() {
     );
 }
 
-fn e1_layout_prepare_retired_bob(
-    fixture: &Fixture,
-    first: &Pane,
-    bob: &Pane,
-) -> (String, String) {
+fn e1_layout_prepare_retired_bob(fixture: &Fixture, first: &Pane, bob: &Pane) -> (String, String) {
     let alice = fixture.registered_context("e1-layout-alice", first);
     assert_eq!(alice["result"]["snapshot"]["name"], "Alice", "{alice}");
     let bob_context = fixture.registered_context("e1-layout-bob", bob);
-    assert_eq!(bob_context["result"]["snapshot"]["name"], "Bob", "{bob_context}");
+    assert_eq!(
+        bob_context["result"]["snapshot"]["name"], "Bob",
+        "{bob_context}"
+    );
     let bob_worker = bob_context["result"]["snapshot"]["identity"]["worker_id"]
         .as_str()
         .expect("Bob worker id")
@@ -5391,8 +6084,7 @@ fn e1_layout_ordinary_bob_reuse_after_self_close_keeps_old_host() {
         "e1-layout-ordinary-reuse-new",
         alice_pane.server_pid,
     );
-    let (_bob_worker, historical) =
-        e1_layout_prepare_retired_bob(&fixture, &alice_pane, &bob_pane);
+    let (_bob_worker, historical) = e1_layout_prepare_retired_bob(&fixture, &alice_pane, &bob_pane);
     assert_eq!(tmux_session_name(&fixture, &bob_pane), historical);
 
     let reused = fixture.run_ok(
@@ -5401,14 +6093,16 @@ fn e1_layout_ordinary_bob_reuse_after_self_close_keeps_old_host() {
     );
     let snapshot = &reused["result"]["snapshot"];
     assert_eq!(snapshot["name"], "Bob", "{reused}");
-    assert!(snapshot["master"].is_null(), "ordinary reuse stays peer-only: {reused}");
+    assert!(
+        snapshot["master"].is_null(),
+        "ordinary reuse stays peer-only: {reused}"
+    );
     let reused_worker = snapshot["identity"]["worker_id"]
         .as_str()
         .expect("reused Bob worker id")
         .to_owned();
     assert_eq!(
-        snapshot["binding"]["session_id"],
-        new_pane.session_anchor,
+        snapshot["binding"]["session_id"], new_pane.session_anchor,
         "the new carrier owns Bob"
     );
     assert_eq!(
@@ -5459,8 +6153,7 @@ fn e1_layout_manifest_position_renames_reused_bob_and_keeps_old_host() {
         "e1-layout-manifest-position-new",
         alice_pane.server_pid,
     );
-    let (_bob_worker, historical) =
-        e1_layout_prepare_retired_bob(&fixture, &alice_pane, &bob_pane);
+    let (_bob_worker, historical) = e1_layout_prepare_retired_bob(&fixture, &alice_pane, &bob_pane);
     let manifest_path = fixture
         .root
         .join("home/.local/state/tm-iterm/manifest.json");
@@ -5481,13 +6174,18 @@ fn e1_layout_manifest_position_renames_reused_bob_and_keeps_old_host() {
     );
     let snapshot = &reused["result"]["snapshot"];
     assert_eq!(snapshot["name"], "Bob", "{reused}");
-    assert!(snapshot["master"].is_null(), "ordinary reuse stays peer-only: {reused}");
+    assert!(
+        snapshot["master"].is_null(),
+        "ordinary reuse stays peer-only: {reused}"
+    );
     assert_eq!(
-        snapshot["layout"]["binding_id"],
-        "e1_layout_tm_fixed_eight",
+        snapshot["layout"]["binding_id"], "e1_layout_tm_fixed_eight",
         "{reused}"
     );
-    assert_eq!(tmux_session_name(&fixture, &new_pane), "project_alpha_8_Bob");
+    assert_eq!(
+        tmux_session_name(&fixture, &new_pane),
+        "project_alpha_8_Bob"
+    );
     assert_eq!(
         tmux_session_name(&fixture, &bob_pane),
         historical,
@@ -5501,11 +6199,13 @@ fn e1_layout_manifest_position_renames_reused_bob_and_keeps_old_host() {
     );
     assert_eq!(again["result"]["snapshot"]["name"], "Bob", "{again}");
     assert_eq!(
-        again["result"]["snapshot"]["identity"]["worker_id"],
-        snapshot["identity"]["worker_id"],
+        again["result"]["snapshot"]["identity"]["worker_id"], snapshot["identity"]["worker_id"],
         "repeated context keeps the same current holder"
     );
-    assert_eq!(tmux_session_name(&fixture, &new_pane), "project_alpha_8_Bob");
+    assert_eq!(
+        tmux_session_name(&fixture, &new_pane),
+        "project_alpha_8_Bob"
+    );
 }
 
 #[test]
@@ -5522,8 +6222,7 @@ fn e1_layout_reliable_manifest_conflict_keeps_identity_and_communication_after_w
         "e1-layout-manifest-conflict-new",
         alice_pane.server_pid,
     );
-    let (_bob_worker, historical) =
-        e1_layout_prepare_retired_bob(&fixture, &alice_pane, &bob_pane);
+    let (_bob_worker, historical) = e1_layout_prepare_retired_bob(&fixture, &alice_pane, &bob_pane);
     let manifest_path = fixture
         .root
         .join("home/.local/state/tm-iterm/manifest.json");
@@ -5555,8 +6254,14 @@ fn e1_layout_reliable_manifest_conflict_keeps_identity_and_communication_after_w
     );
     let query = fixture.context_query("e1-layout-manifest-conflict-query", Some(&new_pane));
     let incomplete = json_stdout(&reused);
-    assert_eq!(incomplete["result"]["outcome"], "incomplete", "{incomplete}");
-    assert_eq!(incomplete["result"]["failed_phase"], "physical_anchor", "{incomplete}");
+    assert_eq!(
+        incomplete["result"]["outcome"], "incomplete",
+        "{incomplete}"
+    );
+    assert_eq!(
+        incomplete["result"]["failed_phase"], "physical_anchor",
+        "{incomplete}"
+    );
     assert_eq!(query["result"]["outcome"], "incomplete", "{query}");
     let snapshot = &query["result"]["snapshot"];
     assert_eq!(snapshot["name"], "Bob", "{query}");
@@ -5565,8 +6270,7 @@ fn e1_layout_reliable_manifest_conflict_keeps_identity_and_communication_after_w
         "ordinary conflict recovery stays peer-only: {query}"
     );
     assert_eq!(
-        snapshot["binding"]["session_id"],
-        new_pane.session_anchor,
+        snapshot["binding"]["session_id"], new_pane.session_anchor,
         "the committed current must survive the optional physical failure: {query}"
     );
     let bob_worker = snapshot["identity"]["worker_id"]
@@ -5590,13 +6294,7 @@ fn e1_layout_reliable_manifest_conflict_keeps_identity_and_communication_after_w
         String::from_utf8(
             tmux(
                 &fixture.tmux_socket,
-                &[
-                    "display-message",
-                    "-p",
-                    "-t",
-                    occupied,
-                    "#{session_name}",
-                ],
+                &["display-message", "-p", "-t", occupied, "#{session_name}",],
             )
             .stdout
         )
@@ -5606,7 +6304,10 @@ fn e1_layout_reliable_manifest_conflict_keeps_identity_and_communication_after_w
     );
     let binding = current_map_holder(&fixture, "Bob")["binding"].clone();
     let released_label = "e1-layout-owned-conflict-released";
-    tmux(&fixture.tmux_socket, &["rename-session", "-t", occupied, released_label]);
+    tmux(
+        &fixture.tmux_socket,
+        &["rename-session", "-t", occupied, released_label],
+    );
     fixture.track_tmux_session(released_label);
     let retried = fixture.run_ok(
         &["context", "--op", "e1-layout-manifest-conflict-retry"],
@@ -5614,13 +6315,19 @@ fn e1_layout_reliable_manifest_conflict_keeps_identity_and_communication_after_w
     );
     assert_eq!(retried["result"]["outcome"], "completed", "{retried}");
     assert_eq!(retried["result"]["snapshot"]["name"], "Bob", "{retried}");
-    assert_eq!(retried["result"]["snapshot"]["identity"]["worker_id"], bob_worker, "{retried}");
+    assert_eq!(
+        retried["result"]["snapshot"]["identity"]["worker_id"], bob_worker,
+        "{retried}"
+    );
     assert_eq!(current_map_holder(&fixture, "Bob")["binding"], binding);
     assert_eq!(tmux_session_name(&fixture, &new_pane), occupied);
     assert_eq!(tmux_session_name(&fixture, &bob_pane), historical);
     let complete = fixture.context_query("e1-layout-manifest-retry-query", Some(&new_pane));
     assert_eq!(complete["result"]["outcome"], "completed", "{complete}");
-    assert_eq!(complete["result"]["snapshot"]["physical_anchor"]["status"], "complete", "{complete}");
+    assert_eq!(
+        complete["result"]["snapshot"]["physical_anchor"]["status"], "complete",
+        "{complete}"
+    );
 }
 
 // Cross-app contract: a name is unique by project, while its current binding
@@ -5720,7 +6427,11 @@ fn cross_app_explicit_takeover_locates_target_scope_before_registration() {
     let map_before = fs::read(&map_path).unwrap();
     let routes_before = fs::read(&routes_path).unwrap();
 
-    let other_pane = second_pane(&fixture, "cross-app-name-target-scope-pane", pane.server_pid);
+    let other_pane = second_pane(
+        &fixture,
+        "cross-app-name-target-scope-pane",
+        pane.server_pid,
+    );
     let output = fixture.command(
         &[
             "context",
@@ -5763,13 +6474,18 @@ fn cross_app_explicit_takeover_locates_target_scope_before_registration() {
             slot["identity_status"] == "active" && slot["identity_key"]["name"] == "Alice"
         })
         .collect();
-    assert_eq!(active_alice.len(), 1, "one current Alice across app scopes: {map}");
+    assert_eq!(
+        active_alice.len(),
+        1,
+        "one current Alice across app scopes: {map}"
+    );
     assert_eq!(
         active_alice[0]["identity_key"]["app_scope_id"], "appserver-cli",
         "{map}"
     );
     assert_eq!(
-        active_alice[0]["current"]["binding"]["agent_id"], alice_worker.as_str(),
+        active_alice[0]["current"]["binding"]["agent_id"],
+        alice_worker.as_str(),
         "{map}"
     );
     assert!(
@@ -5876,56 +6592,93 @@ fn cross_app_explicit_takeover_locates_target_scope_before_registration() {
         source_credential["token"], alice_credential["token"],
         "appB must never receive the appA Alice credential"
     );
-    let source_identity =
-        cross_app_identity_from_binding(source_worker, source_token, &source_slot["current"]["binding"]);
+    let source_identity = cross_app_identity_from_binding(
+        source_worker,
+        source_token,
+        &source_slot["current"]["binding"],
+    );
     lifecycle_register_task(&fixture, &source_identity, "cross-app-source-work");
 
     let alice_identity = lifecycle_identity(&fixture, &alice);
     lifecycle_register_task(&fixture, &alice_identity, "cross-app-target-work");
 
     let send_to_self = |identity: &Value, name: &str, body: &str, operation: &str| {
-        let sent = lifecycle_wire(&fixture, identity, json!({
-            "op":"AddressSend", "worker_id":identity["worker_id"],
-            "token":identity["token"], "to":{"kind":"legacy", "value":name},
-            "type":"notify", "subject":"cross-app test", "body":body,
-            "command":{"command_id":format!("{operation}-command"), "operation_id":operation,
-                "actor_binding_id":identity["runtime"]["binding_id"],
-                "scope":{"project_scope_id":canonical_root(&fixture),
-                    "app_scope_id":identity["runtime"]["appserver_id"]}},
-        }));
+        let sent = lifecycle_wire(
+            &fixture,
+            identity,
+            json!({
+                "op":"AddressSend", "worker_id":identity["worker_id"],
+                "token":identity["token"], "to":{"kind":"legacy", "value":name},
+                "type":"notify", "subject":"cross-app test", "body":body,
+                "command":{"command_id":format!("{operation}-command"), "operation_id":operation,
+                    "actor_binding_id":identity["runtime"]["binding_id"],
+                    "scope":{"project_scope_id":canonical_root(&fixture),
+                        "app_scope_id":identity["runtime"]["appserver_id"]}},
+            }),
+        );
         assert_eq!(sent["ok"], true, "{sent}");
         sent["msg_id"].as_str().unwrap().to_owned()
     };
-    let consumed_id = send_to_self(&alice_identity, "Alice", "target consumed history", "cross-app-consumed");
-    let consumed = lifecycle_wire(&fixture, &alice_identity, json!({
-        "op":"Ack", "worker_id":alice_identity["worker_id"], "token":alice_identity["token"],
-        "ids":[consumed_id],
-    }));
+    let consumed_id = send_to_self(
+        &alice_identity,
+        "Alice",
+        "target consumed history",
+        "cross-app-consumed",
+    );
+    let consumed = lifecycle_wire(
+        &fixture,
+        &alice_identity,
+        json!({
+            "op":"Ack", "worker_id":alice_identity["worker_id"], "token":alice_identity["token"],
+            "ids":[consumed_id],
+        }),
+    );
     assert_eq!(consumed["ok"], true, "{consumed}");
-    let target_message_id = send_to_self(&alice_identity, "Alice", "target pending message", "cross-app-target-pending");
-    let source_message_id = send_to_self(&source_identity, &source_name, "source private message", "cross-app-source-pending");
+    let target_message_id = send_to_self(
+        &alice_identity,
+        "Alice",
+        "target pending message",
+        "cross-app-target-pending",
+    );
+    let source_message_id = send_to_self(
+        &source_identity,
+        &source_name,
+        "source private message",
+        "cross-app-source-pending",
+    );
     let task_subscription = |identity: &Value, task_id: &str| {
-        let described = lifecycle_wire(&fixture, identity, json!({
-            "op":"Board", "worker_id":identity["worker_id"], "token":identity["token"],
-            "command":{"action":"describe", "id":task_id, "expected_revision":1,
-                "title":task_id, "description":"cross-app lifecycle", "delivery_condition":"handoff preserved",
-                "test_condition":"public subscription readback", "long_horizon_content":"preserve this task",
-                "long_horizon_every_ms":3600000, "long_horizon_repeat":7,
-                "long_horizon_ttl_seconds":86400},
-        }));
+        let described = lifecycle_wire(
+            &fixture,
+            identity,
+            json!({
+                "op":"Board", "worker_id":identity["worker_id"], "token":identity["token"],
+                "command":{"action":"describe", "id":task_id, "expected_revision":1,
+                    "title":task_id, "description":"cross-app lifecycle", "delivery_condition":"handoff preserved",
+                    "test_condition":"public subscription readback", "long_horizon_content":"preserve this task",
+                    "long_horizon_every_ms":3600000, "long_horizon_repeat":7,
+                    "long_horizon_ttl_seconds":86400},
+            }),
+        );
         assert_eq!(described["ok"], true, "{described}");
-        let status = lifecycle_wire(&fixture, identity, json!({
-            "op":"NotificationStatus", "worker_id":identity["worker_id"], "token":identity["token"],
-        }));
+        let status = lifecycle_wire(
+            &fixture,
+            identity,
+            json!({
+                "op":"NotificationStatus", "worker_id":identity["worker_id"], "token":identity["token"],
+            }),
+        );
         assert_eq!(status["ok"], true, "{status}");
-        status["subscriptions"].as_array().unwrap().iter()
+        status["subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|subscription| subscription["subject"] == format!("goal:task:{task_id}"))
-            .expect("the task owns a finite subscription").clone()
+            .expect("the task owns a finite subscription")
+            .clone()
     };
     let source_subscription = task_subscription(&source_identity, "cross-app-source-work");
     let target_subscription = task_subscription(&alice_identity, "cross-app-target-work");
-    let source_task_before = fixture
-        .current_state_for(&fixture.root, "appserver-other")["tasks"]
+    let source_task_before = fixture.current_state_for(&fixture.root, "appserver-other")["tasks"]
         ["cross-app-source-work"]
         .clone();
     let target_task_before = fixture.current_state()["tasks"]["cross-app-target-work"].clone();
@@ -5990,8 +6743,7 @@ fn cross_app_explicit_takeover_locates_target_scope_before_registration() {
         "the source current is released in the same publication: {map}"
     );
 
-    let source_task_after = fixture
-        .current_state_for(&fixture.root, "appserver-other")["tasks"]
+    let source_task_after = fixture.current_state_for(&fixture.root, "appserver-other")["tasks"]
         ["cross-app-source-work"]
         .clone();
     assert_eq!(
@@ -6004,8 +6756,7 @@ fn cross_app_explicit_takeover_locates_target_scope_before_registration() {
         "target work continues under the new Alice holder: {target_task_after}"
     );
     assert_eq!(
-        target_task_after["next_step"],
-        target_task_before["next_step"],
+        target_task_after["next_step"], target_task_before["next_step"],
         "target work keeps its remaining step"
     );
 
@@ -6026,48 +6777,110 @@ fn cross_app_explicit_takeover_locates_target_scope_before_registration() {
     );
 
     let current_identity = lifecycle_identity(&fixture, &takeover);
-    let inbox = lifecycle_wire(&fixture, &current_identity, json!({
-        "op":"Inbox", "worker_id":current_identity["worker_id"], "token":current_identity["token"],
-    }));
+    let inbox = lifecycle_wire(
+        &fixture,
+        &current_identity,
+        json!({
+            "op":"Inbox", "worker_id":current_identity["worker_id"], "token":current_identity["token"],
+        }),
+    );
     assert_eq!(inbox["ok"], true, "{inbox}");
     let inbox_text = inbox.to_string();
     assert!(inbox_text.contains(&target_message_id), "{inbox}");
     assert!(inbox_text.contains("target pending message"), "{inbox}");
     assert!(!inbox_text.contains(&source_message_id), "{inbox}");
-    let old_inbox = lifecycle_wire(&fixture, &alice_identity, json!({
-        "op":"Inbox", "worker_id":alice_identity["worker_id"], "token":alice_identity["token"],
-    }));
-    assert!(!old_inbox.to_string().contains(&target_message_id), "{old_inbox}");
-    assert!(!old_inbox.to_string().contains("target pending message"), "{old_inbox}");
-    let old_ack = lifecycle_wire(&fixture, &alice_identity, json!({
-        "op":"Ack", "worker_id":alice_identity["worker_id"], "token":alice_identity["token"],
-        "ids":[target_message_id],
-    }));
-    assert_ne!(fixture.current_state()["msgs"][&target_message_id]["state"], "read", "{old_ack}");
-    let receipt = lifecycle_wire(&fixture, &current_identity, json!({
-        "op":"Poll", "worker_id":current_identity["worker_id"], "token":current_identity["token"],
-        "timeout_ms":0, "receive_id":"cross-app-current-consumption",
-    }));
+    let old_inbox = lifecycle_wire(
+        &fixture,
+        &alice_identity,
+        json!({
+            "op":"Inbox", "worker_id":alice_identity["worker_id"], "token":alice_identity["token"],
+        }),
+    );
+    assert!(
+        !old_inbox.to_string().contains(&target_message_id),
+        "{old_inbox}"
+    );
+    assert!(
+        !old_inbox.to_string().contains("target pending message"),
+        "{old_inbox}"
+    );
+    let old_ack = lifecycle_wire(
+        &fixture,
+        &alice_identity,
+        json!({
+            "op":"Ack", "worker_id":alice_identity["worker_id"], "token":alice_identity["token"],
+            "ids":[target_message_id],
+        }),
+    );
+    assert_ne!(
+        fixture.current_state()["msgs"][&target_message_id]["state"],
+        "read",
+        "{old_ack}"
+    );
+    let receipt = lifecycle_wire(
+        &fixture,
+        &current_identity,
+        json!({
+            "op":"Poll", "worker_id":current_identity["worker_id"], "token":current_identity["token"],
+            "timeout_ms":0, "receive_id":"cross-app-current-consumption",
+        }),
+    );
     assert_eq!(receipt["ok"], true, "{receipt}");
-    assert!(receipt.to_string().contains(&target_message_id), "{receipt}");
-    assert!(!receipt.to_string().contains(&source_message_id), "{receipt}");
+    assert!(
+        receipt.to_string().contains(&target_message_id),
+        "{receipt}"
+    );
+    assert!(
+        !receipt.to_string().contains(&source_message_id),
+        "{receipt}"
+    );
     assert!(!receipt.to_string().contains(&consumed_id), "{receipt}");
-    let notifications = lifecycle_wire(&fixture, &current_identity, json!({
-        "op":"NotificationStatus", "worker_id":current_identity["worker_id"], "token":current_identity["token"],
-    }));
+    let notifications = lifecycle_wire(
+        &fixture,
+        &current_identity,
+        json!({
+            "op":"NotificationStatus", "worker_id":current_identity["worker_id"], "token":current_identity["token"],
+        }),
+    );
     assert_eq!(notifications["ok"], true, "{notifications}");
-    let continued = notifications["subscriptions"].as_array().unwrap().iter()
+    let continued = notifications["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
         .find(|subscription| subscription["id"] == target_subscription["id"])
         .expect("the target task keeps its original subscription");
-    for field in ["id", "goal_content", "repeat_count", "fired_count", "interval_ms", "trigger_ms", "expires_ms"] {
-        assert_eq!(continued[field], target_subscription[field], "{field}: {continued}");
+    for field in [
+        "id",
+        "goal_content",
+        "repeat_count",
+        "fired_count",
+        "interval_ms",
+        "trigger_ms",
+        "expires_ms",
+    ] {
+        assert_eq!(
+            continued[field], target_subscription[field],
+            "{field}: {continued}"
+        );
     }
     assert_eq!(continued["worker_id"], target_worker);
     let source_state = fixture.current_state_for(&fixture.root, "appserver-other");
-    let waiting = &source_state["notification_subscriptions"][source_subscription["id"].as_str().unwrap()];
+    let waiting =
+        &source_state["notification_subscriptions"][source_subscription["id"].as_str().unwrap()];
     assert_eq!(waiting["status"], "waiting-owner", "{waiting}");
-    for field in ["id", "goal_content", "repeat_count", "fired_count", "interval_ms", "trigger_ms", "expires_ms"] {
-        assert_eq!(waiting[field], source_subscription[field], "{field}: {waiting}");
+    for field in [
+        "id",
+        "goal_content",
+        "repeat_count",
+        "fired_count",
+        "interval_ms",
+        "trigger_ms",
+        "expires_ms",
+    ] {
+        assert_eq!(
+            waiting[field], source_subscription[field],
+            "{field}: {waiting}"
+        );
     }
 
     let takeover_proof: Value = serde_json::from_slice(
@@ -6147,7 +6960,10 @@ fn cross_app_ambiguous_target_scope_requires_explicit_app_choice() {
         payload["result"]["phase"], "target_scope_resolution",
         "{payload}"
     );
-    assert_eq!(payload["result"]["requires"]["kind"], "app_scope", "{payload}");
+    assert_eq!(
+        payload["result"]["requires"]["kind"], "app_scope",
+        "{payload}"
+    );
     assert!(
         payload["result"]["requires"]["sources"]["target_app_scope_id"].is_null(),
         "an ambiguous target must not choose the first app: {payload}"
@@ -6181,7 +6997,10 @@ fn cross_app_ambiguous_target_scope_requires_explicit_app_choice() {
             .is_some_and(|invocation| invocation.contains("<one of:")),
         "{payload}"
     );
-    assert_eq!(payload["result"]["snapshot"]["registered"], false, "{payload}");
+    assert_eq!(
+        payload["result"]["snapshot"]["registered"], false,
+        "{payload}"
+    );
     assert_eq!(fs::read(&map_path).unwrap(), map_before);
     assert_eq!(fs::read(fixture.host_routes()).unwrap(), routes_before);
 }

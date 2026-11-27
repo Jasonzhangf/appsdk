@@ -617,16 +617,7 @@ impl ProjectRuntimeManager {
             transport.thread_id = candidate.endpoint.codex_thread_id.clone();
         }
 
-        self.refresh_session_transport(
-            runtime,
-            saved,
-            transport,
-            ident,
-            scope,
-            None,
-            None,
-            None,
-        )
+        self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None, None)
     }
 
     fn rex_execution_for_refresh(
@@ -947,6 +938,16 @@ impl ProjectRuntimeManager {
                 allow_explicit_rex_rebind,
             )?
         };
+        if save
+            && session_identity.is_none()
+            && rex_recovery
+                .as_ref()
+                .is_some_and(|recovery| recovery.baseline.is_some())
+        {
+            anyhow::bail!(
+                "REX_SAVE_REQUIRES_EXISTING_BINDING: current binding was retired before Save could continue"
+            );
+        }
         if let Some(identity) = session_identity.as_ref() {
             if let Some(candidate) = facts.tmux.as_ref() {
                 let control = self
@@ -1075,11 +1076,18 @@ impl ProjectRuntimeManager {
                                 &context.canonical_root,
                                 facts.session_id.as_deref(),
                                 save,
-                            ).map_err(anyhow::Error::msg)?,
+                            )
+                            .map_err(anyhow::Error::msg)?,
                         };
                         current = Some(self.refresh_session_transport(
-                            &runtime, saved, transport, &mut ident, &scope,
-                            execution.as_ref(), baseline.as_ref(), Some(&facts),
+                            &runtime,
+                            saved,
+                            transport,
+                            &mut ident,
+                            &scope,
+                            execution.as_ref(),
+                            baseline.as_ref(),
+                            Some(&facts),
                         )?);
                     }
                 } else if facts.tmux.is_none() {
@@ -1102,8 +1110,14 @@ impl ProjectRuntimeManager {
                             )
                             .map_err(anyhow::Error::msg)?;
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
-                                None, None, Some(&facts),
+                                &runtime,
+                                saved,
+                                transport,
+                                &mut ident,
+                                &scope,
+                                None,
+                                None,
+                                Some(&facts),
                             )?);
                         } else if let Some(candidate) = facts.rex.as_ref() {
                             let (execution, baseline) = self.rex_execution_for_refresh(
@@ -1148,8 +1162,14 @@ impl ProjectRuntimeManager {
                             )
                             .map_err(|e| anyhow::anyhow!(e))?;
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
-                                None, None, Some(&facts),
+                                &runtime,
+                                saved,
+                                transport,
+                                &mut ident,
+                                &scope,
+                                None,
+                                None,
+                                Some(&facts),
                             )?);
                         } else if transport.kind == TransportKind::AppServer
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -1165,8 +1185,14 @@ impl ProjectRuntimeManager {
                             }
                             transport.tmux_endpoint = None;
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
-                                None, None, Some(&facts),
+                                &runtime,
+                                saved,
+                                transport,
+                                &mut ident,
+                                &scope,
+                                None,
+                                None,
+                                Some(&facts),
                             )?);
                         } else if transport.kind == TransportKind::Tmux
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -1177,8 +1203,14 @@ impl ProjectRuntimeManager {
                             // published binding still owns the saved transport
                             // projection, but does not authorize a new claim.
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope,
-                                None, None, Some(&facts),
+                                &runtime,
+                                saved,
+                                transport,
+                                &mut ident,
+                                &scope,
+                                None,
+                                None,
+                                Some(&facts),
                             )?);
                         }
                     }
@@ -1283,6 +1315,20 @@ impl ProjectRuntimeManager {
             }
         }
         let (runtime, receipt) = {
+            if save
+                && self
+                    .current_session_identity_at_cwd(
+                        &context,
+                        &facts,
+                        invocation_cwd,
+                        allow_explicit_rex_rebind,
+                    )?
+                    .is_none()
+            {
+                anyhow::bail!(
+                    "REX_SAVE_REQUIRES_EXISTING_BINDING: current binding was retired before Save could commit"
+                );
+            }
             if facts.dsh_session_id.is_some() && facts.dsh.is_none() && facts.tmux.is_none() {
                 return Err(anyhow::anyhow!("IDENTITY_INFORMATION_REQUIRED: first DSH registration requires dsh endpoint, runtime_id, agent_id, session_id and cwd facts").into());
             }

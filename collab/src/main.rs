@@ -859,6 +859,42 @@ fn main() {
 
 include!("main_error_format.rs");
 
+#[cfg(unix)]
+static RESTORE_INTERRUPTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+struct RestoreInterrupt {
+    previous: libc::sigaction,
+}
+
+#[cfg(unix)]
+impl RestoreInterrupt {
+    fn install() -> std::io::Result<Self> {
+        extern "C" fn interrupt(_: libc::c_int) {
+            RESTORE_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        RESTORE_INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            let mut previous = std::mem::zeroed();
+            action.sa_sigaction = interrupt as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            if libc::sigaction(libc::SIGINT, &action, &mut previous) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Self { previous })
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RestoreInterrupt {
+    fn drop(&mut self) {
+        unsafe { libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut()) };
+    }
+}
+
 fn restore_carrier(
     args: main_cli::RestoreArgs,
 ) -> Result<proto::RestoreResult, proto::RestoreFailure> {
@@ -950,8 +986,24 @@ fn restore_carrier(
     };
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| RestoreFailure::new("runtime", error.to_string()))?;
+    #[cfg(unix)]
+    let _interrupt = RestoreInterrupt::install()
+        .map_err(|error| RestoreFailure::new("signal", error.to_string()))?;
+    #[cfg(all(unix, feature = "lifecycle-test-hooks"))]
+    if let Some(release) = std::env::var_os("COLLAB_TEST_RESTORE_SIGNAL_CONSUMER_BARRIER") {
+        // The regression keeps the former asynchronous consumer withheld. The
+        // synchronous signal owner above does not depend on that consumer.
+        std::fs::write(
+            std::path::PathBuf::from(release).with_extension("ready"),
+            b"ready",
+        )
+        .map_err(|error| RestoreFailure::new("signal", error.to_string()))?;
+    }
+    #[cfg(not(unix))]
     let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(not(unix))]
     let signal_cancelled = cancelled.clone();
+    #[cfg(not(unix))]
     let signal_task = runtime.spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             signal_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -965,8 +1017,18 @@ fn restore_carrier(
             }
             Ok(())
         },
-        || cancelled.load(std::sync::atomic::Ordering::SeqCst),
+        || {
+            #[cfg(unix)]
+            {
+                RESTORE_INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
+            }
+            #[cfg(not(unix))]
+            {
+                cancelled.load(std::sync::atomic::Ordering::SeqCst)
+            }
+        },
     ));
+    #[cfg(not(unix))]
     signal_task.abort();
     let carrier = carrier?;
     let resume = CodexResumePlan {

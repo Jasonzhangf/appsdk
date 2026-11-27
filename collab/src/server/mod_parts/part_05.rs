@@ -887,6 +887,21 @@ fn recipient_online_for_delivery(server: &Server, recipient: &str) -> bool {
     transport_agent_view(server, &worker).0 == IdentityPresence::Present
 }
 
+#[cfg(test)]
+thread_local! {
+    static NOTIFICATION_CONTROL_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_notification_control_loads() {
+    NOTIFICATION_CONTROL_LOADS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn notification_control_loads() -> usize {
+    NOTIFICATION_CONTROL_LOADS.with(std::cell::Cell::get)
+}
+
 fn attempt_tmux_notification_with_retry(
     server: &Server,
     message_id: &str,
@@ -909,6 +924,12 @@ fn attempt_tmux_notification_with_retry(
         &str,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
+    fn load_control(server: &Server) -> Result<binding_slot::BindingControlSet, String> {
+        #[cfg(test)]
+        NOTIFICATION_CONTROL_LOADS.with(|count| count.set(count.get() + 1));
+        binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+    }
+
     let rex = transport.kind == TransportKind::Rex;
     // The Rex sink checks the exact current foreground after binding selection.
     // Its observed liveness can change independently of the daemon monitor.
@@ -972,7 +993,7 @@ fn attempt_tmux_notification_with_retry(
     let patrol_current = if has_patrol_notice {
         let control = match cached_control.as_ref() {
             Some(control) => control,
-            None => match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            None => match load_control(server) {
                 Ok(control) => cached_control.insert(control),
                 Err(error) => return NotificationAttempt::NotAttempted(error),
             },
@@ -1027,11 +1048,7 @@ fn attempt_tmux_notification_with_retry(
             };
             let control = match cached_control.take() {
                 Some(control) => control,
-                None => match binding_store::BindingControlStore::new(
-                    server.host_paths.state_root(),
-                )
-                .load()
-                {
+                None => match load_control(server) {
                     Ok(control) => control,
                     Err(error) => return NotificationAttempt::Rejected(error),
                 },
@@ -1140,7 +1157,7 @@ fn attempt_tmux_notification_with_retry(
         } else if let Some(control) = cached_control.as_ref() {
             control
         } else {
-            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+            match load_control(server) {
                 Ok(control) => cached_control.insert(control),
                 Err(error) => return NotificationAttempt::NotAttempted(error),
             }
@@ -1162,14 +1179,24 @@ fn attempt_tmux_notification_with_retry(
         }
     } else {
         let selected = (|| -> Result<_, NotificationAttempt> {
-            let Some(route) = server_route_scope(server, &state)
-                .map_err(|error| NotificationAttempt::Rejected(error.into()))?
-            else {
+            let route = if let Some((route, _, _)) = typed_wake_authority.as_ref() {
+                Some(route.clone())
+            } else if let Some(route) = cached_route.as_ref() {
+                route.clone()
+            } else {
+                server_route_scope(server, &state)
+                    .map_err(|error| NotificationAttempt::Rejected(error.into()))?
+            };
+            let Some(route) = route else {
                 return Ok(None);
             };
-            let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
-                .load()
-                .map_err(NotificationAttempt::Rejected)?;
+            let control = if let Some((_, control, _)) = typed_wake_authority.as_ref() {
+                control.clone()
+            } else if let Some(control) = cached_control.as_ref() {
+                control.clone()
+            } else {
+                load_control(server).map_err(NotificationAttempt::Rejected)?
+            };
             let slot = control
                 .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)
                 .map_err(NotificationAttempt::Rejected)?;

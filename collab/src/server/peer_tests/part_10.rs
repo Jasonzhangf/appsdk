@@ -307,8 +307,8 @@ fn p4_decision_table_static_guidance_stays_out_of_dynamic_actions() {
 #[test]
 fn context_is_read_only_and_does_not_consume_notifications() {
     let (mut server, root) = test_server();
-    register(&server, "peer", "%peer");
-    register(&server, "peer-two", "%peer-two");
+    register_synthetic_peer(&server, "peer", "%peer");
+    register_synthetic_peer(&server, "peer-two", "%peer-two");
     let expected_tmux_endpoint = server.state.lock().unwrap().workers["peer"]
         .transport
         .as_ref()

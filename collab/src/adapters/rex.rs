@@ -259,7 +259,14 @@ impl RexObservation {
         &self,
         expected: Option<crate::host_runtime::AgentKind>,
         required_sources: &[&str],
-    ) -> Result<(crate::host_runtime::AgentKind, &RexProgramStatusRecord, RexProgramStatusOwner), String> {
+    ) -> Result<
+        (
+            crate::host_runtime::AgentKind,
+            &RexProgramStatusRecord,
+            RexProgramStatusOwner,
+        ),
+        String,
+    > {
         if self.gap_possible || !self.source_errors.is_empty() {
             return Err(format!(
                 "REX_EXECUTION_UNVERIFIED: current Rex observation has source gaps: {}",
@@ -574,6 +581,55 @@ async fn run_cli_with_capture(
     .kill_on_drop(true);
     if isolated_process_group {
         cmd.process_group(0);
+    }
+
+    #[cfg(feature = "lifecycle-test-hooks")]
+    if operation == "session.create" {
+        if let Some(fd) = std::env::var_os("COLLAB_TEST_REX_LIFETIME_FD") {
+            let fd = fd
+                .to_string_lossy()
+                .parse::<libc::c_int>()
+                .expect("fixture lifetime fd is an integer");
+            unsafe {
+                cmd.pre_exec(move || {
+                    let pid = libc::getpid();
+                    let bytes = pid.to_ne_bytes();
+                    let mut sent = 0;
+                    while sent < bytes.len() {
+                        let written =
+                            libc::write(fd, bytes[sent..].as_ptr().cast(), bytes.len() - sent);
+                        if written < 0 {
+                            if std::io::Error::last_os_error().kind()
+                                == std::io::ErrorKind::Interrupted
+                            {
+                                continue;
+                            }
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        sent += written as usize;
+                    }
+                    let mut acknowledged = [0_u8; 1];
+                    loop {
+                        let read = libc::read(fd, acknowledged.as_mut_ptr().cast(), 1);
+                        if read == 1 {
+                            break;
+                        }
+                        if read < 0 {
+                            let error = std::io::Error::last_os_error();
+                            if error.raw_os_error() == Some(libc::EINTR) {
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                        return Err(std::io::Error::from_raw_os_error(libc::EPIPE));
+                    }
+                    if acknowledged[0] != b'a' {
+                        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                    }
+                    Ok(())
+                });
+            }
+        }
     }
 
     if Instant::now() >= deadline {
@@ -1520,7 +1576,9 @@ async fn send_enter_until(
         false,
     )
     .await
-    .map_err(|error| RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string()))?
+    .map_err(|error| {
+        RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string())
+    })?
     .deliverable_foreground_agent_owner(Some(expected_kind));
     if owner.as_ref().ok().map(|(_, owner)| owner) != Some(expected_owner) {
         return Err(RexError::unknown(
@@ -2231,16 +2289,13 @@ pub(crate) async fn restore_carrier(
             });
         }
     };
-    let session_id = match receipt["session_id"]
-        .as_str()
-        .filter(|id| {
-            *id != saved.session_id
-                && !sessions
-                    .iter()
-                    .any(|session| session["session_id"].as_str() == Some(id))
-                && validate_target_fields(&saved.server, id, &saved.block_id).is_ok()
-        })
-    {
+    let session_id = match receipt["session_id"].as_str().filter(|id| {
+        *id != saved.session_id
+            && !sessions
+                .iter()
+                .any(|session| session["session_id"].as_str() == Some(id))
+            && validate_target_fields(&saved.server, id, &saved.block_id).is_ok()
+    }) {
         Some(session_id) => session_id,
         None => {
             let detail = "RESTORE_OWNERSHIP_UNCONFIRMED: receipt lacks a fresh full session ID";

@@ -51,6 +51,7 @@ fn capture_and_probe_errors_do_not_change_persisted_pane_identity() {
 
 #[test]
 fn recreated_tmux_pane_preserves_identity_without_fabricating_online_recovery() {
+    let _scope = TestTmuxFixtureScope::enter();
     let (server, root) = test_server();
     register(&server, "master-worker", "thread-master");
     register(&server, "cold-worker", "thread-cold");
@@ -164,6 +165,9 @@ fn recreated_tmux_pane_preserves_identity_without_fabricating_online_recovery() 
             &endpoint.socket_path,
             "new-session",
             "-d",
+            "-P",
+            "-F",
+            "#{session_id}",
             "-s",
             "recreated-unowned",
             "sleep 60",
@@ -175,6 +179,11 @@ fn recreated_tmux_pane_preserves_identity_without_fabricating_online_recovery() 
         "{}",
         String::from_utf8_lossy(&created.stderr)
     );
+    let recreated_session = String::from_utf8(created.stdout).unwrap();
+    REGISTERED_TEST_TMUX.with(|fixture| {
+        fixture.borrow().as_ref().expect("registered fixture").0
+            .register_session(recreated_session.trim());
+    });
     assert_eq!(probe_evidence(), endpoint_live);
     let online = dispatch(
         &server_arc,
@@ -255,6 +264,49 @@ fn recreated_tmux_pane_preserves_identity_without_fabricating_online_recovery() 
         }
     );
     drop(state);
+    clear_test_tmux_pools();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn isolated_tmux_recreated_session_cleans_up_on_unwind() {
+    let (server, root) = test_server();
+    let scope = TestTmuxFixtureScope::enter();
+    assert!(register(&server, "recreated-unwind", "thread-recreated-unwind").ok);
+    let (socket, session, processes, (server_pid, server_start)) =
+        REGISTERED_TEST_TMUX.with(|fixture| {
+            let fixture = fixture.borrow();
+            let tmux = &fixture.as_ref().expect("registered fixture").0;
+            let created = with_tmux(|command| {
+                command.args([
+                    "-S", tmux.socket.to_str().unwrap(), "new-session", "-d",
+                    "-P", "-F", "#{session_id}", "-s", "recreated-unowned", "sleep 60",
+                ]).output().unwrap()
+            });
+            assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+            let session = String::from_utf8(created.stdout).unwrap().trim().to_owned();
+            tmux.register_session(&session);
+            let processes = tmux.pane_pids.borrow().clone();
+            let server = tmux.server_pid.borrow().clone().expect("recorded server");
+            (tmux.socket.clone(), session, processes, server)
+        });
+    let panic_payload = "unwind immediately after recreated session registration";
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _scope = scope;
+        std::panic::panic_any(panic_payload);
+    }));
+    assert_eq!(caught.expect_err("deliberate unwind").downcast_ref::<&str>(), Some(&panic_payload));
+    for (pid, start) in processes {
+        assert!(!process_identity_matches(pid, &start), "recreated fixture process survived: {pid}");
+    }
+    assert!(!process_identity_matches(server_pid, &server_start), "recreated server survived");
+    assert!(!socket.exists(), "recreated socket survived");
+    let listed = with_tmux(|command| {
+        command.args(["-S", socket.to_str().unwrap(), "has-session", "-t", &session])
+            .output().unwrap()
+    });
+    assert!(!listed.status.success(), "recreated session survived unwind");
+    drop(server);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -586,7 +638,7 @@ async fn recv_clears_keepalive_unacked_counter() {
 fn context_snapshot_carries_peer_status_and_scheduling_state() {
     let (server, root) = test_server();
     for (id, pane) in [("peer-a", "%1"), ("peer-b", "%2")] {
-        let response = register(&server, id, pane);
+        let response = register_synthetic_peer(&server, id, pane);
         assert!(response.ok, "registering {id} failed: {:?}", response.error);
     }
 
@@ -618,7 +670,7 @@ fn context_snapshot_carries_peer_status_and_scheduling_state() {
 #[test]
 fn context_returns_the_callers_own_runtime_binding_receipt() {
     let (server, root) = test_server();
-    let registered = register(&server, "receipt-worker", "thread-receipt");
+    let registered = register_synthetic_peer(&server, "receipt-worker", "thread-receipt");
     assert!(registered.ok, "registering the peer failed: {registered:?}");
     let receipt = registered.data["command"]["binding"].clone();
     assert!(
@@ -646,8 +698,8 @@ fn context_returns_the_callers_own_runtime_binding_receipt() {
 #[test]
 fn context_never_returns_another_peers_binding() {
     let (server, root) = test_server();
-    let first = register(&server, "receipt-first", "thread-first");
-    let second = register(&server, "receipt-second", "thread-second");
+    let first = register_synthetic_peer(&server, "receipt-first", "thread-first");
+    let second = register_synthetic_peer(&server, "receipt-second", "thread-second");
     assert!(first.ok, "{first:?}");
     assert!(second.ok, "{second:?}");
     let first_receipt = first.data["command"]["binding"].clone();
@@ -675,7 +727,7 @@ fn context_never_returns_another_peers_binding() {
 #[test]
 fn context_returns_the_callers_binding_when_the_root_holds_several_app_scopes() {
     let (server, root) = test_server();
-    let registered = register(&server, "receipt-multi", "thread-multi");
+    let registered = register_synthetic_peer(&server, "receipt-multi", "thread-multi");
     assert!(registered.ok, "registering the peer failed: {registered:?}");
     let receipt = registered.data["command"]["binding"].clone();
     assert!(receipt.is_object(), "{registered:?}");

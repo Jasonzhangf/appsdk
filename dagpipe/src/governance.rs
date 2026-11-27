@@ -31,6 +31,67 @@ pub const ONTOLOGY_RELATION_REJECTED: &str = "ONTOLOGY_RELATION_REJECTED";
 pub const ONTOLOGY_COMMIT_CONFLICT: &str = "ONTOLOGY_COMMIT_CONFLICT";
 pub const ONTOLOGY_OWNER_FAILED: &str = "ONTOLOGY_OWNER_FAILED";
 
+pub const ONTOLOGY_CLAUSE_STRING_FIELDS: &[&str] = &[
+    "clause_id",
+    "axis",
+    "axis_id",
+    "scope",
+    "scenario",
+    "trigger",
+    "state_before",
+    "state_after",
+    "owner",
+];
+
+pub const ONTOLOGY_CLAUSE_ARRAY_FIELDS: &[&str] = &[
+    "allowed_actions",
+    "forbidden_actions",
+    "effects",
+    "evidence",
+];
+
+pub const ONTOLOGY_CLAUSE_GOVERNANCE_FIELDS: &[&str] = &[
+    "edge",
+    "gate_kind",
+    "check",
+    "allow_case",
+    "deny_case",
+    "observation",
+];
+
+/// Validate the structural contract of a full ontology clause declaration.
+pub fn is_valid_ontology_clause_shape(clause: &Value) -> bool {
+    let Some(clause) = clause.as_object() else {
+        return false;
+    };
+    ONTOLOGY_CLAUSE_STRING_FIELDS.iter().all(|key| {
+        clause
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    }) && ONTOLOGY_CLAUSE_ARRAY_FIELDS.iter().all(|key| {
+        clause
+            .get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|item| item.as_str().is_some_and(|s| !s.is_empty()))
+            })
+    }) && clause.get("governance").is_some_and(|governance| {
+        let Some(governance) = governance.as_object() else {
+            return false;
+        };
+        ONTOLOGY_CLAUSE_GOVERNANCE_FIELDS.iter().all(|key| {
+            governance
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
+    })
+}
+
 const COMMIT_OPERATOR: &str = "governance.commit";
 const COMMIT_OPERATOR_VERSION: &str = "1";
 const COMMIT_EFFECT: &str = "ontology.commit";
@@ -2012,4 +2073,52 @@ fn declaration_contract_panic(label: &str, name: &str) -> GovernanceError {
         ONTOLOGY_DECLARATION_INVALID,
         format!("{label} `{name}` panicked while declaring its operator contract"),
     )
+}
+
+#[cfg(test)]
+mod clause_shape_tests {
+    use super::*;
+
+    #[test]
+    fn ontology_clause_shape_accepts_full_clause_and_rejects_missing_or_empty_fields() {
+        let valid = json!({
+            "clause_id": "clause-1",
+            "axis": "object",
+            "axis_id": "obj-1",
+            "scope": "project",
+            "scenario": "commit",
+            "trigger": "on_write",
+            "state_before": "draft",
+            "state_after": "committed",
+            "owner": "appsdk",
+            "allowed_actions": ["write"],
+            "forbidden_actions": ["bypass"],
+            "effects": ["persist"],
+            "evidence": ["receipt"],
+            "governance": {
+                "edge": "validate->commit",
+                "gate_kind": "transition",
+                "check": "gate_ok",
+                "allow_case": "valid",
+                "deny_case": "invalid",
+                "observation": "receipt"
+            }
+        });
+        assert!(is_valid_ontology_clause_shape(&valid));
+
+        let mut missing_gov = valid.clone();
+        missing_gov["governance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("edge");
+        assert!(!is_valid_ontology_clause_shape(&missing_gov));
+
+        let mut empty_array = valid.clone();
+        empty_array["evidence"] = json!([]);
+        assert!(!is_valid_ontology_clause_shape(&empty_array));
+
+        let mut empty_string = valid;
+        empty_string["owner"] = json!("");
+        assert!(!is_valid_ontology_clause_shape(&empty_string));
+    }
 }

@@ -7,7 +7,6 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -193,9 +192,7 @@ pub(super) fn output(value: &Value) {
 }
 
 pub(super) fn digest(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    crate::primitives::sha256_str(value)
 }
 
 pub(super) fn now() -> String {
@@ -203,11 +200,7 @@ pub(super) fn now() -> String {
 }
 
 pub(super) fn valid_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 160
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+    crate::primitives::is_valid_id(value, 160, true)
 }
 
 pub(super) fn assert_id(value: &str) {

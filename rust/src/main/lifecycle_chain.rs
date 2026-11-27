@@ -3,11 +3,13 @@ use super::*;
 pub(super) fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     assert_project_root_safe(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
+    // Validate under the producer lock once so concurrent map edits cannot slip
+    // between preflight and the record transaction without duplicating checks.
+    let _producer_lock = producer_lock(root);
     let project = read_project(root);
     assert_declared_contracts(root, &project);
     assert_lifecycle_producer_map_binding(root, &project, module_id, LifecycleProducer::Records);
-    assert_goal_confirmed(root);
-    let goal = read_goal(root);
+    let goal = read_confirmed_goal(root);
     let input_file = producer_input_path(root, input_path);
     let input: Value = serde_json::from_str(
         &fs::read_to_string(input_file).unwrap_or_else(|_| fail("PRODUCER_INPUT_READ_FAILED")),
@@ -16,11 +18,6 @@ pub(super) fn produce_lifecycle_records(root: &Path, module_id: &str, input_path
     if !input.is_object() {
         fail("INVALID_PRODUCER_INPUT");
     }
-    // Validate again after taking the lock so a concurrent map edit cannot be
-    // accepted between the read-only preflight and the record transaction.
-    let _producer_lock = producer_lock(root);
-    assert_declared_contracts(root, &project);
-    assert_lifecycle_producer_map_binding(root, &project, module_id, LifecycleProducer::Records);
     if producer_string(&input, "/goal_id", "PRODUCER_GOAL_MISSING")
         != producer_string(&goal, "/goal_id", "INVALID_GOAL_CLARIFICATION_RECORD")
     {

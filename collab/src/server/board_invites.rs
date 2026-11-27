@@ -298,7 +298,18 @@ pub(super) fn prepare_board_invitation_locked(
         .current_for_worker(&route.project_scope_id, &route.app_scope_id, &to)
         .map_err(Resp::err)?
         .ok_or_else(|| Resp::err("peer not registered"))?;
-    execution_admission_gate_with_control(state, control, route, id, &to, &slot.identity_key.name)?;
+    if initiator.is_some_and(|actor| board_check_master_locked(server, state, actor).is_ok()) {
+        details.work_policy.protected_role_authorized =
+            work_policy_explicitly_grants_protected_specialty(&details.work_policy);
+    }
+    work_executor_gate_with_control(state, control, route, id, &to)?;
+    execution_candidate_policy_gate(
+        state,
+        route.project_scope_id.as_str(),
+        id,
+        &slot.identity_key.name,
+        &details.work_policy,
+    )?;
     let current = slot
         .active_binding()
         .ok_or_else(|| Resp::err("peer not registered"))?;
@@ -808,9 +819,15 @@ fn board_reassignment_ready(
     recipient_name: &str,
     policy: &crate::board::WorkPolicy,
 ) -> Result<(), Resp> {
+    execution_candidate_gate(
+        state,
+        route.project_scope_id.as_str(),
+        &task.id,
+        recipient_name,
+    )?;
+    let current_roles = state.name_work_roles(route.project_scope_id.as_str(), recipient_name);
     if let Some(roles) = policy.preferred_roles.as_ref() {
-        let current_roles = state.name_work_roles(route.project_scope_id.as_str(), recipient_name);
-        if !roles.iter().any(|role| current_roles.contains(role)) {
+        if !work_policy_matches_roles(policy, &current_roles) {
             return Err(Resp::err_data(
                 "WORK_ROLE_REQUIRED: task is pinned to a preferred role",
                 json!({"task_id":task.id,"required_roles":roles}),

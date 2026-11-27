@@ -1805,6 +1805,15 @@ fn handle_board_command(
                 explicit.work_kind.as_deref(),
                 &explicit,
             );
+            if !is_scheduler
+                && work_policy_explicitly_grants_protected_specialty(&work_policy)
+            {
+                return Resp::err(
+                    "BOARD_MASTER_REQUIRED: only the current project master may grant protected-role Execute work",
+                );
+            }
+            work_policy.protected_role_authorized = is_scheduler
+                && work_policy_explicitly_grants_protected_specialty(&work_policy);
             if !is_scheduler {
                 work_policy.executor_name = None;
             }

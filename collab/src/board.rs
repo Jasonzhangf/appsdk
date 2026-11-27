@@ -75,6 +75,9 @@ pub struct WorkPolicy {
     pub work_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_roles: Option<Vec<String>>,
+    /// Task-specific protected-role exception granted by the project master.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub protected_role_authorized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

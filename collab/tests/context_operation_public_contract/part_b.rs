@@ -3802,6 +3802,44 @@ fn b08_rex_layout_inherits_existing_profile_and_public_query_reads_authoritative
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn b08_rex_first_registration_save_rejects_without_publication() {
+    let (fixture, _listener, server) = rex_layout_public_fixture("rex-first-save");
+    let map_path = fixture.host_state.join("identity-map.json");
+    let before = fs::read(&map_path).ok();
+    let provide = json!({
+        "session_id": "rex-first-save-agent",
+        "profile": "gcm",
+        "rex": {
+            "server": server,
+            "session_id": "session:11111111-1111-1111-1111-111111111111",
+            "block_id": "block:22222222-2222-2222-2222-222222222222",
+            "cwd": fixture.root.to_string_lossy(),
+        }
+    }).to_string();
+    let output = fixture.command(
+        &["context", "--op", "ctxop-first-save", "--provide", &provide, "--save"],
+        None,
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("REX_SAVE_REQUIRES_EXISTING_BINDING"), "{output:?}");
+    assert_eq!(fs::read(&map_path).ok(), before, "rejected Save must not publish a binding");
+    let facts: Value = serde_json::from_str(&provide).unwrap();
+    let registered = fixture.context_provide("ctxop-first-register", &facts, None);
+    assert_eq!(registered["result"]["outcome"], "completed", "{registered}");
+    let registered_map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    assert!(registered_map["slots"][0]["current"]["rex_layout"].is_null());
+    let saved = fixture.context_save("ctxop-first-register-then-save", &facts, None);
+    assert_eq!(saved["result"]["outcome"], "completed", "{saved}");
+    let saved_map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let current = &saved_map["slots"][0]["current"];
+    assert_eq!(current["binding"]["session_id"], facts["session_id"], "{current}");
+    assert_eq!(current["host"]["profile"], facts["profile"], "{current}");
+    assert_eq!(current["rex_layout"]["block_id"], facts["rex"]["block_id"], "{current}");
+    assert_eq!(current["rex_layout"]["layout"]["block_id"], facts["rex"]["block_id"], "{current}");
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
 fn b08_rex_ordinary_profile_recovery_does_not_require_layout_capture() {
     let (fixture, _rex_listener, rex_server) = rex_layout_public_fixture("rex-profile-recovery");
     let suffix = std::process::id();

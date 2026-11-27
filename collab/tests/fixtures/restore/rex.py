@@ -24,10 +24,29 @@ label = "restore-fixture"
 response = {}
 status = 0
 
+preflight_method = {
+    "cancel_preflight_status": "server.status",
+    "cancel_preflight_list": "session.list",
+}.get(mode)
+if method == preflight_method:
+    (root / "preflight-inflight").write_text(method)
+    release = root / "release-create"
+    deadline = time.monotonic() + 10
+    while not release.exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("fixture preflight release marker timed out")
+        time.sleep(0.01)
+
 if method == "server.status":
     response = {"host_id": "fixture-host", "instance_id": "fixture-instance"}
+    if mode == "status_failure":
+        response = {"code": "fixture_status_failure", "message": "fixture native status failure"}
+        status = 1
 elif method == "session.list":
     response = {"sessions": []}
+    if mode == "list_failure":
+        response = {"code": "fixture_list_failure", "message": "fixture native list failure"}
+        status = 1
     if active.exists():
         response["sessions"].append({"label": label, "session_id": sid})
     elif mode == "existing":

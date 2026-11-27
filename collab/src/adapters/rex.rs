@@ -2006,11 +2006,16 @@ pub(crate) async fn restore_carrier(
             .await
             .map_err(|error| RestoreFailure::new("server.status", error.to_string()))
     };
-    verify_service().await?;
+    let service = verify_service().await;
     if is_cancelled() {
         return Err(RestoreFailure::new("cancelled", "RESTORE_CANCELLED"));
     }
-    let listing = api("session.list", None, json!({})).await?;
+    service?;
+    let listing = api("session.list", None, json!({})).await;
+    if is_cancelled() {
+        return Err(RestoreFailure::new("cancelled", "RESTORE_CANCELLED"));
+    }
+    let listing = listing?;
     let sessions = match &listing["sessions"] {
         Value::Null if listing.get("sessions").is_some() => &[][..],
         Value::Array(sessions) => sessions.as_slice(),

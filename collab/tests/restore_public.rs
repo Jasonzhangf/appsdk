@@ -150,8 +150,13 @@ impl Fixture {
             command.process_group(0);
         }
         let mut child = command.spawn().unwrap();
-        let in_flight = self.state.join("create-inflight");
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let preflight = mode.starts_with("cancel_preflight_");
+        let in_flight = self.state.join(if preflight {
+            "preflight-inflight"
+        } else {
+            "create-inflight"
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if in_flight.exists() {
                 break;
@@ -164,9 +169,16 @@ impl Fixture {
                 );
             }
             if Instant::now() >= deadline {
+                if signal_group {
+                    unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+                }
                 child.kill().ok();
-                child.wait().ok();
-                panic!("fixture create did not reach its in-flight marker");
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "fixture {mode} did not reach its in-flight marker: stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -177,8 +189,10 @@ impl Fixture {
         };
         let signal = unsafe { libc::kill(signal_target, libc::SIGINT) };
         assert_eq!(signal, 0, "failed to interrupt restore");
-        fs::write(self.state.join("release-create"), b"signal-delivered")
-            .expect("failed to release fixture create response");
+        if !preflight {
+            fs::write(self.state.join("release-create"), b"signal-delivered")
+                .expect("failed to release fixture create response");
+        }
         let output = child.wait_with_output().unwrap();
         let result: Value = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)));
@@ -584,6 +598,43 @@ fn restore_public_cancellation_is_typed_and_routes_through_exact_id_cleanup() {
             "{mode}: {result}"
         );
         assert_eq!(f.has_carrier(), expected_carrier, "{mode}: {result}");
+    }
+}
+
+#[test]
+fn restore_public_foreground_sigint_during_preflight_is_typed_without_mutation() {
+    for (mode, completed_reads) in [
+        ("cancel_preflight_status", vec![]),
+        ("cancel_preflight_list", vec!["server.status"]),
+    ] {
+        let f = Fixture::new();
+        let before = serde_json::to_vec(&f.map()).unwrap();
+        let (code, result, receipts) = f.interrupt_during_create(mode, true);
+        assert_eq!(code, 2, "{mode}: {result}");
+        assert_eq!(result["error"]["stage"], "cancelled", "{mode}: {result}");
+        assert!(result.to_string().contains("RESTORE_CANCELLED"), "{mode}: {result}");
+        assert!(result.get("result").is_none(), "{mode}: {result}");
+        assert_eq!(methods(&receipts), completed_reads, "{mode}: {receipts:?}");
+        assert!(!f.has_carrier(), "{mode}");
+        assert_eq!(fs::read(f.state.join("identity-map.json")).unwrap(), before);
+    }
+}
+
+#[test]
+fn restore_public_preflight_native_errors_without_cancellation_are_preserved() {
+    for (mode, stage, expected_calls) in [
+        ("status_failure", "server.status", vec!["server.status"]),
+        ("list_failure", "session.list", vec!["server.status", "session.list"]),
+    ] {
+        let f = Fixture::new();
+        let (code, result, receipts) =
+            f.run(f.map(), mode, WORKER, "appserver-cli", BINDING, "1", true);
+        assert_eq!(code, 2, "{mode}: {result}");
+        assert_eq!(result["error"]["stage"], stage, "{mode}: {result}");
+        assert!(!result.to_string().contains("RESTORE_CANCELLED"), "{mode}: {result}");
+        assert!(result.get("result").is_none(), "{mode}: {result}");
+        assert_eq!(methods(&receipts), expected_calls, "{mode}: {receipts:?}");
+        assert!(!f.has_carrier(), "{mode}");
     }
 }
 

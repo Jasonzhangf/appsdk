@@ -128,6 +128,36 @@ impl ProjectRuntimeManager {
             .or(request.approval.as_ref())
             .and_then(|approval| approval["action"].as_str()),
             Some("restore_name" | "restore_master"));
+        if request.save && facts.rex.is_some() {
+            let control = match self.binding_control_store().load() {
+                Ok(control) => control,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            let existing = match if allow_explicit_rex_rebind {
+                control.lookup_explicit_rex_rebind(
+                    &context.project_scope,
+                    &context.app_scope_id,
+                    &facts,
+                    request.invocation_cwd.as_deref(),
+                )
+            } else {
+                control.lookup(
+                    &context.project_scope,
+                    &context.app_scope_id,
+                    &facts,
+                    request.invocation_cwd.as_deref(),
+                )
+            } {
+                Ok(existing) => existing,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            if existing.is_none() {
+                return (
+                    self.host.clone(),
+                    Resp::err("REX_SAVE_REQUIRES_EXISTING_BINDING: register without --save first"),
+                );
+            }
+        }
         let rex_recovery = if facts.rex.is_some() && !allow_explicit_rex_rebind {
             match self.observe_rex_recovery(
                 &context,

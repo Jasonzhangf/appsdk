@@ -52,8 +52,26 @@ Claim/start a queued candidate only when current admission permits it. If the
 candidate conflicts with resources retained by the waiting task, leave it
 queued and select another nonconflicting candidate. Do not release resources
 implicitly. On a release or recovery notice, run `collab task status '<id>'`
-and `collab board show`; verify the actual blocker and capacity before using
-the existing resume transition. See the [patrol decision table](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation)
+and `collab board show`. Match the original persisted wait's holder to the
+current blocked task's `RESOURCE_RELEASED=<holder-id>` next_step and cleared
+wait (`wait=null`). Compare current `block_requests` through
+`collab context --query` when the original decision receipt is missing: an approved business
+block has its own decision and resume condition; blocked status or a release
+message alone does not prove that business condition has cleared.
+
+After the matching release or the approved business block's own recovery is
+evidenced, the current owner resumes a public Board task with
+`collab board update '<id>' --expected-revision <revision> --status working --next '<resume-evidence>'`.
+Use the revision from the current Board. For a legacy non-Board task use
+`collab task update '<id>' --status working --next '<resume-evidence>'`.
+The server gates the transition on current executor and resource ownership and
+conflicts. Require a successful working receipt; read its Execute phase before
+using Table A's claimed-attempt start branch. On refusal preserve the typed
+error and responsibility, refresh status/Board, resolve the named conflict or
+escalate to its owner, and continue independent work. Do not force a transition
+or self-approve a business block.
+
+See the [patrol decision table](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation)
 for task-scoped cancellation when only an evidenced external dependency remains.
 
 Waiting is not abandonment. On a supported wake, use current conflict evidence,

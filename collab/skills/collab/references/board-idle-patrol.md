@@ -21,7 +21,7 @@ generic continue-work rows.
 | The task's recorded recovery signal arrives and automatic continuation is needed again | task owner | `collab notify subscribe --event board-idle --task-id '<id>'`, then `collab notify status` | `<id>` from the existing task | Read `board_patrol`; the same task-scoped subscription is active again. |
 | Jenny has no actionable project work and current project-cancellation eligibility is satisfied | current project master | `collab notify cancel --event master-idle --reason '<reason>' --resume-condition '<resume-condition>'`, then `collab notify status` | current project progress and task state | Read `project_patrol`; the original project subscription is `cancelled`. |
 | Project cancellation is rejected | current project master | Read the exact result and listed blocking task IDs; advance those tasks or record missing progress through the existing authorized path | cancellation receipt | Preserve the rejection. Retry cancellation only after the named eligibility gap has observable evidence. |
-| Explicit project-patrol rearm is authorized and needed | current project master | `collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <n> --ttl-seconds <n>`, then `collab notify status` | existing authorized count/TTL and current project | Read `project_patrol`; reuse the existing subscription record. |
+| Explicit project-patrol rearm is authorized and needed | current project master | `collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <repeat-count> --ttl-seconds <ttl-seconds>`, then `collab notify status` | `<repeat-count>` is the existing authorized delivery count; `<ttl-seconds>` is the authorized lifetime in seconds; current project selects the subscription | Read `project_patrol`; reuse the existing subscription record. |
 
 The message subject and cancellation event are different namespaces:
 
@@ -224,7 +224,7 @@ collab notify status
 
 ```text
 collab notify cancel --event master-idle [--reason <text>] [--resume-condition <text>]
-collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <n> --ttl-seconds <n>
+collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <repeat-count> --ttl-seconds <ttl-seconds>
 collab notify status
 ```
 

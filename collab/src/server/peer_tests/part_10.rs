@@ -21,7 +21,76 @@ fn p4_decision_table_busy_slot_vs_queued_candidate() {
             "collab board claim '<id>' --expected-revision <revision>",
             "collab task start '<id>' --expected-revision <revision> --attempt <attempt>",
             "Leave queued work queued",
-            "Preserve the typed error",
+            "preserve any other typed error",
+            "current stable-name owner",
+            "execute.status == queued",
+            "attempt_generation == null",
+            "working or rework task",
+            "TICKET_STALE_BINDING",
+            "queued recovery case",
+            "stale-binding recovery case",
+            "require a fresh claimed attempt before",
+            "Direct task start only after the claim receipt",
+            "claimed Execute attempt for the current binding",
+            "owner-local claim can succeed without an Execute phase",
+        ] {
+            assert!(text.contains(required), "missing {required}: {text}");
+        }
+        for forbidden in [
+            "matching attempt was revoked",
+            "older binding's",
+            "binding generation",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "unobservable history requirement {forbidden}: {text}"
+            );
+        }
+    }
+    let table = include_str!("../../../skills/collab/operations.md")
+        .split("### Table A:")
+        .nth(1)
+        .unwrap()
+        .split("### Admission and completion sequence")
+        .next()
+        .unwrap();
+    for (branch, status_phrase) in [
+        ("queued recovery case", "working task"),
+        ("stale-binding recovery case", "working or rework task"),
+    ] {
+        let row = table.lines().find(|line| line.contains(branch)).unwrap();
+        assert!(row.contains("collab board claim '<id>' --expected-revision <revision>"));
+        assert!(row.contains("current stable-name owner"));
+        assert!(row.contains("attempt_generation == null"));
+        assert!(row.contains(status_phrase), "missing {status_phrase}: {row}");
+        if branch == "stale-binding recovery case" {
+            assert!(row.contains("Require a fresh claimed attempt before `collab task start`"));
+        }
+    }
+    assert!(table.contains("TICKET_STALE_BINDING"));
+    assert!(table.contains("execute.status == claimed"));
+    assert!(table.contains("Direct task start only after the claim receipt"));
+    for forbidden in [
+        "matching attempt was revoked",
+        "Execute batches",
+        "binding generation",
+    ] {
+        assert!(!table.contains(forbidden), "{table}");
+    }
+}
+
+#[test]
+fn p4_decision_table_invitation_modes_and_acceptance() {
+    for master in [false, true] {
+        let context = p4_decision_table_context(master);
+        let text = context["role_brief"].to_string();
+        for required in [
+            "stored long-horizon declaration",
+            "BOARD_LONG_HORIZON_CONTENT_REQUIRED",
+            "--long-horizon-content",
+            "--long-horizon-every-ms",
+            "--one-shot",
+            "collab board respond '<id>' --accept --expected-revision <revision>",
         ] {
             assert!(text.contains(required), "missing {required}: {text}");
         }
@@ -56,6 +125,12 @@ fn p4_decision_table_resource_wait_vs_business_block() {
         "collab board show",
         "retained resources",
         "nonconflicting eligible work",
+        "RESOURCE_RELEASED",
+        "wait=null",
+        "block_requests",
+        "collab board update '<id>' --expected-revision <revision> --status working --next '<resume-evidence>'",
+        "collab task update '<id>' --status working --next '<resume-evidence>'",
+        "On refusal",
     ] {
         assert!(text.contains(required), "missing {required}: {text}");
     }
@@ -74,6 +149,8 @@ fn p4_decision_table_patrol_subject_vs_cancellation_event() {
             "master-dispatch-gap",
             "collab notify status",
             "direct-message reception",
+            "board-idle-patrol.md#table-c-patrol-wakes-and-cancellation",
+            "rearm",
         ] {
             assert!(text.contains(required), "missing {required}: {text}");
         }
@@ -82,6 +159,9 @@ fn p4_decision_table_patrol_subject_vs_cancellation_event() {
             "{text}"
         );
     }
+    let table = include_str!("../../../skills/collab/references/board-idle-patrol.md");
+    assert!(table.contains("--repeat-count <repeat-count> --ttl-seconds <ttl-seconds>"));
+    assert!(!table.contains("--repeat-count <n> --ttl-seconds <n>"));
 }
 
 #[test]
@@ -94,7 +174,9 @@ fn p4_decision_table_valid_binding_vs_actual_recovery() {
         "collab task status '<id>'",
         "identity is unknown",
         "binding error",
-        "registered=true",
+        "completed",
+        "result.snapshot.registered=true",
+        "valid name, role, and binding",
         "role_brief",
         "operations",
         "next_actions",

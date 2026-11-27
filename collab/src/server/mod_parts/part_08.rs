@@ -2895,9 +2895,63 @@ fn task_block_decide_locked(
             task: updated_task.clone(),
         });
     }
+    let mut continuation_message_id = None;
     let commit = match control {
-        Some(control) => server.commit_locked_checked_with_control(st, &events, control),
-        None => server.commit_locked_checked(st, &events),
+        Some(control) => {
+            if decision == "approve" {
+                if let Ok(Some(route)) = server_route_scope(server, st) {
+                    let mut continuation_state = st.clone();
+                    let _ = continuation_state.apply_checked(&Event::TaskUpdated {
+                        task: updated_task.clone(),
+                    });
+                    let continuation = ticket_continuation_events(
+                        &continuation_state,
+                        control,
+                        &route,
+                        &updated_task.owner,
+                        &[],
+                        false,
+                    );
+                    for event in &continuation {
+                        if let Event::WakeBound { message_id, .. } = event {
+                            continuation_message_id = Some(message_id.clone());
+                        }
+                    }
+                    events.extend(continuation);
+                }
+            }
+            server.commit_locked_checked_with_control(st, &events, control)
+        }
+        None => {
+            if decision == "approve" {
+                if let Ok(Some(route)) = server_route_scope(server, st) {
+                    if let Ok(loaded) =
+                        binding_store::BindingControlStore::new(server.host_paths.state_root())
+                            .load()
+                    {
+                        let mut continuation_state = st.clone();
+                        let _ = continuation_state.apply_checked(&Event::TaskUpdated {
+                            task: updated_task.clone(),
+                        });
+                        let continuation = ticket_continuation_events(
+                            &continuation_state,
+                            &loaded,
+                            &route,
+                            &updated_task.owner,
+                            &[],
+                            false,
+                        );
+                        for event in &continuation {
+                            if let Event::WakeBound { message_id, .. } = event {
+                                continuation_message_id = Some(message_id.clone());
+                            }
+                        }
+                        events.extend(continuation);
+                    }
+                }
+            }
+            server.commit_locked_checked(st, &events)
+        }
     };
     if let Err(error) = commit {
         return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
@@ -2907,7 +2961,12 @@ fn task_block_decide_locked(
         "status": updated_task.status,
         "owner": updated_task.owner,
         "block_request": request,
-        "notification": "none",
+        "notification": if continuation_message_id.is_some() {
+            "auto-ticket-continuation"
+        } else {
+            "none"
+        },
+        "notification_message_id": continuation_message_id,
         "next_action": if decision == "approve" {
             "task is blocked; resume only after the blocker is resolved"
         } else {

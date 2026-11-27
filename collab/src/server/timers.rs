@@ -883,6 +883,12 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
                 current
                     .patrol_idle_since_ms
                     .filter(|start| *start > 0 && *start <= now)
+                    .or_else(|| {
+                        super::worker_agent_facts(server, &state, &worker)
+                            .1
+                            .and_then(|fact| fact.idle_since_ms)
+                            .filter(|start| *start > 0 && *start <= now)
+                    })
                     .or(Some(now))
             } else {
                 None

@@ -1164,7 +1164,7 @@ impl ProjectRuntimeManager {
         task_id: String,
         blocking_task_id: String,
     ) -> Result<Resp, Resp> {
-        self.with_current_task_state_response(
+        let response = self.with_current_task_state_response(
             runtime,
             context,
             &worker_id,
@@ -1180,7 +1180,9 @@ impl ProjectRuntimeManager {
                     blocking_task_id.clone(),
                 ))
             },
-        )
+        )?;
+        deliver_board_auto_notice(runtime, &response);
+        Ok(response)
     }
 
     #[allow(clippy::too_many_arguments)]

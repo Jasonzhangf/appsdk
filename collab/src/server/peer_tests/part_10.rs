@@ -214,6 +214,98 @@ fn master_context_routes_ready_independent_work() {
 }
 
 #[test]
+fn context_next_actions_guides_unread_messages_and_tasks_without_next_step() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "master", "thread-master").ok);
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    promote_master(&server, "master", "user-approved");
+
+    let send = handle_send(
+        &server,
+        "master".into(),
+        "peer".into(),
+        "notify".into(),
+        Some("assignment".into()),
+        "start here".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(send.ok, "{send:?}");
+
+    {
+        let mut state = server.state.lock().unwrap();
+        let now = now_ms();
+        state
+            .apply_checked(&Event::TaskCreated {
+                task: TaskRec {
+                    id: "T-no-next".into(),
+                    owner: "peer".into(),
+                    created_by: "master".into(),
+                    feature_id: None,
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: default_priority(),
+                    status: "working".into(),
+                    next_step: None,
+                    wait: None,
+                    isolation_mode: None,
+                    created_ms: now,
+                    updated_ms: now,
+                },
+            })
+            .unwrap();
+    }
+
+    let context = handle_context(&server, "peer".into(), "token-peer".into());
+    assert!(context.ok, "{}", context.error.unwrap_or_default());
+    let next_actions: Vec<String> = context.data["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        next_actions
+            .iter()
+            .any(|action| action.contains("collab recv")),
+        "missing unread action in {next_actions:?}"
+    );
+    assert!(
+        next_actions
+            .iter()
+            .any(|action| action.contains("collab task status T-no-next")),
+        "missing task next_step fallback in {next_actions:?}"
+    );
+    {
+        let mut state = server.state.lock().unwrap();
+        state
+            .workers
+            .get_mut("peer")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .kind = crate::proto::TransportKind::Dsh;
+    }
+    let dsh_context = handle_context(&server, "peer".into(), "token-peer".into());
+    assert!(dsh_context.ok, "{}", dsh_context.error.unwrap_or_default());
+    let dsh_actions: Vec<String> = dsh_context.data["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        dsh_actions
+            .iter()
+            .any(|action| action.contains("collab inbox") && action.contains("do not run collab recv")),
+        "DSH context must guide collab inbox without instructing collab recv: {dsh_actions:?}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn board_invitation_uses_authoritative_binding_when_identity_projection_is_stale() {
     let (server, root) = test_server();
     let server = Arc::new(server);

@@ -592,6 +592,25 @@ pub fn replace_unresponsive_daemon(
     if failed_connection_status(sock, &error) != DaemonAvailability::Unknown {
         return Ok(None);
     }
+    stop_verified_held_daemon(sock, pid_path)
+}
+
+/// Stop an already-held daemon verified against the host writer lock, owner
+/// publication, and PID file before restarting on the current binary.
+pub fn replace_running_daemon(
+    sock: &Path,
+    pid_path: &Path,
+) -> anyhow::Result<Option<ReplacedDaemon>> {
+    if !alive(sock) {
+        return Ok(None);
+    }
+    stop_verified_held_daemon(sock, pid_path)
+}
+
+fn stop_verified_held_daemon(
+    sock: &Path,
+    pid_path: &Path,
+) -> anyhow::Result<Option<ReplacedDaemon>> {
     let server_dir = sock
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid collab server socket path"))?;

@@ -1,15 +1,9 @@
 use super::*;
 
 pub(super) fn atomic_write_bytes(target: &Path, bytes: &[u8], error: &str) {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| fail("STAGING_NONCE_FAILED"))
-        .as_nanos();
-    let staging = target.with_extension(format!("staging.{}.{}", std::process::id(), nonce));
-    if fs::symlink_metadata(&staging)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
+    let staging = crate::primitives::staging_path_for(target)
+        .unwrap_or_else(|_| fail("STAGING_NONCE_FAILED"));
+    if crate::primitives::is_symlink(&staging) {
         fail("GOVERNANCE_PATH_SYMLINK:staging");
     }
     if let Err(write_error) = fs::write(&staging, bytes) {

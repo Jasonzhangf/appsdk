@@ -578,9 +578,12 @@ pub(crate) enum Cmd {
         #[arg(long)]
         service: bool,
     },
-    /// User maintenance entrypoint
-    #[command(hide = true)]
-    Up,
+    /// Start or restart the local Collab daemon and bind LaunchAgent autostart
+    Up {
+        /// Force restarting even a healthy same-version detached daemon
+        #[arg(long)]
+        restart: bool,
+    },
     /// User maintenance entrypoint
     #[command(hide = true)]
     Down,

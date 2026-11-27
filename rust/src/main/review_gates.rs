@@ -1,10 +1,23 @@
 use super::*;
 
+pub(super) struct ArchitectureGateRecords {
+    pub(super) worktree: Value,
+    pub(super) reproduction: Value,
+    pub(super) candidate: Value,
+    pub(super) review: Value,
+}
+
+pub(super) struct EffectivenessGateResult {
+    pub(super) record: Value,
+    pub(super) has_post_architecture_effectiveness: bool,
+}
+
 pub(super) fn verify_review_admission(root: &Path, module_id: &str) {
     assert_project_root_safe(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
-    assert_goal_confirmed(root);
-    let project = read_project(root);
+    let mut cache = GateVerificationCache::default();
+    cache.confirmed_goal(root);
+    let project = cache.project(root);
     let module = project
         .get("modules")
         .and_then(Value::as_array)
@@ -20,7 +33,7 @@ pub(super) fn verify_review_admission(root: &Path, module_id: &str) {
         // generated checkout projection may have been intentionally removed,
         // so review admission must resolve the artifact from the immutable
         // historical archive and validate the publication graph only.
-        verify_internal(root, true, false, false, false);
+        verify_internal_cached(root, true, false, false, false, &mut cache);
         let artifact = read_historical_module_artifact(root, &project, module, module_id);
         if !matches!(
             artifact.get("stage").and_then(Value::as_str),
@@ -39,7 +52,7 @@ pub(super) fn verify_review_admission(root: &Path, module_id: &str) {
         return;
     }
 
-    let artifact = assert_review_author_readiness(root, module_id);
+    let artifact = assert_review_author_readiness_cached(root, module_id, &mut cache);
     // At architecture_stable the full verifier owns this check. Before that
     // stage, admission must still reject a supplied stale PASS; context
     // assembly deliberately does not depend on that downstream record.
@@ -47,9 +60,9 @@ pub(super) fn verify_review_admission(root: &Path, module_id: &str) {
         && lifecycle_chain_read_record_if_present(root, module_id, "review-record")
             .is_some_and(|review| review["verdict"] == "pass")
     {
-        assert_fix_architecture_gate(root, module_id, &artifact);
+        assert_fix_architecture_gate_cached(root, module_id, &artifact, &mut cache);
     }
-    verify_internal(root, true, true, true, false);
+    verify_internal_cached(root, true, true, true, false, &mut cache);
     println!(
         "{{\"ok\":true,\"gate\":\"review_admission\",\"module_id\":\"{}\"}}",
         module_id
@@ -261,7 +274,21 @@ pub(super) fn assert_review_map_bindings(
     }
 }
 
-pub(super) fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) {
+pub(super) fn assert_fix_architecture_gate(
+    root: &Path,
+    module_id: &str,
+    artifact: &Value,
+) -> ArchitectureGateRecords {
+    let mut cache = GateVerificationCache::default();
+    assert_fix_architecture_gate_cached(root, module_id, artifact, &mut cache)
+}
+
+pub(super) fn assert_fix_architecture_gate_cached(
+    root: &Path,
+    module_id: &str,
+    artifact: &Value,
+    cache: &mut GateVerificationCache,
+) -> ArchitectureGateRecords {
     let worktree_name = module_record_name("worktree-record", module_id);
     let reproduction_name = module_record_name("reproduction-record", module_id);
     let candidate_name = module_record_name("fix-candidate-record", module_id);
@@ -270,7 +297,7 @@ pub(super) fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifac
     let reproduction = read_record(root, &reproduction_name);
     let candidate = read_record(root, &candidate_name);
     let review = read_record(root, &review_name);
-    assert_pre_review_validation_gate(root, module_id, artifact);
+    cache.ensure_pre_review_validation(root, module_id, artifact);
     let validation_name = module_record_name("pre-review-validation-record", module_id);
     let validation = read_record(root, &validation_name);
     if record_str(&review, "/pre_review_validation_id", &review_name)
@@ -339,7 +366,11 @@ pub(super) fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifac
         baseline_id,
         EvidenceValidationMode::Current(Utc::now()),
     );
-    if record_str(&baseline, "/phase", baseline_id) != "baseline_reproduction"
+    if record_str(&baseline, "/evidence_id", baseline_id) != baseline_id
+        || baseline.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
+        || record_str(&baseline, "/issue_id", baseline_id) != issue_id
+        || record_str(&baseline, "/scope_hash", baseline_id) != scope_hash
+        || record_str(&baseline, "/phase", baseline_id) != "baseline_reproduction"
         || baseline.get("result").and_then(Value::as_str) != Some("pass")
         || baseline.get("input_hashes") != reproduction.get("input_hashes")
     {
@@ -352,7 +383,8 @@ pub(super) fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifac
             .unwrap_or_else(|| fail("INVALID_CANDIDATE_EVIDENCE_ID"));
         let evidence = evidence_by_id(root, module_id, id);
         assert_evidence_record(&evidence, id, EvidenceValidationMode::Current(Utc::now()));
-        if record_str(&evidence, "/issue_id", id) != issue_id
+        if record_str(&evidence, "/evidence_id", id) != id
+            || record_str(&evidence, "/issue_id", id) != issue_id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/scope_hash", id) != scope_hash
             || record_str(&evidence, "/source_commit", id) != candidate_commit
@@ -378,7 +410,8 @@ pub(super) fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifac
             .unwrap_or_else(|| fail("INVALID_REVIEW_EVIDENCE_ID"));
         let evidence = evidence_by_id(root, module_id, id);
         assert_evidence_record(&evidence, id, EvidenceValidationMode::Current(Utc::now()));
-        if record_str(&evidence, "/issue_id", id) != issue_id
+        if record_str(&evidence, "/evidence_id", id) != id
+            || record_str(&evidence, "/issue_id", id) != issue_id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/scope_hash", id) != scope_hash
             || record_str(&evidence, "/source_commit", id) != candidate_commit
@@ -390,7 +423,7 @@ pub(super) fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifac
         }
     }
     assert_lifecycle_chain_review_identity_or_frozen_legacy(root, module_id, &review);
-    let project = read_project(root);
+    let project = cache.project(root);
     let historical = project["modules"].as_array().is_some_and(|modules| {
         modules.iter().any(|module| {
             module["module_id"].as_str() == Some(module_id)
@@ -401,7 +434,7 @@ pub(super) fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifac
         let binding = review
             .pointer("/project_bindings/requirements_review")
             .unwrap_or_else(|| fail("ARCHITECTURE_REQUIREMENTS_REVIEW_MISSING"));
-        assert_review_requirements_binding(root, module_id, binding);
+        assert_review_requirements_binding_cached(root, module_id, binding, cache);
     }
     if git_value(
         root,
@@ -416,9 +449,18 @@ pub(super) fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifac
     {
         fail("FIX_ARCHITECTURE_ORDER_OR_IDENTITY_INVALID");
     }
+    ArchitectureGateRecords {
+        worktree,
+        reproduction,
+        candidate,
+        review,
+    }
 }
 
-pub(super) fn assert_fix_effectiveness_gate(root: &Path, module_id: &str) {
+pub(super) fn assert_fix_effectiveness_gate(
+    root: &Path,
+    module_id: &str,
+) -> EffectivenessGateResult {
     let reproduction_name = module_record_name("reproduction-record", module_id);
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let review_name = module_record_name("review-record", module_id);
@@ -483,7 +525,8 @@ pub(super) fn assert_fix_effectiveness_gate(root: &Path, module_id: &str) {
     for id in ids {
         let evidence = evidence_by_id(root, module_id, &id);
         assert_evidence_record(&evidence, &id, EvidenceValidationMode::Current(Utc::now()));
-        if record_str(&evidence, "/issue_id", &id) != issue_id
+        if record_str(&evidence, "/evidence_id", &id) != id
+            || record_str(&evidence, "/issue_id", &id) != issue_id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/scope_hash", &id) != scope_hash
             || record_str(&evidence, "/source_commit", &id) != candidate_commit
@@ -516,27 +559,31 @@ pub(super) fn assert_fix_effectiveness_gate(root: &Path, module_id: &str) {
             fail(format!("MISSING_EFFECTIVENESS_EVIDENCE_PHASE:{}", phase));
         }
     }
-    if !phases.iter().any(|phase| {
-        matches!(
-            phase.as_str(),
-            "post_architecture_effectiveness" | "deployed_blackbox"
-        )
-    }) {
+    let has_post_architecture_effectiveness = phases
+        .iter()
+        .any(|phase| phase == "post_architecture_effectiveness");
+    if !has_post_architecture_effectiveness
+        && !phases.iter().any(|phase| phase == "deployed_blackbox")
+    {
         fail("MISSING_EFFECTIVENESS_EVIDENCE_PHASE:public_entrypoint");
+    }
+    EffectivenessGateResult {
+        record: effectiveness,
+        has_post_architecture_effectiveness,
     }
 }
 
-pub(super) fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
+pub(super) fn assert_parallel_merge_gate(root: &Path, module_id: &str) -> Value {
     let promotion_name = module_record_name("promotion-record", module_id);
     let promotion = read_record(root, &promotion_name);
-    assert_parallel_merge_gate_for_promotion(root, module_id, &promotion);
+    assert_parallel_merge_gate_for_promotion(root, module_id, &promotion)
 }
 
 pub(super) fn assert_parallel_merge_gate_for_promotion(
     root: &Path,
     module_id: &str,
     promotion: &Value,
-) {
+) -> Value {
     let worktree_name = module_record_name("worktree-record", module_id);
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let effectiveness_name = module_record_name("effectiveness-record", module_id);
@@ -919,4 +966,5 @@ pub(super) fn assert_parallel_merge_gate_for_promotion(
     {
         fail("PARALLEL_MERGE_ORDER_INVALID");
     }
+    merge
 }

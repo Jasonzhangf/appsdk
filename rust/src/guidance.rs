@@ -1,6 +1,5 @@
 use chrono::Utc;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -69,49 +68,15 @@ fn output(value: &Value) {
 }
 
 fn canonical(value: &Value) -> String {
-    match value {
-        Value::Null => "null".into(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).unwrap(),
-        Value::Array(values) => format!(
-            "[{}]",
-            values.iter().map(canonical).collect::<Vec<_>>().join(",")
-        ),
-        Value::Object(values) => {
-            let mut keys = values.keys().collect::<Vec<_>>();
-            keys.sort();
-            format!(
-                "{{{}}}",
-                keys.iter()
-                    .map(|key| format!(
-                        "{}:{}",
-                        serde_json::to_string(key).unwrap(),
-                        canonical(&values[*key])
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        }
-    }
-}
-
-fn digest_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+    crate::primitives::canonical_json(value)
 }
 
 fn digest_value(value: &Value) -> String {
-    digest_bytes(canonical(value).as_bytes())
+    crate::primitives::sha256_value(value)
 }
 
 fn valid_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 160
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    crate::primitives::is_valid_id(value, 160, false)
 }
 
 fn assert_id(value: &str, code: &str) {
@@ -197,25 +162,12 @@ fn compiled_relative(project: &Value) -> PathBuf {
 }
 
 fn assert_mutation_worktree(root: &Path) {
-    let result = Command::new("git")
-        .args([
-            "-C",
-            root.to_str().unwrap_or("."),
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "HEAD",
-        ])
-        .output();
-    if let Ok(result) = result {
-        if result.status.success() {
-            let branch = String::from_utf8_lossy(&result.stdout);
-            if matches!(branch.trim(), "main" | "master") {
-                fail(
-                    "GUIDANCE_MAIN_MUTATION_FORBIDDEN",
-                    "create a clean owner worktree from latest origin/main",
-                );
-            }
+    if let Ok(Some(branch)) = crate::primitives::git_current_branch(root) {
+        if matches!(branch.as_str(), "main" | "master") {
+            fail(
+                "GUIDANCE_MAIN_MUTATION_FORBIDDEN",
+                "create a clean owner worktree from latest origin/main",
+            );
         }
     }
 }

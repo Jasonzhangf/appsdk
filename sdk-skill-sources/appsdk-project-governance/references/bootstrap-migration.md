@@ -313,6 +313,22 @@ upgrade uses [governance ablation](#existing-project-governance-ablation).
 For that migration or reset scope, inventory AppSDK roots, maps, records,
 Active/Protected, local control state, claims, and worktrees. Choose one route:
 
+### State-by-state migration matrix to `0.1.0015`
+
+All legacy `0.1.x` consumers must move to `0.1.0015`. Do not guess between
+`init`, `pin-lock`, `prepare`, and `--fresh --discard-legacy`; run the read-only
+inspection in [`appsdk-migration`](../../appsdk-migration/SKILL.md#3-appsdk-version-migration-runbook-legacy-01x---010015)
+and match the exact state:
+
+| Current `.appsdk/project.json` state | Checkout / worktree requirement | Exact command sequence | Notes |
+| --- | --- | --- | --- |
+| `.sdk.version == "0.1.0015"`, `sdk-resources.json` valid, only `docs`/`rules`/`skills` stale | Canonical project checkout on clean non-`main` branch | `appsdk resources refresh .` -> `appsdk verify .` | Refreshes `docs`/`rules`/`skills` only; keeps contracts, `AGENTS.md`, records, `active/`, `protected/` |
+| `.sdk.version == "0.1.0015"`, `sdk-resources.json` or `contracts/` missing/invalid | Canonical project checkout (ordinary `init` rejects linked worktrees) | `appsdk init .` -> `appsdk verify .` | Non-destructive; rebuilds managed bundle and `sdk-resources.json` |
+| `.sdk.version == "0.1.0014"`, canonical maps intact | Canonical project checkout on clean non-`main` branch | `appsdk pin-lock . --binary "$(command -v appsdk)"` -> `appsdk init .` -> `appsdk verify .` | Upgrades lock and bundle in place; if map reconciliation fails, preserve exact error before reconciling or requesting authorized `--fresh` |
+| `.sdk.version` in `0.1.5`–`0.1.0013` (retired legacy baseline) | Clean non-`main`/`master` linked `git worktree` + explicit user discard authorization | `appsdk init "$PWD" --fresh --discard-legacy` -> optional `appsdk guide init --task governance-reset --mode bootstrap --module <id>` / `appsdk guide compile` -> `appsdk verify .` | Rebuilds `.appsdk/` and declared `generated_root` on `0.1.0015`; preserves business source, runtime data, `active/`, `protected/`, `.agent-collab/` |
+| Absent (first adoption / new root) | Canonical project checkout | `appsdk prepare` -> user confirms `.appsdk-prepare.json` -> `appsdk init .` -> `appsdk verify .` | Never self-confirm `.appsdk-prepare.json` |
+| Malformed / unreadable JSON | Read-only until diagnosed | Stop and report exact parse error | Never auto-delete `.appsdk/` |
+
 ### Preserve and migrate
 
 Use the existing governed root identified by `.appsdk/project.json`. For a

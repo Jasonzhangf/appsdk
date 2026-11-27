@@ -624,14 +624,18 @@ fn help_and_mcp_hide_maintenance_commands_and_credentials() {
         .expect("run collab help");
     assert!(help.status.success());
     let help_text = output_text(&help).to_lowercase();
-    for command in ["up", "down"] {
-        assert!(
-            !help_text
-                .lines()
-                .any(|line| line.trim_start().starts_with(&format!("{command} "))),
-            "agent help exposed {command}: {help_text}"
-        );
-    }
+    assert!(
+        help_text
+            .lines()
+            .any(|line| line.trim_start().starts_with("up ")),
+        "agent help should document collab up: {help_text}"
+    );
+    assert!(
+        !help_text
+            .lines()
+            .any(|line| line.trim_start().starts_with("down ")),
+        "agent help exposed down: {help_text}"
+    );
     for secret in ["maintenance password", "maintenance_password"] {
         assert!(
             !help_text.contains(secret),
@@ -675,45 +679,43 @@ fn help_and_mcp_hide_maintenance_commands_and_credentials() {
 }
 
 #[test]
-fn agent_runtime_cannot_manage_daemon_even_with_a_terminal() {
+fn agent_runtime_cannot_stop_daemon_even_with_a_terminal() {
     let fixture = IsolatedDaemon::start(None);
     let before = std::fs::read(fixture.host.join("server.pid")).unwrap();
-    for action in ["up", "down"] {
-        let mut terminal = Command::new("script");
-        terminal.arg("-q");
-        if cfg!(target_os = "linux") {
-            let executable = fixture.binary.to_string_lossy().replace('\'', "'\\''");
-            terminal.args([
-                "-e",
-                "-c",
-                &format!("exec '{executable}' {action}"),
-                "/dev/null",
-            ]);
-        } else {
-            terminal.arg("/dev/null").arg(&fixture.binary).arg(action);
-        }
-        let result = terminal
-            .current_dir(&fixture.root)
-            .env("HOME", &fixture.home)
-            .env("COLLAB_STATE_DIR", &fixture.host)
-            .env("CODEX_THREAD_ID", "agent-runtime")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert!(output_text(&result).contains("USER_MAINTENANCE_REQUIRED"));
-        assert!(!output_text(&result).contains("Password:"));
-        assert_eq!(
-            std::fs::read(fixture.host.join("server.pid")).unwrap(),
-            before
-        );
-        assert!(!fixture.host.join("DOWN").exists());
-        assert!(ping(&fixture.socket()).is_ok());
+    let mut terminal = Command::new("script");
+    terminal.arg("-q");
+    if cfg!(target_os = "linux") {
+        let executable = fixture.binary.to_string_lossy().replace('\'', "'\\''");
+        terminal.args([
+            "-e",
+            "-c",
+            &format!("exec '{executable}' down"),
+            "/dev/null",
+        ]);
+    } else {
+        terminal.arg("/dev/null").arg(&fixture.binary).arg("down");
     }
+    let result = terminal
+        .current_dir(&fixture.root)
+        .env("HOME", &fixture.home)
+        .env("COLLAB_STATE_DIR", &fixture.host)
+        .env("CODEX_THREAD_ID", "agent-runtime")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output_text(&result).contains("USER_MAINTENANCE_REQUIRED"));
+    assert!(!output_text(&result).contains("Password:"));
+    assert_eq!(
+        std::fs::read(fixture.host.join("server.pid")).unwrap(),
+        before
+    );
+    assert!(!fixture.host.join("DOWN").exists());
+    assert!(ping(&fixture.socket()).is_ok());
 }
 
 #[test]
-fn noninteractive_up_and_down_have_no_side_effects() {
-    let root = unique_root("noninteractive");
+fn noninteractive_down_has_no_side_effects() {
+    let root = unique_root("noninteractive-down");
     let host = root.join("host");
     let home = root.join("home");
     std::fs::create_dir_all(root.join(".agent-collab/server")).unwrap();
@@ -723,25 +725,230 @@ fn noninteractive_up_and_down_have_no_side_effects() {
     let before_root = tree(&root);
     let before_host = tree(&host);
 
-    for arg in ["up", "down"] {
-        let output = Command::new(&binary)
-            .arg(arg)
-            .current_dir(&root)
-            .env("HOME", &home)
-            .env("COLLAB_STATE_DIR", &host)
-            .env("CODEX_HOME", &home)
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{arg} must require a terminal");
-        assert_no_text(&output, &["admin", "maintenance password"]);
-    }
+    let output = Command::new(&binary)
+        .arg("down")
+        .current_dir(&root)
+        .env("HOME", &home)
+        .env("COLLAB_STATE_DIR", &host)
+        .env("CODEX_HOME", &home)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "down must require a terminal");
+    assert_no_text(&output, &["admin", "maintenance password"]);
 
     assert_eq!(tree(&root), before_root);
     assert_eq!(tree(&host), before_host);
     assert!(!config_file(&home).exists());
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn agent_runtime_and_noninteractive_up_can_start_and_restart_daemon() {
+    let root = unique_root("agent-up-restart");
+    let host = root.join("host");
+    let home = root.join("home");
+    std::fs::create_dir_all(root.join(".agent-collab/server")).unwrap();
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(host.join("DOWN"), b"stopped\n").unwrap();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_collab"));
+
+    let started = Command::new(&binary)
+        .arg("up")
+        .current_dir(&root)
+        .env("HOME", &home)
+        .env("CODEX_HOME", &home)
+        .env("COLLAB_STATE_DIR", &host)
+        .env("CODEX_THREAD_ID", "agent-thread-1")
+        .env("CODEX_SESSION_ID", "agent-session-1")
+        .env_remove("COLLAB_SOCKET_PATH")
+        .env_remove("COLLAB_HOST_SOCKET")
+        .env_remove("COLLAB_AUTOSTART_LABEL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("agent headless collab up start");
+    let started_text = output_text(&started);
+    assert!(started.status.success(), "{started_text}");
+    assert!(!host.join("DOWN").exists(), "collab up must clear DOWN");
+    let started_json: Value = serde_json::from_str(&started_text).expect("up JSON");
+    assert_eq!(started_json["ok"], true);
+    assert_eq!(started_json["started"], true);
+    assert_eq!(started_json["restarted"], false);
+    let first_pid: u32 = std::fs::read_to_string(host.join("server.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let sock = host.join("server.sock");
+    assert!(ping(&sock).is_ok());
+
+    // Plain `collab up` preserves a healthy same-version daemon cleanly.
+    let kept = Command::new(&binary)
+        .arg("up")
+        .current_dir(&root)
+        .env("HOME", &home)
+        .env("CODEX_HOME", &home)
+        .env("COLLAB_STATE_DIR", &host)
+        .env("AGY_SESSION_ID", "agy-session-1")
+        .env_remove("COLLAB_SOCKET_PATH")
+        .env_remove("COLLAB_HOST_SOCKET")
+        .env_remove("COLLAB_AUTOSTART_LABEL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("agent headless collab up keep");
+    let kept_text = output_text(&kept);
+    assert!(kept.status.success(), "{kept_text}");
+    let kept_json: Value = serde_json::from_str(&kept_text).expect("kept up JSON");
+    assert_eq!(kept_json["ok"], true);
+    assert_eq!(kept_json["restarted"], false);
+    assert!(kept_json["replaced"].is_null(), "{kept_text}");
+    let kept_pid: u32 = std::fs::read_to_string(host.join("server.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(kept_pid, first_pid, "plain up must keep healthy daemon PID");
+
+    // `collab up --restart` cleanly replaces an already healthy daemon.
+    let restarted = Command::new(&binary)
+        .args(["up", "--restart"])
+        .current_dir(&root)
+        .env("HOME", &home)
+        .env("CODEX_HOME", &home)
+        .env("COLLAB_STATE_DIR", &host)
+        .env("AGY_SESSION_ID", "agy-session-1")
+        .env_remove("COLLAB_SOCKET_PATH")
+        .env_remove("COLLAB_HOST_SOCKET")
+        .env_remove("COLLAB_AUTOSTART_LABEL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("agent headless collab up --restart");
+    let restarted_text = output_text(&restarted);
+    let reached = ping(&sock).is_ok();
+    let second_pid = std::fs::read_to_string(host.join("server.pid"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    if reached {
+        shutdown_isolated_daemon(&sock);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(restarted.status.success(), "{restarted_text}");
+    let restarted_json: Value = serde_json::from_str(&restarted_text).expect("restart up JSON");
+    assert_eq!(restarted_json["ok"], true);
+    assert_eq!(restarted_json["restarted"], true);
+    assert_eq!(restarted_json["replaced"]["pid"], first_pid);
+    let second_pid = second_pid.expect("restarted daemon must write server.pid");
+    assert_ne!(second_pid, first_pid, "restarted daemon must get a new PID");
+    assert!(reached, "restarted daemon must respond to Ping");
+}
+
+#[test]
+fn agent_up_from_linked_worktree_resolves_canonical_root_without_polluting_worktree() {
+    let base = unique_root("agent-up-worktree");
+    let repo = base.join("repo");
+    let worktree = base.join("wt");
+    let host = base.join("host");
+    let home = base.join("home");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+
+    let git_init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(git_init.status.success());
+    let git_commit = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "init",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(git_commit.status.success());
+    let git_wt = Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "wt-branch"])
+        .arg(&worktree)
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(git_wt.status.success());
+
+    let canonical_repo = std::fs::canonicalize(&repo).unwrap();
+    std::fs::create_dir_all(canonical_repo.join(".agent-collab/server")).unwrap();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_collab"));
+
+    // Seed canonical route by starting `up` from canonical repo once, then
+    // calling `up` again from the linked worktree which has no `.agent-collab`.
+    let initial = Command::new(&binary)
+        .arg("up")
+        .current_dir(&canonical_repo)
+        .env("HOME", &home)
+        .env("CODEX_HOME", &home)
+        .env("COLLAB_STATE_DIR", &host)
+        .env_remove("COLLAB_SOCKET_PATH")
+        .env_remove("COLLAB_HOST_SOCKET")
+        .env_remove("COLLAB_AUTOSTART_LABEL")
+        .output()
+        .unwrap();
+    assert!(initial.status.success(), "{}", output_text(&initial));
+
+    // Register route record directly so `canonical_route_for_cwd` resolves the
+    // canonical project from inside the linked worktree.
+    std::fs::write(
+        host.join("routes.json"),
+        serde_json::json!([{
+            "app_scope_id": "codex-cli",
+            "project_scope": canonical_repo.to_string_lossy(),
+            "canonical_root": canonical_repo.to_string_lossy(),
+            "storage_root": canonical_repo.to_string_lossy(),
+            "registered_ms": 1_700_000_000_000_i64,
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let wt_up = Command::new(&binary)
+        .arg("up")
+        .current_dir(&worktree)
+        .env("HOME", &home)
+        .env("CODEX_HOME", &home)
+        .env("COLLAB_STATE_DIR", &host)
+        .env("CODEX_THREAD_ID", "agent-worktree")
+        .env_remove("COLLAB_SOCKET_PATH")
+        .env_remove("COLLAB_HOST_SOCKET")
+        .env_remove("COLLAB_AUTOSTART_LABEL")
+        .output()
+        .unwrap();
+    let sock = host.join("server.sock");
+    let wt_text = output_text(&wt_up);
+    if ping(&sock).is_ok() {
+        shutdown_isolated_daemon(&sock);
+    }
+    let worktree_polluted = worktree.join(".agent-collab").exists();
+    let service_record = std::fs::read_to_string(host.join("service-record.json")).ok();
+    let _ = std::fs::remove_dir_all(&base);
+    assert!(wt_up.status.success(), "{wt_text}");
+    assert!(
+        !worktree_polluted,
+        "collab up from worktree must not create .agent-collab inside worktree"
+    );
+    let record: Value = serde_json::from_str(&service_record.unwrap()).unwrap();
+    assert_eq!(
+        PathBuf::from(record["service_scope_root"].as_str().unwrap()),
+        canonical_repo
+    );
 }
 
 #[cfg(target_os = "macos")]

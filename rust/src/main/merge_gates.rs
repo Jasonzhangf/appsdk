@@ -56,7 +56,7 @@ pub(super) fn resolve_recorded_mainline_commit(root: &Path, mainline_ref: &str) 
     }
 }
 
-pub(super) fn assert_single_merge_gate(root: &Path, module_id: &str) {
+pub(super) fn assert_single_merge_gate(root: &Path, module_id: &str) -> Value {
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let effectiveness_name = module_record_name("effectiveness-record", module_id);
     let merge_name = module_record_name("merge-record", module_id);
@@ -120,209 +120,67 @@ pub(super) fn assert_single_merge_gate(root: &Path, module_id: &str) {
     if !merge_on_mainline.success() {
         fail("RECORDED_MERGE_NOT_ON_MAINLINE");
     }
+    merge
 }
 
-pub(super) fn assert_fix_merge_gate(root: &Path, module_id: &str) {
+pub(super) fn assert_fix_merge_gate(root: &Path, module_id: &str) -> Value {
     let project = read_project(root);
     if assert_development_scenarios(root, &project).multi_worktree_merge_queue {
-        assert_parallel_merge_gate(root, module_id);
+        assert_parallel_merge_gate(root, module_id)
     } else {
-        assert_single_merge_gate(root, module_id);
+        assert_single_merge_gate(root, module_id)
     }
 }
 
-pub(super) fn assert_fix_lifecycle_graph(
+pub(super) fn assert_fix_lifecycle_graph_cached(
     root: &Path,
     module_id: &str,
     review: &Value,
     promotion: &Value,
     artifact: &Value,
+    cache: &mut GateVerificationCache,
 ) {
-    let project = read_project(root);
+    let project = cache.project(root);
     let scenarios = assert_development_scenarios(root, &project);
     let parallel_development = scenarios.multi_worktree_merge_queue;
     let collaboration_development = scenarios.multi_worker_collaboration;
-    assert_fix_architecture_gate(root, module_id, artifact);
-    assert_fix_effectiveness_gate(root, module_id);
-    assert_fix_merge_gate(root, module_id);
+    // Each stage gate is the unique owner of its own record, evidence, map,
+    // git ancestry, and intra-stage timestamp invariants. Here we stitch
+    // cross-stage identity and promotion references only.
+    let arch = assert_fix_architecture_gate_cached(root, module_id, artifact, cache);
+    let effectiveness_result = assert_fix_effectiveness_gate(root, module_id);
+    if !effectiveness_result.has_post_architecture_effectiveness {
+        fail("MISSING_FIX_EVIDENCE_PHASE:post_architecture_effectiveness");
+    }
+    let effectiveness = effectiveness_result.record;
+    let merge = assert_fix_merge_gate(root, module_id);
+
     let worktree_name = module_record_name("worktree-record", module_id);
     let reproduction_name = module_record_name("reproduction-record", module_id);
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let effectiveness_name = module_record_name("effectiveness-record", module_id);
     let merge_name = module_record_name("merge-record", module_id);
-    let worktree = read_record(root, &worktree_name);
-    let reproduction = read_record(root, &reproduction_name);
-    let candidate = read_record(root, &candidate_name);
-    let effectiveness = read_record(root, &effectiveness_name);
-    let merge = read_record(root, &merge_name);
 
-    let issue_id = record_str(&worktree, "/issue_id", &worktree_name);
-    let scope_hash = record_str(&worktree, "/scope_hash", &worktree_name);
-    let base_commit = record_str(&worktree, "/base_commit", &worktree_name);
-    let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
-    let candidate_tree = record_str(&candidate, "/tree_hash", &candidate_name);
+    let issue_id = record_str(&arch.worktree, "/issue_id", &worktree_name);
+    let scope_hash = record_str(&arch.worktree, "/scope_hash", &worktree_name);
+    let candidate_id = record_str(&arch.candidate, "/fix_candidate_id", &candidate_name);
+    let candidate_commit = record_str(&arch.candidate, "/head_commit", &candidate_name);
     let review_id = record_str(review, "/review_id", "review-record.json");
-    assert_worktree_candidate_ancestry(
-        root,
-        record_str(&worktree, "/head_commit", &worktree_name),
-        candidate_commit,
-    );
-    for (record, name) in [
-        (&reproduction, reproduction_name.as_str()),
-        (&candidate, candidate_name.as_str()),
-        (&effectiveness, effectiveness_name.as_str()),
-        (&merge, merge_name.as_str()),
-        (review, "review-record.json"),
-        (promotion, "promotion-record.json"),
-    ] {
-        if record_str(record, "/issue_id", name) != issue_id {
-            fail("FIX_LIFECYCLE_ISSUE_MISMATCH");
-        }
-    }
-    for (record, name) in [
-        (&worktree, worktree_name.as_str()),
-        (&reproduction, reproduction_name.as_str()),
-        (&candidate, candidate_name.as_str()),
-        (&effectiveness, effectiveness_name.as_str()),
-        (&merge, merge_name.as_str()),
-    ] {
-        if record_str(record, "/module_id", name) != module_id {
-            fail("FIX_LIFECYCLE_MODULE_MISMATCH");
-        }
-    }
-    if worktree.get("initial_clean") != Some(&Value::Bool(true))
-        || worktree.get("final_clean") != Some(&Value::Bool(true))
-        || !crate::workspace::isolation_mode_allowed(&worktree)
+    if review_id != record_str(&arch.review, "/review_id", "review-record.json")
+        || record_str(review, "/issue_id", "review-record.json") != issue_id
+        || record_str(promotion, "/issue_id", "promotion-record.json") != issue_id
     {
-        fail("FIX_WORKTREE_NOT_CLEAN_ISOLATED");
-    }
-    if record_str(&reproduction, "/worktree_id", &reproduction_name)
-        != record_str(&worktree, "/worktree_id", &worktree_name)
-        || record_str(&candidate, "/worktree_id", &candidate_name)
-            != record_str(&worktree, "/worktree_id", &worktree_name)
-        || record_str(&reproduction, "/base_commit", &reproduction_name) != base_commit
-        || record_str(&candidate, "/base_commit", &candidate_name) != base_commit
-        || reproduction.get("result").and_then(Value::as_str) != Some("reproduced")
-    {
-        fail("FIX_REPRODUCTION_GRAPH_MISMATCH");
-    }
-    if record_str(&candidate, "/scope_hash", &candidate_name) != scope_hash
-        || record_str(review, "/review_kind", "review-record.json") != "architecture"
-        || record_str(review, "/fix_candidate_id", "review-record.json")
-            != record_str(&candidate, "/fix_candidate_id", &candidate_name)
-        || record_str(review, "/reviewed_commit", "review-record.json") != candidate_commit
-        || record_str(review, "/reviewed_tree_hash", "review-record.json") != candidate_tree
-        || record_str(review, "/reviewed_scope_hash", "review-record.json") != scope_hash
-        || record_str(review, "/reviewed_diff_hash", "review-record.json")
-            != record_str(&candidate, "/diff_hash", &candidate_name)
-        || review.get("verdict").and_then(Value::as_str) != Some("pass")
-    {
-        fail("ARCHITECTURE_REVIEW_INPUT_MISMATCH");
-    }
-    assert_review_map_bindings(root, module_id, review, "review-record.json");
-    if record_str(&effectiveness, "/fix_candidate_id", &effectiveness_name)
-        != record_str(&candidate, "/fix_candidate_id", &candidate_name)
-        || record_str(
-            &effectiveness,
-            "/architecture_review_id",
-            &effectiveness_name,
-        ) != review_id
-        || record_str(&effectiveness, "/reviewed_commit", &effectiveness_name) != candidate_commit
-        || record_str(&effectiveness, "/reviewed_tree_hash", &effectiveness_name) != candidate_tree
-        || effectiveness.get("source_unchanged_since_review") != Some(&Value::Bool(true))
-        || effectiveness.get("result").and_then(Value::as_str) != Some("pass")
-        || effectiveness.get("reproduction_input_hashes") != reproduction.get("input_hashes")
-    {
-        fail("POST_ARCHITECTURE_EFFECTIVENESS_MISMATCH");
-    }
-    let baseline_id = record_str(&reproduction, "/baseline_evidence_id", &reproduction_name);
-    if record_str(&effectiveness, "/baseline_evidence_id", &effectiveness_name) != baseline_id {
-        fail("POST_ARCHITECTURE_BASELINE_MISMATCH");
-    }
-    let mut required_evidence = vec![baseline_id.to_string()];
-    required_evidence.push(
-        record_str(
-            &effectiveness,
-            "/fixed_replay_evidence_id",
-            &effectiveness_name,
-        )
-        .to_string(),
-    );
-    for path in [
-        "/positive_evidence_ids",
-        "/negative_evidence_ids",
-        "/blackbox_evidence_ids",
-    ] {
-        required_evidence.extend(
-            record_array(&effectiveness, path, &effectiveness_name)
-                .iter()
-                .map(|value| {
-                    value
-                        .as_str()
-                        .unwrap_or_else(|| fail("INVALID_EFFECTIVENESS_EVIDENCE_ID"))
-                        .to_string()
-                }),
-        );
-    }
-    required_evidence.extend(
-        record_array(&candidate, "/verification_evidence_ids", &candidate_name)
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .unwrap_or_else(|| fail("INVALID_CANDIDATE_EVIDENCE_ID"))
-                    .to_string()
-            }),
-    );
-    required_evidence.sort();
-    required_evidence.dedup();
-    let mut phases = Vec::new();
-    for id in &required_evidence {
-        let evidence = evidence_by_id(root, module_id, id);
-        assert_evidence_record(&evidence, id, EvidenceValidationMode::Current(Utc::now()));
-        if record_str(&evidence, "/evidence_id", id) != id
-            || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
-            || record_str(&evidence, "/issue_id", id) != issue_id
-            || record_str(&evidence, "/scope_hash", id) != scope_hash
-            || evidence.get("result").and_then(Value::as_str) != Some("pass")
-        {
-            fail("FIX_EVIDENCE_SCOPE_MISMATCH");
-        }
-        phases.push(record_str(&evidence, "/phase", id).to_string());
-    }
-    for phase in [
-        "baseline_reproduction",
-        "fix_candidate",
-        "positive_intervention",
-        "negative_intervention",
-        "post_architecture_effectiveness",
-    ] {
-        if !phases.iter().any(|value| value == phase) {
-            fail(format!("MISSING_FIX_EVIDENCE_PHASE:{}", phase));
-        }
-    }
-    for value in record_array(review, "/evidence_ids", "review-record.json") {
-        let id = value
-            .as_str()
-            .unwrap_or_else(|| fail("INVALID_REVIEW_EVIDENCE_ID"));
-        let evidence = evidence_by_id(root, module_id, id);
-        assert_evidence_record(&evidence, id, EvidenceValidationMode::Current(Utc::now()));
-        if record_str(&evidence, "/phase", id) == "post_architecture_effectiveness"
-            || record_time(&evidence, id) > record_time(review, "review-record.json")
-        {
-            fail("ARCHITECTURE_REVIEW_USES_POST_REVIEW_EVIDENCE");
-        }
+        fail("FIX_LIFECYCLE_ISSUE_MISMATCH");
     }
     let merge_commit = record_str(&merge, "/merge_commit", &merge_name);
     if record_str(promotion, "/worktree_record_id", "promotion-record.json")
-        != record_str(&worktree, "/worktree_id", &worktree_name)
+        != record_str(&arch.worktree, "/worktree_id", &worktree_name)
         || record_str(
             promotion,
             "/reproduction_record_id",
             "promotion-record.json",
-        ) != record_str(&reproduction, "/reproduction_id", &reproduction_name)
-        || record_str(promotion, "/fix_candidate_id", "promotion-record.json")
-            != record_str(&candidate, "/fix_candidate_id", &candidate_name)
+        ) != record_str(&arch.reproduction, "/reproduction_id", &reproduction_name)
+        || record_str(promotion, "/fix_candidate_id", "promotion-record.json") != candidate_id
         || record_str(
             promotion,
             "/architecture_review_id",
@@ -380,21 +238,13 @@ pub(super) fn assert_fix_lifecycle_graph(
             module_id,
             promotion,
             issue_id,
-            record_str(&candidate, "/fix_candidate_id", &candidate_name),
+            candidate_id,
             record_str(artifact, "/artifact_hash", "artifact"),
             scope_hash,
             merge_commit,
         );
     }
-    if !(record_time(&worktree, &worktree_name) <= record_time(&reproduction, &reproduction_name)
-        && record_time(&reproduction, &reproduction_name)
-            <= record_time(&candidate, &candidate_name)
-        && record_time(&candidate, &candidate_name) <= record_time(review, "review-record.json")
-        && record_time(review, "review-record.json")
-            <= record_time(&effectiveness, &effectiveness_name)
-        && record_time(&effectiveness, &effectiveness_name) <= record_time(&merge, &merge_name)
-        && record_time(&merge, &merge_name) <= record_time(promotion, "promotion-record.json"))
-    {
+    if record_time(&merge, &merge_name) > record_time(promotion, "promotion-record.json") {
         fail("FIX_LIFECYCLE_ORDER_INVALID");
     }
     assert_bug_tracker_solution_evidence(root, issue_id, promotion);
@@ -406,7 +256,18 @@ pub(super) fn assert_record_graph(
     artifact: &Value,
     require_freeze: bool,
 ) {
-    assert_record_graph_mode(
+    let mut cache = GateVerificationCache::default();
+    assert_record_graph_cached(root, module_id, artifact, require_freeze, &mut cache);
+}
+
+pub(super) fn assert_record_graph_cached(
+    root: &Path,
+    module_id: Option<&str>,
+    artifact: &Value,
+    require_freeze: bool,
+    cache: &mut GateVerificationCache,
+) {
+    assert_record_graph_mode_cached(
         root,
         module_id,
         artifact,
@@ -414,6 +275,7 @@ pub(super) fn assert_record_graph(
         true,
         false,
         EvidenceValidationMode::Current(Utc::now()),
+        cache,
     );
 }
 
@@ -452,6 +314,29 @@ pub(super) fn assert_record_graph_mode(
     enforce_current_lifecycle: bool,
     allow_legacy_rehydrate_bindings: bool,
     validation: EvidenceValidationMode,
+) {
+    let mut cache = GateVerificationCache::default();
+    assert_record_graph_mode_cached(
+        root,
+        module_id,
+        artifact,
+        require_freeze,
+        enforce_current_lifecycle,
+        allow_legacy_rehydrate_bindings,
+        validation,
+        &mut cache,
+    );
+}
+
+pub(super) fn assert_record_graph_mode_cached(
+    root: &Path,
+    module_id: Option<&str>,
+    artifact: &Value,
+    require_freeze: bool,
+    enforce_current_lifecycle: bool,
+    allow_legacy_rehydrate_bindings: bool,
+    validation: EvidenceValidationMode,
+    cache: &mut GateVerificationCache,
 ) {
     if let Some(module_id) = module_id {
         let _ = read_record(root, &module_record_name("worktree-record", module_id));
@@ -504,7 +389,9 @@ pub(super) fn assert_record_graph_mode(
     );
     if enforce_current_lifecycle {
         if let Some(module_id) = module_id {
-            assert_fix_lifecycle_graph(root, module_id, &review, &promotion, artifact);
+            assert_fix_lifecycle_graph_cached(
+                root, module_id, &review, &promotion, artifact, cache,
+            );
         }
     }
     let cleanup_id = record_str(

@@ -512,11 +512,12 @@ pub(super) fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_p
         fail("ARCHITECTURE_REVIEW_VERDICT_INVALID");
     }
     if verdict == "pass" {
-        assert_review_author_readiness(root, module_id);
+        let mut cache = GateVerificationCache::default();
+        assert_review_author_readiness_cached(root, module_id, &mut cache);
         let binding = observation
             .get("requirements_review")
             .unwrap_or_else(|| fail("ARCHITECTURE_REQUIREMENTS_REVIEW_MISSING"));
-        assert_review_requirements_binding(root, module_id, binding);
+        assert_review_requirements_binding_cached(root, module_id, binding, &mut cache);
         project_bindings.get_or_insert_with(|| serde_json::json!({}))["requirements_review"] =
             binding.clone();
     }

@@ -3,6 +3,38 @@
 状态：2026-10-25 用户确认的设计契约。安装版本、源码状态和 live 行为分别验收；
 不要把读到本文件当作 runtime 修复，也不要把源码提交当作安装完成。
 
+## Table C: Patrol wakes and cancellation
+
+This table is authoritative for patrol subjects, wake handling and cancellation.
+Process the delivered message according to the host before selecting a subject
+branch. A specific error or rejected cancellation takes precedence over the
+generic continue-work rows.
+
+| IF observed condition | actor | THEN exact CLI action | parameter source | required result / next branch |
+| --- | --- | --- | --- | --- |
+| Non-DSH host has an unread `COLLAB_NOTIFY` | delivered-message owner | `collab recv --timeout 0` | current mailbox and selected non-DSH binding | Read the full message, then apply its exact subject row below. Do not add an ACK. |
+| DSH host receives an unread `COLLAB_NOTIFY` | gateway-delivered message owner | Process the native full message; use `collab inbox` only for read-only inspection | current DSH gateway delivery | Do not run `collab recv` or `collab ack`. Then apply the exact subject row below. |
+| Subject is `board-idle-patrol` | referenced task owner | `collab task status '<id>'`, then `collab board show` | `<id>` and owner from the wake or current Board | Continue an actionable owned task or eligible queue item. |
+| Subject is `project-patrol` and current caller is Jenny | current project master | `collab board show`, then `collab who` | current project Board and live membership | Dispatch ready work before routine inspection; use `collab worker status '<worker-id>'` only for a specific capacity gap. |
+| Subject is `master-dispatch-gap` and current caller is Jenny | current project master | `collab board show`, then `collab who` | current project Board and live membership | Revalidate the reported capacity/dispatch gap and use the existing authorized dispatch or invitation entry. This is a non-cancellable scheduling notice. |
+| The referenced task has no executable action and only an evidenced external dependency remains | task owner | `collab notify cancel --event board-idle --task-id '<id>' --reason '<reason>' --resume-condition '<resume-condition>'`, then `collab notify status` | `<id>` from the task, `<reason>` and `<resume-condition>` from current evidence | Read the task's cancellation state. Cancellation preserves the task, resources and direct messages. |
+| The task's recorded recovery signal arrives and automatic continuation is needed again | task owner | `collab notify subscribe --event board-idle --task-id '<id>'`, then `collab notify status` | `<id>` from the existing task | Read `board_patrol`; the same task-scoped subscription is active again. |
+| Jenny has no actionable project work and current project-cancellation eligibility is satisfied | current project master | `collab notify cancel --event master-idle --reason '<reason>' --resume-condition '<resume-condition>'`, then `collab notify status` | current project progress and task state | Read `project_patrol`; the original project subscription is `cancelled`. |
+| Project cancellation is rejected | current project master | Read the exact result and listed blocking task IDs; advance those tasks or record missing progress through the existing authorized path | cancellation receipt | Preserve the rejection. Retry cancellation only after the named eligibility gap has observable evidence. |
+| Explicit project-patrol rearm is authorized and needed | current project master | `collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <repeat-count> --ttl-seconds <ttl-seconds>`, then `collab notify status` | `<repeat-count>` is the existing authorized delivery count; `<ttl-seconds>` is the authorized lifetime in seconds; current project selects the subscription | Read `project_patrol`; reuse the existing subscription record. |
+
+The message subject and cancellation event are different namespaces:
+
+- `board-idle-patrol` is a wake subject. Its cancellation and rearm event is
+  `board-idle` with the exact task ID.
+- `project-patrol` is the project-patrol subject. Its cancellation and rearm
+  event is `master-idle`.
+- `master-dispatch-gap` is a scheduling notice with no cancellation event. Do
+  not issue `collab notify cancel --event master-dispatch-gap`.
+- Cancellation does not close a task, approve a blocker, release resources or
+  disable direct-message reception. Message acceptance, consumption and task
+  progress remain separate receipts.
+
 `collab notify cancel --event board-idle`、`collab notify subscribe --event board-idle`
 与 `collab notify status` 的 board-idle 入口已在当前源码实现。本轮隔离公开入口/native
 与有限 timer 兼容验收已通过；这不等于生产 daemon 启用或生产 peer 消费或恢复推理
@@ -192,7 +224,7 @@ collab notify status
 
 ```text
 collab notify cancel --event master-idle [--reason <text>] [--resume-condition <text>]
-collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <n> --ttl-seconds <n>
+collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <repeat-count> --ttl-seconds <ttl-seconds>
 collab notify status
 ```
 

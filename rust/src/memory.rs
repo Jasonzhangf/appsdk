@@ -7,7 +7,6 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -193,9 +192,7 @@ pub(super) fn output(value: &Value) {
 }
 
 pub(super) fn digest(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    crate::primitives::sha256_str(value)
 }
 
 pub(super) fn now() -> String {
@@ -203,11 +200,7 @@ pub(super) fn now() -> String {
 }
 
 pub(super) fn valid_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 160
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+    crate::primitives::is_valid_id(value, 160, true)
 }
 
 pub(super) fn assert_id(value: &str) {
@@ -1787,3 +1780,51 @@ mod cli;
 #[path = "memory_governance.rs"]
 mod governance;
 pub use cli::run;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialize_project_creates_index_and_rejects_non_dir_or_symlink() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-memory-unit-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        assert!(initialize_project(&root).is_ok());
+        assert!(root.join("memory/index.md").is_file());
+        // Idempotent second call succeeds without failing.
+        assert!(initialize_project(&root).is_ok());
+
+        let bad_root = root.join("non-dir");
+        fs::create_dir_all(&bad_root).unwrap();
+        fs::write(bad_root.join("memory"), "not a directory").unwrap();
+        assert_eq!(initialize_project(&bad_root), Err("MEMORY_DIR_INVALID"));
+
+        #[cfg(unix)]
+        {
+            let sym_root = root.join("symlink-root");
+            fs::create_dir_all(&sym_root).unwrap();
+            std::os::unix::fs::symlink(&root, sym_root.join("memory")).unwrap();
+            assert_eq!(initialize_project(&sym_root), Err("MEMORY_DIR_SYMLINK"));
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_valid_id_and_digest_match_primitives() {
+        assert!(valid_id("L3/appsdk-note_1.md"));
+        assert!(!valid_id(""));
+        assert!(!valid_id("bad id with space"));
+        let h = digest("memory-body");
+        assert!(h.starts_with("sha256:"));
+        assert_eq!(h.len(), 71);
+    }
+}

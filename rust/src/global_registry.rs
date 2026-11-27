@@ -1342,14 +1342,6 @@ fn has_registered_version(
     Ok(matching_version)
 }
 
-/// Record one project registration in the host-wide AppSDK registry.
-/// Re-registering the same canonical root and SDK version is idempotent.
-#[allow(dead_code)]
-pub fn register_project(root: &Path, sdk_version: &str) -> Result<RegistrationReceipt, String> {
-    let registry_root = registry_root()?;
-    register_project_at(root, registry_root.as_path(), sdk_version)
-}
-
 /// Validate a project registration and reserve the host registry for the
 /// caller's initialization transaction. The reservation is intentionally
 /// separate from the append so local project writes can complete before the
@@ -1398,9 +1390,8 @@ pub fn reserve_project_at(
 
 /// Record a project registration at an explicit registry root.
 ///
-/// This is the same operation as [`register_project`], with the registry
-/// location injected for isolated tests and controlled migration tooling.
-/// Production callers should use [`register_project`] so the canonical host
+/// Used by isolated tests and controlled migration tooling; production callers
+/// should reserve and commit via [`reserve_project`] so the canonical host
 /// location remains `~/.appsdk`.
 #[allow(dead_code)]
 pub fn register_project_at(

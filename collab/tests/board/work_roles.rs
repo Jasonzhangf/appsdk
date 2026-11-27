@@ -6351,3 +6351,80 @@ fn reassignment_accept_while_executor_slot_already_running_leaves_two_active_exe
         "the first ticket stays running while the reassigned ticket starts: {first_after_start:#?}"
     );
 }
+
+#[test]
+fn publish_and_deliver_auto_claims_deliver_ticket_claim_wakes_immediately() {
+    let fixture = relationship_fixture();
+    let peer = fixture.run_public(&["context"], THREAD_B);
+    let worker = peer["identity"]["worker_id"].as_str().unwrap();
+
+    fixture.observe_native_agent(worker, "online", "idle");
+    let published = publish(&fixture, "claim-wake-first", &[]);
+    assert_eq!(published["ticket"]["phases"][0]["status"], "claimed", "{published}");
+    let board = fixture.run_public(&["board", "show"], THREAD_B);
+    let first = task(&board, "claim-wake-first");
+    let first_attempt = first["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let first_revision = first["revision"].as_u64().unwrap().to_string();
+
+    let after_publish = fixture.current_state();
+    let first_wakes = f7_messages(&after_publish, "ticket-claimed:claim-wake-first");
+    assert_eq!(first_wakes.len(), 1, "{after_publish}");
+    let first_msg_id = first_wakes[0]["id"].as_str().unwrap();
+    assert_eq!(
+        first_wakes[0]["wake_attempt_count"], 1,
+        "board publish auto-claim must attempt delivery immediately: {first_wakes:#?}"
+    );
+    assert!(
+        after_publish["notification_delivery_accepted"]
+            .get(first_msg_id)
+            .is_some(),
+        "board publish ticket-claim-* must receive transport delivery acceptance: {after_publish}"
+    );
+
+    fixture.run_public(
+        &[
+            "task",
+            "start",
+            "claim-wake-first",
+            "--expected-revision",
+            &first_revision,
+            "--attempt",
+            &first_attempt,
+        ],
+        THREAD_B,
+    );
+    let second = publish(&fixture, "claim-wake-second", &[]);
+    assert_eq!(second["ticket"]["phases"][0]["status"], "queued", "{second}");
+
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "claim-wake-first",
+            "--evidence",
+            "first done cleanly",
+            "--attempt",
+            &first_attempt,
+            "--no-candidate",
+        ],
+        THREAD_B,
+    );
+
+    let after_deliver = fixture.current_state();
+    let second_wakes = f7_messages(&after_deliver, "ticket-claimed:claim-wake-second");
+    assert_eq!(second_wakes.len(), 1, "{after_deliver}");
+    let second_msg_id = second_wakes[0]["id"].as_str().unwrap();
+    assert_eq!(
+        second_wakes[0]["wake_attempt_count"], 1,
+        "task deliver continuation auto-claim must attempt delivery immediately: {second_wakes:#?}"
+    );
+    assert!(
+        after_deliver["notification_delivery_accepted"]
+            .get(second_msg_id)
+            .is_some(),
+        "task deliver ticket-claim-* must receive transport delivery acceptance: {after_deliver}"
+    );
+}

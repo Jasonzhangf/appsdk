@@ -1382,25 +1382,45 @@ fn board_describe_locked(
     response
 }
 
-fn deliver_board_auto_notice(server: &Server, response: &Resp) {
-    let Some(message_id) = response
-        .data
-        .get("notification_message_id")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return;
-    };
-    let subscription_id = server
-        .state
-        .lock()
-        .unwrap()
-        .wake_bindings
-        .get(message_id)
-        .cloned();
-    if let Some(subscription_id) = subscription_id {
-        let _ =
-            attempt_notification_detailed_with_at(server, message_id, &subscription_id, now_ms());
+fn deliver_wake_bindings(server: &Server, notifications: &[(String, String)]) {
+    for (message_id, subscription_id) in notifications {
+        for attempt in 0..25 {
+            let outcome =
+                attempt_notification_detailed_with_at(server, message_id, subscription_id, now_ms());
+            if !matches!(outcome, NotificationAttempt::Deferred) || attempt == 24 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
+}
+
+fn deliver_board_auto_notice(server: &Server, response: &Resp) {
+    let mut message_ids = Vec::new();
+    for key in ["notification_message_id", "continuation_notification_message_id"] {
+        if let Some(message_id) = response.data.get(key).and_then(serde_json::Value::as_str) {
+            if !message_ids.iter().any(|seen: &String| seen == message_id) {
+                message_ids.push(message_id.to_owned());
+            }
+        }
+    }
+    if message_ids.is_empty() {
+        return;
+    }
+    let wakes: Vec<(String, String)> = {
+        let state = server.state.lock().unwrap();
+        message_ids
+            .into_iter()
+            .filter_map(|message_id| {
+                state
+                    .wake_bindings
+                    .get(&message_id)
+                    .cloned()
+                    .map(|subscription_id| (message_id, subscription_id))
+            })
+            .collect()
+    };
+    deliver_wake_bindings(server, &wakes);
 }
 
 fn board_update_response(
@@ -1855,11 +1875,15 @@ fn handle_board_command(
                     details: details.clone(),
                 },
             ];
+            let mut claim_notifications = Vec::new();
             if details.admitted {
                 match board_ticket_admission_events(
                     server, &state, &task, &details, depends_on, is_scheduler,
                 ) {
-                    Ok(admission) => events.extend(admission),
+                    Ok(admission) => {
+                        claim_notifications = extract_wake_bindings(&admission);
+                        events.extend(admission);
+                    }
                     Err(error) => return error,
                 }
             }
@@ -1888,6 +1912,7 @@ fn handle_board_command(
             }
             drop(state);
             deliver_board_auto_notice(server, &response);
+            deliver_wake_bindings(server, &claim_notifications);
             response
         }
         BoardCommand::Claim {

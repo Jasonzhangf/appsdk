@@ -1030,8 +1030,7 @@ fn attempt_tmux_notification_with_retry(
     let control_for_policy = if let Some(control) = cached_control.as_ref() {
         Some(control)
     } else if route_for_policy.is_some() {
-        binding_store::BindingControlStore::new(server.host_paths.state_root())
-            .load()
+        load_control(server)
             .ok()
             .map(|control| &*cached_control.insert(control))
     } else {
@@ -1405,7 +1404,8 @@ fn attempt_tmux_notification_with_retry(
         board_invitation_for_message(&state, &state.msgs[message_id])
             .is_some_and(|invitation| invitation.one_shot)
     });
-    let queued_tmux = transport.kind == TransportKind::Tmux && seed_effective_mode == "queued";
+    let queued_terminal = matches!(transport.kind, TransportKind::Tmux | TransportKind::Rex)
+        && seed_effective_mode == "queued";
     let last_attempt = state
         .msgs
         .values()
@@ -1534,7 +1534,7 @@ fn attempt_tmux_notification_with_retry(
             guarded_goal: goal_submission_guard.is_some(),
             expected_agent_kind: rex_expected_agent_kind,
         },
-        if queued_tmux {
+        if queued_terminal {
             DAEMON_LIVE_CLOSURE_MODE
         } else if recipient_protected
             && matches!(transport.kind, TransportKind::AppServer | TransportKind::Dsh)

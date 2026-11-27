@@ -4603,3 +4603,54 @@ fn retarget_same_target_transport_lost_preserves_schedule_and_terminal_states() 
     assert_eq!(subscription.expires_ms, 20_000);
     assert_eq!(subscription.updated_ms, now);
 }
+
+#[test]
+fn queued_rex_notice_maps_to_daemon_live_closure_after_batch_window() {
+    let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
+    let route = seed_rex_route(&server);
+    let transport = rex_transport("agent-rex", "rex-server", "rex-session", "block-a");
+    let sub_id = register_rex_worker(&server, "rex-peer", &transport);
+    seed_current_rex_bindings(&server, &route, &[("Bob", "rex-peer", &transport)]);
+    let observed = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let observed_calls = observed.clone();
+    Arc::get_mut(&mut server)
+        .expect("unique test server")
+        .appserver_notification_sink = Arc::new(move |_, _, _, message_id, _, mode| {
+        observed_calls
+            .lock()
+            .unwrap()
+            .push((message_id.to_owned(), mode.to_owned()));
+        Ok(serde_json::json!({ "accepted": true }))
+    });
+    let t0 = server.state.lock().unwrap().workers["rex-peer"].registered_ms + 1_000;
+    queue_message(&server, "rex-peer", &sub_id, "rex-queued-1", t0);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "rex-queued-1".into(),
+        mode: "queued".into(),
+        source_thread_id: None,
+    }]);
+
+    assert!(matches!(
+        attempt_notification_detailed_with_at(&server, "rex-queued-1", &sub_id, t0),
+        NotificationAttempt::Deferred
+    ));
+    assert!(observed.lock().unwrap().is_empty());
+
+    timers::tick_with_idle_at(&server, t0 + 120_000, &|_| true);
+    let calls = observed.lock().unwrap();
+    assert_eq!(
+        calls.as_slice(),
+        &[("rex-queued-1".to_owned(), DAEMON_LIVE_CLOSURE_MODE.to_owned())]
+    );
+    let state = server.state.lock().unwrap();
+    assert!(state
+        .notification_delivery_accepted
+        .contains_key("rex-queued-1"));
+    assert!(!state
+        .notification_delivery_failures
+        .contains_key("rex-queued-1"));
+    drop(calls);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}

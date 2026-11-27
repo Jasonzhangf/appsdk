@@ -474,9 +474,166 @@ fn query(root: &Path, text: &str, wanted_tags: &[String]) -> Value {
     })
 }
 
+fn is_canonical_repo_source_ref(reference: &str) -> bool {
+    let path_part = reference.split('#').next().unwrap_or("");
+    if path_part.is_empty()
+        || path_part.starts_with('/')
+        || path_part.starts_with('~')
+        || path_part.contains("://")
+        || path_part.starts_with("memory:")
+    {
+        return false;
+    }
+    let path = Path::new(path_part);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return false;
+    }
+    path.extension().is_some()
+}
+
+fn markdown_heading_slugs(contents: &str) -> BTreeSet<String> {
+    let mut slugs = BTreeSet::new();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in contents.lines() {
+        let leading_spaces = line.bytes().take_while(|b| *b == b' ').count();
+        if leading_spaces > 3 {
+            continue;
+        }
+        let candidate = &line[leading_spaces..];
+        if candidate.starts_with('\t') {
+            continue;
+        }
+        if let Some((fc, open_len)) = fence {
+            if candidate.starts_with(fc) {
+                let count = candidate.chars().take_while(|&c| c == fc).count();
+                if count >= open_len && candidate[count..].trim().is_empty() {
+                    fence = None;
+                }
+            }
+            continue;
+        }
+        if candidate.starts_with("```") || candidate.starts_with("~~~") {
+            let fc = candidate.chars().next().unwrap();
+            let count = candidate.chars().take_while(|&c| c == fc).count();
+            if fc == '~' || !candidate[count..].contains('`') {
+                fence = Some((fc, count));
+            }
+            continue;
+        }
+        let hashes = candidate.chars().take_while(|&c| c == '#').count();
+        if !(1..=6).contains(&hashes) {
+            continue;
+        }
+        let rest = &candidate[hashes..];
+        if !rest.starts_with(' ') && !rest.starts_with('\t') {
+            continue;
+        }
+        let heading = rest.trim().trim_end_matches('#').trim();
+        let mut base = String::new();
+        for ch in heading.chars() {
+            if ch == ' ' {
+                base.push('-');
+            } else if ch == '-' || ch == '_' || ch.is_alphanumeric() {
+                for lower in ch.to_lowercase() {
+                    base.push(lower);
+                }
+            }
+        }
+        if base.is_empty() {
+            continue;
+        }
+        let count = counts.entry(base.clone()).or_insert(0);
+        let slug = if *count == 0 {
+            base
+        } else {
+            format!("{base}-{}", *count)
+        };
+        *count += 1;
+        slugs.insert(slug);
+    }
+    slugs
+}
+
+fn resolve_source_refs(root: &Path, id: &str, source_refs: &[String]) -> Option<Value> {
+    let canonical = source_refs
+        .iter()
+        .filter(|reference| is_canonical_repo_source_ref(reference))
+        .collect::<Vec<_>>();
+    if canonical.is_empty() {
+        return None;
+    }
+    let mut resolved = Vec::new();
+    let mut stale = Vec::new();
+    for reference in canonical {
+        let (rel_path, anchor) = reference
+            .split_once('#')
+            .map_or((reference.as_str(), None), |(path, anchor)| {
+                (path, Some(anchor))
+            });
+        let target = root.join(rel_path);
+        if !target.is_file() {
+            stale.push(json!({
+                "diagnostic": "stale-reference",
+                "id": id,
+                "ref": reference,
+                "path": rel_path,
+                "anchor": anchor,
+                "status": "stale-reference",
+                "reason": "missing target file"
+            }));
+            continue;
+        }
+        if let Some(anchor_name) = anchor {
+            let is_markdown = Path::new(rel_path)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+            if is_markdown {
+                let anchor_found = fs::read_to_string(&target)
+                    .map(|text| markdown_heading_slugs(&text).contains(anchor_name))
+                    .unwrap_or(false);
+                if !anchor_found {
+                    stale.push(json!({
+                        "diagnostic": "stale-reference",
+                        "id": id,
+                        "ref": reference,
+                        "path": rel_path,
+                        "anchor": anchor_name,
+                        "status": "stale-reference",
+                        "reason": "missing target anchor"
+                    }));
+                    continue;
+                }
+            }
+        }
+        resolved.push(json!({
+            "id": id,
+            "ref": reference,
+            "path": rel_path,
+            "anchor": anchor,
+            "status": "resolved"
+        }));
+    }
+    Some(json!({
+        "status": if stale.is_empty() { "resolved" } else { "stale-reference" },
+        "resolved_refs": resolved,
+        "stale_references": stale
+    }))
+}
+
 fn get(root: &Path, id: &str) -> Value {
     assert_id(id);
     let mut matches = Vec::new();
+    let mut has_canonical_refs = false;
+    let mut all_stale = Vec::new();
     for global in [false, true] {
         let connection = open_scope(root, global);
         let mut statement = connection.prepare("SELECT id,category,title,content,tags_json,source_refs_json,importance,layer,created_at,updated_at,review_status,detail_path FROM memory_nodes WHERE id=?1").unwrap();
@@ -485,11 +642,32 @@ fn get(root: &Path, id: &str) -> Value {
             let refs_json: String = row.get(5)?;
             Ok(json!({"id":row.get::<_,String>(0)?,"category":row.get::<_,String>(1)?,"title":row.get::<_,String>(2)?,"content":row.get::<_,String>(3)?,"tags":serde_json::from_str::<Value>(&tags_json).unwrap_or(json!([])),"source_refs":serde_json::from_str::<Value>(&refs_json).unwrap_or(json!([])),"importance":row.get::<_,i64>(6)?,"layer":row.get::<_,i64>(7)?,"memory_level":row.get::<_,i64>(7)?,"created_at":row.get::<_,String>(8)?,"updated_at":row.get::<_,String>(9)?,"review_status":row.get::<_,String>(10)?,"detail_path":row.get::<_,String>(11)?,"scope":if global {"global"} else {"project"}}))
         }).optional().unwrap();
-        if let Some(value) = value {
+        if let Some(mut value) = value {
+            if !global {
+                let source_refs = refs(&value);
+                if let Some(resolution) = resolve_source_refs(root, id, &source_refs) {
+                    has_canonical_refs = true;
+                    if let Some(items) =
+                        resolution.get("stale_references").and_then(Value::as_array)
+                    {
+                        all_stale.extend(items.iter().cloned());
+                    }
+                    value["source_navigation"] = resolution;
+                }
+            }
             matches.push(value);
         }
     }
-    json!({"id": id, "matches": matches})
+    if has_canonical_refs {
+        json!({
+            "id": id,
+            "matches": matches,
+            "navigation_status": if all_stale.is_empty() { "resolved" } else { "stale-reference" },
+            "stale_references": all_stale
+        })
+    } else {
+        json!({"id": id, "matches": matches})
+    }
 }
 
 fn review(root: &Path, run_id: &str) -> Value {

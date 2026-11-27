@@ -193,7 +193,7 @@ master 按[派单顺序](#派单顺序与一-peer-一任务)选择本阶段的�
 
 ### 派单顺序与一 peer 一任务
 
-manager（master 与任务合同明确受托派发的人）每轮派单先查看 board 的当前项目成员与容量，列出全部
+manager（仅限当前项目 master / Jenny；peer 不派发其他 peer）每轮派单先查看 board 的当前项目成员与容量，列出全部
 idle peer，包括没有当前任务的成员，并显式显示各自通道来源（Codex TUI、DSH、Codex
 Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显示但不计入业务派单容量。
 `identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 的成员按
@@ -393,9 +393,11 @@ CEO 按该指引维护用户明确确认的稳定偏好与写作习惯：先读�
 ## 资源和生命周期边界
 
 每个 peer 只拥有获授权的任务、文件、worktree 和资源。并发写入前按
-[任务与 worktree](references/task-worktree-lifecycle.md)登记；冲突按
-[资源等待](references/resource-waits.md)隔离，不覆盖或回收他人的资源。显式取消、
-集成、清理沿各自 owner 的入口。
+[任务执行操作](references/task-worktree-lifecycle.md#task-execution-operations)登记，
+单事件状态边界见[任务执行契约](references/task-worktree-lifecycle.md#task-execution-contract)；
+冲突按[资源等待](references/resource-waits.md)隔离，不覆盖或回收他人的资源。
+任务由 Jenny 统一调度，owner 通过本地 Codex 编排执行，不向 peer 派单也不发送常规
+进度汇报；显式取消、集成、清理沿各自 owner 的入口。
 
 Collab daemon 由用户管理。普通协作、安装、注册和恢复不包含 daemon 维护或任何 tmux
 server/pane 生命周期操作。选定传输失败后不跨传输伪造成功。生产工作不挂到未交付的
@@ -413,7 +415,7 @@ v2 实验状态。
 | 投递、查回执或收到通知 | [通信入口与项目目录](operations.md#通信入口与项目目录) |
 | 新建、编辑、续订或结束 Longhorizon | [目标入口与参数](operations.md#目标入口与参数)、[空闲唤醒与状态核实](operations.md#空闲唤醒与状态核实) |
 | 修改角色或工作流程模板 | [角色分工](operations.md#工作角色与用户指定分工)、[流程模板](operations.md#唯一-skill-与当前工作流程) |
-| 任务板发布、认领、交付及队列接续 | [Table A](operations.md#table-a-busy-slots-and-queued-admission)、[Table B](operations.md#table-b-resource-waits-block-approval-and-queue-continuation) |
+| 任务板发布、认领、交付及队列接续 | [Table A](operations.md#table-a-busy-slots-and-queued-admission)、[Table B](operations.md#table-b-resource-waits-block-approval-and-queue-continuation)、[任务执行操作](references/task-worktree-lifecycle.md#task-execution-operations)、[任务执行契约](references/task-worktree-lifecycle.md#task-execution-contract) |
 | 通信失败、身份恢复或显式重置 | [Recovery / Failure / Reset](operations.md#recovery-failure-reset-regression)、[当前身份与用户维护边界](references/migration-daemon.md) |
 | CEO、跨项目 master 操作 | [CEO](operations.md#全局-ceo-与项目-master)、[跨项目通信](operations.md#cross-project-master-communication) |
 | board idle 巡检、取消与 CEO 回报 | [Table C：board idle 巡检](references/board-idle-patrol.md) |

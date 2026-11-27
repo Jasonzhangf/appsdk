@@ -443,6 +443,7 @@ pub struct BoardTaskView {
     pub next_step: Option<String>,
     pub work_kind: Option<String>,
     pub parent_task_id: Option<String>,
+    pub depends_on: Vec<String>,
     pub child_work_policies: std::collections::BTreeMap<String, WorkPolicy>,
     pub preferred_roles: Vec<String>,
     pub executor_name: Option<String>,

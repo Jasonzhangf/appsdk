@@ -7,6 +7,130 @@ fn board_public_task(state: &State, task_id: &str) -> bool {
         .is_some_and(|details| details.public_visibility)
 }
 
+struct TaskBindingView<'a> {
+    assignment: Option<&'a name_state::TaskAssignment>,
+    historical: bool,
+    slot: Option<&'a binding_slot::IdentityBindingSlot>,
+    current: Option<&'a binding_slot::BindingValue>,
+    current_owner: Option<&'a str>,
+}
+
+fn task_current_binding_and_owner<'a>(
+    state: &'a State,
+    control: &'a binding_slot::BindingControlSet,
+    task: &'a TaskRec,
+    route: Option<&RouteScope>,
+) -> Result<TaskBindingView<'a>, String> {
+    let assignment = state.task_assignment(&task.id);
+    let historical = matches!(task.status.as_str(), "closed" | "cancelled");
+    let slot = match assignment.zip(route) {
+        Some((assignment, route)) => control.current_for_name(
+            &route.project_scope_id,
+            &route.app_scope_id,
+            &assignment.name,
+        )?,
+        None => None,
+    };
+    let current = slot.and_then(|slot| slot.active_binding());
+    let current_owner = if historical {
+        Some(task.owner.as_str())
+    } else if assignment.is_some() {
+        current.map(|current| current.binding.agent_id.as_str())
+    } else {
+        Some(task.owner.as_str())
+    };
+    Ok(TaskBindingView {
+        assignment,
+        historical,
+        slot,
+        current,
+        current_owner,
+    })
+}
+
+fn actor_visible_to_viewer(state: &State, viewer: Option<&str>, actor: Option<&str>) -> bool {
+    viewer.is_some_and(|viewer| {
+        actor.is_some_and(|actor| {
+            viewer == actor || board_parent_for_actor(state, actor) == Some(viewer)
+        })
+    })
+}
+
+fn board_task_visibility_for_binding(
+    state: &State,
+    details: &BoardTaskDetails,
+    viewer: Option<&str>,
+    master_view: bool,
+    current_owner: Option<&str>,
+) -> bool {
+    details.public_visibility
+        || master_view
+        || actor_visible_to_viewer(state, viewer, current_owner)
+}
+
+fn board_task_visible_with_control(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    task: &TaskRec,
+    viewer: Option<&str>,
+    master_view: bool,
+    route: Option<&RouteScope>,
+) -> Result<bool, String> {
+    let Some(details) = state.board_details.get(&task.id) else {
+        return Ok(false);
+    };
+    if details.public_visibility || master_view {
+        return Ok(true);
+    }
+    let binding = task_current_binding_and_owner(state, control, task, route)?;
+    Ok(board_task_visibility_for_binding(
+        state,
+        details,
+        viewer,
+        master_view,
+        binding.current_owner,
+    ))
+}
+
+fn dependency_visible(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    dep: &str,
+    viewer: Option<&str>,
+    master_view: bool,
+    route: Option<&RouteScope>,
+) -> Result<bool, String> {
+    if master_view || board_public_task(state, dep) {
+        return Ok(true);
+    }
+    let Some(dep_task) = state.tasks.get(dep) else {
+        return Ok(false);
+    };
+    if state.board_details.contains_key(dep) {
+        return board_task_visible_with_control(
+            state,
+            control,
+            dep_task,
+            viewer,
+            master_view,
+            route,
+        );
+    }
+    let binding = task_current_binding_and_owner(state, control, dep_task, route)?;
+    let assigned_nonterminal = binding.assignment.is_some() && !binding.historical;
+    let private_child = binding
+        .current_owner
+        .is_some_and(|owner| is_managed_subagent(state, owner))
+        || is_managed_subagent(state, &dep_task.owner)
+        || is_managed_subagent(state, &dep_task.created_by);
+    if !private_child {
+        return Ok(true);
+    }
+    Ok(actor_visible_to_viewer(state, viewer, binding.current_owner)
+        || (!assigned_nonterminal
+            && actor_visible_to_viewer(state, viewer, Some(&dep_task.created_by))))
+}
+
 fn board_parent_for_actor<'a>(state: &'a State, actor: &str) -> Option<&'a str> {
     state
         .subagents
@@ -146,31 +270,13 @@ fn board_task_view_with_master(
     let policy = state.effective_work_policy(&task.id);
     let (completion_delivery_complete, completion_missing) =
         state.delivery_completion_projection(&task.id);
-    let assignment = state.task_assignment(&task.id);
-    let historical = matches!(task.status.as_str(), "closed" | "cancelled");
-    let slot = match assignment.zip(route) {
-        Some((assignment, route)) => control
-            .current_for_name(
-                &route.project_scope_id,
-                &route.app_scope_id,
-                &assignment.name,
-            )?,
-        None => None,
-    };
-    let current = slot.and_then(|slot| slot.active_binding());
-    let current_owner = if historical {
-        Some(task.owner.as_str())
-    } else if assignment.is_some() {
-        current.map(|current| current.binding.agent_id.as_str())
-    } else {
-        Some(task.owner.as_str())
-    };
-    let private_owner = viewer.is_some_and(|viewer| {
-        current_owner.is_some_and(|owner| {
-            viewer == owner || board_parent_for_actor(state, owner) == Some(viewer)
-        })
-    });
-    if !details.public_visibility && !private_owner && !master_view {
+    let binding = task_current_binding_and_owner(state, control, task, route)?;
+    let assignment = binding.assignment;
+    let historical = binding.historical;
+    let slot = binding.slot;
+    let current = binding.current;
+    let current_owner = binding.current_owner;
+    if !board_task_visibility_for_binding(state, details, viewer, master_view, current_owner) {
         return Ok(None);
     }
     let execution_slot = slot.filter(|_| {
@@ -207,6 +313,22 @@ fn board_task_view_with_master(
     } else {
         task.created_by.clone()
     };
+    let depends_on = current_execute_phase(state, &task.id)
+        .map(|phase| {
+            phase
+                .depends_on
+                .iter()
+                .map(|dep| {
+                    if dependency_visible(state, control, dep, viewer, master_view, route)? {
+                        Ok(dep.clone())
+                    } else {
+                        Ok("内部依赖".into())
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     Ok(Some(BoardTaskView {
         id: task.id.clone(),
         title: details.title.clone(),
@@ -244,6 +366,7 @@ fn board_task_view_with_master(
         next_step: task_next_step(task).map(str::to_owned),
         work_kind: policy.work_kind,
         parent_task_id: details.parent_task_id.clone(),
+        depends_on,
         child_work_policies: details.child_work_policies.clone(),
         preferred_roles: policy.preferred_roles.unwrap_or_default(),
         executor_name: policy.executor_name,

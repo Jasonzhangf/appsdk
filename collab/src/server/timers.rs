@@ -683,9 +683,9 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
             })
         }
         Some("explicit-notification") => {
-            message.id.starts_with("ticket-claim-")
-                || (super::current_board_invitation_for_message(state, message).is_some()
-                    && super::can_resume_notification(state, message))
+            ((message.id.starts_with("ticket-claim-")
+                || super::current_board_invitation_for_message(state, message).is_some())
+                && super::can_resume_notification(state, message))
                 || super::notification_reconnect_pending(state, message)
         }
         Some("immediate" | super::mailbox::REGISTRATION_NOTIFICATION_MODE) => {

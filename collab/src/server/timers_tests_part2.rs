@@ -2300,11 +2300,19 @@ use super::*;
                 .contains_key("ticket-claim-retry-1"),
             "timer must deliver deferred ticket-claim-* wake to transport"
         );
+        assert!(
+            !automatic_delivery_candidate(&state, &state.msgs["ticket-claim-retry-1"]),
+            "accepted ticket-claim-* notifications must leave the automatic candidate pool"
+        );
         assert_eq!(state.msgs["msg-explicit-manual-1"].state, "pending");
         assert_eq!(state.msgs["msg-explicit-manual-1"].wake_attempt_count, 0);
         assert!(!state
             .notification_delivery_accepted
             .contains_key("msg-explicit-manual-1"));
+        drop(state);
+        tick_with_deadline_wake_at(&server, now + 10_000);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["ticket-claim-retry-1"].wake_attempt_count, 1);
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }

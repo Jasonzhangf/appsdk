@@ -3,6 +3,7 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -113,11 +114,12 @@ impl Fixture {
         self.state.join("active-session").exists()
     }
 
-    fn interrupt_during_create(&self, mode: &str) -> (i32, Value, Vec<Value>) {
+    fn interrupt_during_create(&self, mode: &str, signal_group: bool) -> (i32, Value, Vec<Value>) {
         let map = self.map();
         let map_path = self.state.join("identity-map.json");
         fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_collab"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_collab"));
+        command
             .current_dir(&self.project)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap())
@@ -143,9 +145,11 @@ impl Fixture {
                 "--approve",
             ])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(std::process::Stdio::piped());
+        if signal_group {
+            command.process_group(0);
+        }
+        let mut child = command.spawn().unwrap();
         let in_flight = self.state.join("create-inflight");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -166,8 +170,13 @@ impl Fixture {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        let signal_target = if signal_group {
+            format!("-{}", child.id())
+        } else {
+            child.id().to_string()
+        };
         let signal = Command::new("kill")
-            .args(["-INT", &child.id().to_string()])
+            .args(["-INT", &signal_target])
             .status()
             .unwrap();
         assert!(signal.success(), "failed to interrupt restore");
@@ -549,7 +558,7 @@ fn restore_public_cancellation_is_typed_and_routes_through_exact_id_cleanup() {
         ("cancel_after_create_kill_failure", "unconfirmed", true),
     ] {
         let f = Fixture::new();
-        let (code, result, receipts) = f.interrupt_during_create(mode);
+        let (code, result, receipts) = f.interrupt_during_create(mode, false);
         assert_eq!(code, 2, "{mode}: {result}");
         assert_eq!(result["ok"], false, "{mode}: {result}");
         assert!(result.get("result").is_none(), "{mode}: {result}");
@@ -579,4 +588,35 @@ fn restore_public_cancellation_is_typed_and_routes_through_exact_id_cleanup() {
         );
         assert_eq!(f.has_carrier(), expected_carrier, "{mode}: {result}");
     }
+}
+
+#[test]
+fn restore_public_foreground_sigint_retains_create_receipt_for_exact_cleanup() {
+    let f = Fixture::new();
+    let (code, result, receipts) = f.interrupt_during_create("cancel_after_create", true);
+    assert_eq!(code, 2, "{result}");
+    assert_eq!(result["ok"], false, "{result}");
+    assert!(result.get("result").is_none(), "{result}");
+    assert_eq!(result["error"]["stage"], "cancelled", "{result}");
+    assert_eq!(
+        result["error"]["create_receipt"], receipts[2]["response"],
+        "the isolated Rex child must return its create receipt: {result}"
+    );
+    assert_eq!(result["error"]["cleanup"]["outcome"], "closed", "{result}");
+    assert_eq!(
+        result["error"]["cleanup"]["session_id"], SESSION,
+        "cleanup must use the exact returned session ID: {result}"
+    );
+    assert_eq!(
+        methods(&receipts),
+        [
+            "server.status",
+            "session.list",
+            "session.create",
+            "server.status",
+            "kill"
+        ],
+        "{result}"
+    );
+    assert!(!f.has_carrier(), "{result}");
 }

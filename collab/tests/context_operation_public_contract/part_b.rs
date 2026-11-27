@@ -3645,7 +3645,7 @@ fn b08_profile_persistence_register_and_query_ignore_query_override() {
     drop(appserver);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
 fn rex_layout_public_fixture(label: &str) -> (Fixture, std::os::unix::net::UnixListener, String) {
     let mut fixture = Fixture::without_tmux(label);
     let cli = fixture.install_rex_fixture_cli();
@@ -3657,7 +3657,7 @@ fn rex_layout_public_fixture(label: &str) -> (Fixture, std::os::unix::net::UnixL
 }
 
 #[test]
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
 fn b08_rex_layout_inherits_existing_profile_and_public_query_reads_authoritative_record() {
     let (fixture, _rex_listener, rex_server) = rex_layout_public_fixture("rex-layout-public-profile");
     let suffix = std::process::id();
@@ -3689,7 +3689,7 @@ fn b08_rex_layout_inherits_existing_profile_and_public_query_reads_authoritative
         "block_id": "block:22222222-2222-2222-2222-222222222222",
         "cwd": fixture.root.to_string_lossy(),
     });
-    let saved = fixture.context_provide(
+    let saved = fixture.context_save(
         "ctxop-rex-layout-save",
         &json!({"session_id": agent_session, "rex": rex}),
         None,
@@ -3801,7 +3801,125 @@ fn b08_rex_layout_inherits_existing_profile_and_public_query_reads_authoritative
 }
 
 #[test]
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn b08_rex_ordinary_profile_recovery_does_not_require_layout_capture() {
+    let (fixture, _rex_listener, rex_server) = rex_layout_public_fixture("rex-profile-recovery");
+    let suffix = std::process::id();
+    let agent_session = format!("rex-profile-recovery-agent-{suffix}");
+    let thread_id = format!("rex-profile-recovery-thread-{suffix}");
+    let profile = "profile-rex-recovery";
+    let appserver = TestAppServer::start(&fixture.root, &agent_session, &thread_id);
+
+    fixture.context_provide(
+        "ctxop-rex-profile-register",
+        &json!({
+            "session_id": agent_session,
+            "thread_id": thread_id,
+            "endpoint": appserver.endpoint(),
+            "namespace": "codex_tui",
+            "profile": profile,
+        }),
+        None,
+    );
+    let map_path = fixture.host_state.join("identity-map.json");
+    let before_rex: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let before_current = &before_rex["slots"][0]["current"];
+    assert_eq!(
+        before_current["host"]["profile"], profile,
+        "{before_current}"
+    );
+    assert!(before_current["rex_layout"].is_null(), "{before_current}");
+
+    let rex = json!({
+        "server": rex_server,
+        "session_id": "session:11111111-1111-1111-1111-111111111111",
+        "block_id": "block:22222222-2222-2222-2222-222222222222",
+        "cwd": fixture.root.to_string_lossy(),
+    });
+    fs::write(fixture.root.join("rex-scenario"), "layout_block_missing\n").unwrap();
+    let ordinary = fixture.context_provide(
+        "ctxop-rex-profile-ordinary-recovery",
+        &json!({"session_id": agent_session, "rex": rex}),
+        None,
+    );
+    assert_eq!(ordinary["result"]["outcome"], "completed", "{ordinary}");
+    let ordinary_calls = fs::read_to_string(fixture.root.join("invocations.jsonl")).unwrap();
+    assert!(
+        !ordinary_calls.contains("session.view"),
+        "ordinary recovery must not require restore-only layout capture: {ordinary_calls}"
+    );
+
+    let recovered: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let current = recovered["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["current"]["binding"]["session_id"] == agent_session
+        })
+        .and_then(|slot| slot.get("current"))
+        .expect("recovered Rex binding is current");
+    assert_eq!(current["host"]["profile"], profile, "{current}");
+    assert!(current["rex_layout"].is_null(), "{current}");
+    assert_eq!(current["transport"]["kind"], "rex", "{current}");
+
+    fs::write(fixture.root.join("rex-scenario"), "normal\n").unwrap();
+    let saved = fixture.context_save(
+        "ctxop-rex-profile-complete-save",
+        &json!({"session_id": agent_session, "rex": rex}),
+        None,
+    );
+    assert_eq!(saved["result"]["outcome"], "completed", "{saved}");
+    let saved_map = fs::read(&map_path).unwrap();
+    let saved_value: Value = serde_json::from_slice(&saved_map).unwrap();
+    let saved_current = saved_value["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["current"]["binding"]["session_id"] == agent_session
+        })
+        .and_then(|slot| slot.get("current"))
+        .expect("saved Rex binding is current");
+    assert_eq!(saved_current["host"]["profile"], profile, "{saved_current}");
+    assert_eq!(
+        saved_current["rex_layout"]["layout"]["block_id"], rex["block_id"],
+        "{saved_current}"
+    );
+
+    fs::write(fixture.root.join("rex-scenario"), "layout_block_missing\n").unwrap();
+    let incomplete_provide = json!({"session_id": agent_session, "rex": rex}).to_string();
+    let incomplete = fixture.command(
+        &[
+            "context",
+            "--op",
+            "ctxop-rex-profile-incomplete-save",
+            "--provide",
+            &incomplete_provide,
+            "--save",
+        ],
+        None,
+    );
+    assert!(
+        !incomplete.status.success(),
+        "explicit Save must fail: {incomplete:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&incomplete.stderr).contains("REX_LAYOUT_TARGET_ABSENT"),
+        "{incomplete:?}"
+    );
+    assert_eq!(
+        fs::read(&map_path).unwrap(),
+        saved_map,
+        "failed explicit Save must preserve the previous complete association"
+    );
+    drop(appserver);
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
 fn b08_rex_registration_keeps_restore_metadata_optional_and_save_requires_complete_layout() {
     let (fixture, _rex_listener, rex_server) =
         rex_layout_public_fixture("rex-registration-restore-boundary");
@@ -3832,7 +3950,7 @@ fn b08_rex_registration_keeps_restore_metadata_optional_and_save_requires_comple
         "ordinary registration must not require restore-only layout metadata: {ordinary_calls}"
     );
 
-    let complete = fixture.context_provide(
+    let complete = fixture.context_save(
         "ctxop-rex-complete-save",
         &json!({
             "session_id": agent_session,
@@ -3866,6 +3984,7 @@ fn b08_rex_registration_keeps_restore_metadata_optional_and_save_requires_comple
             "ctxop-rex-incomplete-save",
             "--provide",
             &incomplete_provide,
+            "--save",
         ],
         None,
     );

@@ -818,6 +818,9 @@ pub(crate) enum Cmd {
         provide: Option<String>,
         #[arg(long)]
         query: bool,
+        /// Require and persist a complete Rex layout for this explicit Save.
+        #[arg(long, conflicts_with = "query")]
+        save: bool,
     },
     /// Mark messages as read
     Ack {

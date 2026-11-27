@@ -650,6 +650,21 @@ impl Fixture {
         )
     }
 
+    pub fn context_save(&self, operation_id: &str, provide: &Value, pane: Option<&Pane>) -> Value {
+        let provide = serde_json::to_string(provide).expect("serialize provide facts");
+        self.run_ok(
+            &[
+                "context",
+                "--op",
+                operation_id,
+                "--provide",
+                &provide,
+                "--save",
+            ],
+            pane,
+        )
+    }
+
     pub fn project_state(&self) -> PathBuf {
         self.project_state_for(&self.root, "appserver-cli")
     }

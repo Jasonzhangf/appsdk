@@ -470,6 +470,7 @@ pub(crate) fn context_operation_with_intent(
     approve_grant: Option<&str>,
     provide: Option<&str>,
     query: bool,
+    save: bool,
 ) -> anyhow::Result<Value> {
     let approval = approve_identity
         .map(|raw| parse_approval_json("--approve-identity", raw))
@@ -503,6 +504,7 @@ pub(crate) fn context_operation_with_intent(
             approval: None,
             grant_approval: None,
             query: true,
+            save: false,
         }
     } else {
         let mut facts = collect_identity_facts(provide)?;
@@ -616,6 +618,7 @@ pub(crate) fn context_operation_with_intent(
             approval: None,
             grant_approval: None,
             query: false,
+            save,
         }
     };
     request.approval = approval;

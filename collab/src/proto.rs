@@ -466,6 +466,8 @@ pub struct IdentityContextRequest {
     pub grant_approval: Option<serde_json::Value>,
     #[serde(default)]
     pub query: bool,
+    #[serde(default)]
+    pub save: bool,
 }
 
 impl IdentityContextRequest {
@@ -479,6 +481,7 @@ impl IdentityContextRequest {
             approval: None,
             grant_approval: None,
             query: false,
+            save: false,
         }
     }
 }

@@ -1,7 +1,7 @@
 {
   "id": "appsdk-rex-codex-snapshot-restore",
-  "version": "1.2.2",
-  "description": "One saved Codex Rex association may enter one isolated restore attempt. Save readback is mandatory before target selection. A verified create and its resume plan terminate through the single result with the carrier retained for the caller. Every pre-create rejection terminates without cleanup and every post-create failure or cancellation enters exact-ID cleanup with closed or unconfirmed disposition. Post-terminal live verification and test teardown are observer-owned; the candidate does not claim live resume or a fresh binding without independent owner evidence.",
+  "version": "1.2.3",
+  "description": "One saved Codex Rex association may enter one isolated restore attempt. Save readback is mandatory before target selection. Collab owns terminal cancellation while the Rex create child has an isolated process group, so an in-flight create receipt remains available for classification. A verified create and its resume plan terminate through the single result with the carrier retained for the caller. Every pre-create rejection terminates without cleanup and every post-create failure or cancellation enters exact-ID cleanup with closed or unconfirmed disposition. Post-terminal live verification and test teardown are observer-owned; the candidate does not claim live resume or a fresh binding without independent owner evidence.",
   "inputs": [
     {"id": "restore_request", "schema": "Object"}
   ],
@@ -65,7 +65,7 @@
       "id": "create_restore_carrier",
       "operator": "appsdk.rex_restore.restore_carrier",
       "operator_version": "2",
-      "description": "Create one isolated carrier. A confirmed rejection has no side effect. An unknown response keeps its server, session label and operation context and performs no cleanup without a full owned session ID. Behavior receipt: collab/tests/restore_public.rs::restore_public_preserves_unknown_create_outcome_and_refuses_unsafe_retry.",
+      "description": "Create one isolated carrier in a process group separate from the Collab terminal owner. A foreground Ctrl-C cancels Collab but must not destroy the Rex child response carrying the created session ID. A confirmed rejection has no side effect. An unknown response keeps its server, session label and operation context and performs no cleanup without a full owned session ID. Behavior receipts: collab/tests/restore_public.rs::restore_public_preserves_unknown_create_outcome_and_refuses_unsafe_retry and restore_public_foreground_sigint_retains_create_receipt_for_exact_cleanup.",
       "inputs": ["restore_target"],
       "output": {"id": "create_observation", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -98,7 +98,7 @@
       "id": "observe_cancellation_request",
       "operator": "appsdk.rex_restore.observe_cancellation",
       "operator_version": "1",
-      "description": "Observe Ctrl-C for this restore operation. Cancellation before create terminates without cleanup; cancellation after create enters the same exact-ID cleanup owner and ends closed or unconfirmed. Behavior receipts: restore_public_cancellation_before_cleanup_is_typed_and_restore_public_cancelled_cleanup_failure_is_typed.",
+      "description": "Collab owns Ctrl-C for this restore operation while the Rex create child remains isolated from the terminal foreground group. Cancellation before create terminates without cleanup; cancellation during or after create uses any returned exact carrier receipt and enters the same exact-ID cleanup owner, ending closed or unconfirmed. Behavior receipts: restore_public_cancellation_before_cleanup_is_typed, restore_public_cancelled_cleanup_failure_is_typed, and restore_public_foreground_sigint_retains_create_receipt_for_exact_cleanup.",
       "inputs": ["restore_request"],
       "output": {"id": "cancellation_request", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},

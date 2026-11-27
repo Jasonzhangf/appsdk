@@ -400,6 +400,28 @@ async fn run_cli(
         command,
         stdin_body,
         StdoutCapture::All,
+        false,
+    )
+    .await
+}
+
+async fn run_cli_isolated(
+    operation: &'static str,
+    cli_path: &Path,
+    server: &str,
+    deadline: Instant,
+    command: &[String],
+    stdin_body: Option<String>,
+) -> Result<CompletedCall, RexError> {
+    run_cli_with_capture(
+        operation,
+        cli_path,
+        server,
+        deadline,
+        command,
+        stdin_body,
+        StdoutCapture::All,
+        true,
     )
     .await
 }
@@ -421,6 +443,7 @@ async fn run_cli_tail(
         command,
         stdin_body,
         StdoutCapture::LastLines(lines),
+        false,
     )
     .await
 }
@@ -441,6 +464,7 @@ async fn run_cli_with_capture(
     command: &[String],
     stdin_body: Option<String>,
     stdout_capture: StdoutCapture,
+    isolated_process_group: bool,
 ) -> Result<CompletedCall, RexError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -466,6 +490,9 @@ async fn run_cli_with_capture(
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped())
     .kill_on_drop(true);
+    if isolated_process_group {
+        cmd.process_group(0);
+    }
 
     if Instant::now() >= deadline {
         return Err(RexError::known_not_delivered(
@@ -2038,7 +2065,7 @@ pub(crate) async fn restore_carrier(
         failure.create_context = Some(create_context.clone());
         failure
     };
-    let create_call = run_cli(
+    let create_call = run_cli_isolated(
         "session.create",
         Path::new(&cli),
         &saved.server,

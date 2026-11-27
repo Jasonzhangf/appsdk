@@ -2157,6 +2157,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             approve_grant,
             provide,
             query,
+            save,
         } => {
             // Validate and parse the workflow mutation before any bootstrap or
             // identity write. A malformed spec or conflicting flag must leave
@@ -2196,6 +2197,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 approve_grant.as_deref(),
                 provide.as_deref(),
                 query,
+                save,
             );
             match result {
                 Ok(value) => {

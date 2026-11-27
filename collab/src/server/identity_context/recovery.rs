@@ -393,6 +393,7 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         facts: &IdentityFacts,
         invocation_cwd: Option<&str>,
+        save: bool,
     ) -> anyhow::Result<RexRecoveryObservation> {
         let candidate = facts
             .rex
@@ -423,20 +424,12 @@ impl ProjectRuntimeManager {
             rex: Some(candidate.clone()),
             ..Default::default()
         };
-        let capture_restore_layout = facts
-            .profile
-            .as_deref()
-            .is_some_and(|profile| !profile.trim().is_empty())
-            || baseline
-                .as_ref()
-                .and_then(|baseline| baseline.current.host.profile.as_deref())
-                .is_some_and(|profile| !profile.trim().is_empty());
         let transport = validate_transport_candidates_for_session(
             Path::new(&context.canonical_root),
             &candidates,
             &context.canonical_root,
             facts.session_id.as_deref(),
-            capture_restore_layout,
+            save,
         )
         .map_err(anyhow::Error::msg)?;
         let endpoint = transport
@@ -890,6 +883,7 @@ impl ProjectRuntimeManager {
         outer_binding: Option<RegisterOuterBinding>,
         allow_persisted_restore: bool,
         allow_explicit_rex_rebind: bool,
+        save: bool,
         invocation_cwd: Option<&str>,
     ) -> anyhow::Result<(Arc<Server>, Resp)> {
         if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
@@ -1050,12 +1044,7 @@ impl ProjectRuntimeManager {
                                 &candidates,
                                 &context.canonical_root,
                                 facts.session_id.as_deref(),
-                                facts.profile.as_deref().is_some_and(|profile| !profile.trim().is_empty())
-                                    || rex_recovery
-                                        .as_ref()
-                                        .and_then(|recovery| recovery.baseline.as_ref())
-                                        .and_then(|baseline| baseline.current.host.profile.as_deref())
-                                        .is_some_and(|profile| !profile.trim().is_empty()),
+                                save,
                             ).map_err(anyhow::Error::msg)?,
                         };
                         current = Some(self.refresh_session_transport(
@@ -1095,24 +1084,17 @@ impl ProjectRuntimeManager {
                                 allow_explicit_rex_rebind,
                             )?;
                             let candidates = TransportCandidates { rex: Some(candidate.clone()), ..Default::default() };
-                            transport = rex_recovery
-                                .as_ref()
-                                .map(|recovery| recovery.transport.clone())
-                                .unwrap_or(
-                                    validate_transport_candidates_for_session(
-                                        &runtime.root,
-                                        &candidates,
-                                        &context.canonical_root,
-                                        facts.session_id.as_deref(),
-                                        facts.profile.as_deref().is_some_and(|profile| !profile.trim().is_empty())
-                                            || rex_recovery
-                                                .as_ref()
-                                                .and_then(|recovery| recovery.baseline.as_ref())
-                                                .and_then(|baseline| baseline.current.host.profile.as_deref())
-                                                .is_some_and(|profile| !profile.trim().is_empty()),
-                                    )
-                                    .map_err(anyhow::Error::msg)?,
-                                );
+                            transport = match rex_recovery.as_ref() {
+                                Some(recovery) => recovery.transport.clone(),
+                                None => validate_transport_candidates_for_session(
+                                    &runtime.root,
+                                    &candidates,
+                                    &context.canonical_root,
+                                    facts.session_id.as_deref(),
+                                    save,
+                                )
+                                .map_err(anyhow::Error::msg)?,
+                            };
                             current = Some(self.refresh_session_transport(
                                 &runtime,
                                 saved,
@@ -1508,6 +1490,7 @@ mod anchor_provenance_tests {
             &context,
             &facts,
             Some(invocation_root.to_str().unwrap()),
+            false,
         ) {
             Ok(_) => panic!("the invalid Rex target must fail after project-root admission"),
             Err(error) => error.to_string(),
@@ -1745,6 +1728,7 @@ mod anchor_provenance_tests {
             approval: None,
             grant_approval: None,
             query: false,
+            save: false,
         };
         let (_, first) = tokio::task::spawn_blocking({
             let manager = manager.clone();
@@ -1786,6 +1770,7 @@ mod anchor_provenance_tests {
             approval: None,
             grant_approval: None,
             query: false,
+            save: false,
         };
         let (_, second) = tokio::task::spawn_blocking({
             let manager = manager.clone();

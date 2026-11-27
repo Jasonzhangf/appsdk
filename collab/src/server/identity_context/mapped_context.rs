@@ -133,6 +133,7 @@ impl ProjectRuntimeManager {
                 &context,
                 &facts,
                 request.invocation_cwd.as_deref(),
+                request.save,
             ) {
                 Ok(observation) => Some(observation),
                 Err(error) => {
@@ -185,6 +186,7 @@ impl ProjectRuntimeManager {
             Some(outer),
             true,
             allow_explicit_rex_rebind,
+            request.save,
             request.invocation_cwd.as_deref(),
         );
         let (runtime, mut response) = match reconciled {

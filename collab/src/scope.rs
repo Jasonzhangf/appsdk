@@ -596,6 +596,26 @@ pub fn lifecycle_project_root() -> anyhow::Result<PathBuf> {
     validate_project_root(process_cwd()?)
 }
 
+/// Resolve the canonical project root for `collab up`.
+///
+/// Prefers an explicit `.agent-collab` marker or an already-registered
+/// canonical project route (including when called from a linked Git worktree)
+/// so an agent restarting the daemon from a worktree or subdirectory does not
+/// initialize a stray `.agent-collab` or point `service-record.json` at a
+/// temporary worktree.
+pub fn project_root_for_up() -> anyhow::Result<PathBuf> {
+    let cwd = process_cwd()?;
+    if let Some(root) = project_root_for_cwd(&cwd) {
+        return validate_project_root(root);
+    }
+    if let Ok(host_paths) = HostPaths::resolve() {
+        if let Ok(route) = canonical_route_for_cwd(&host_paths, &cwd) {
+            return validate_project_root(route.root);
+        }
+    }
+    validate_project_root(cwd)
+}
+
 /// Read the canonical project root bound to the supervised host service.
 ///
 /// A login-supervised daemon has no guaranteed project cwd, so `collab serve

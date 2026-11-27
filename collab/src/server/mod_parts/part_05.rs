@@ -1102,7 +1102,7 @@ fn attempt_tmux_notification_with_retry(
     {
         return NotificationAttempt::Consumed;
     }
-    let selected_binding = if transport.kind == TransportKind::Rex {
+    let (selected_binding, rex_expected_agent_kind) = if transport.kind == TransportKind::Rex {
         let route = match server_route_scope(server, &state) {
             Ok(route) => route,
             Err(error) => return NotificationAttempt::NotAttempted(error.into()),
@@ -1112,8 +1112,19 @@ fn attempt_tmux_notification_with_retry(
                 Ok(control) => control,
                 Err(error) => return NotificationAttempt::NotAttempted(error),
             };
+        let expected_kind = route
+            .as_ref()
+            .and_then(|route| {
+                control
+                    .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|slot| slot.active_binding())
+            .and_then(|value| value.host.agent_kind.as_deref())
+            .and_then(crate::host_runtime::AgentKind::from_str);
         match select_current_rex_delivery_binding(&control, route.as_ref(), recipient, transport) {
-            Ok(binding) => Some(binding),
+            Ok(binding) => (Some(binding), expected_kind),
             Err(error) => return NotificationAttempt::NotAttempted(error),
         }
     } else {
@@ -1141,7 +1152,7 @@ fn attempt_tmux_notification_with_retry(
             Ok(slot.and_then(notification_contract::SelectedDeliveryBinding::from_slot))
         })();
         match selected {
-            Ok(binding) => binding,
+            Ok(binding) => (binding, None),
             Err(attempt) => return attempt,
         }
     };
@@ -1309,8 +1320,12 @@ fn attempt_tmux_notification_with_retry(
     // The native sinks do not access project state. Other mail keeps the
     // existing unlocked submission path.
     let goal_submission_guard = if batch.iter().any(|entry| {
-        timers::requires_goal_idle(&state, &state.msgs[&entry.1],
-            &state.notification_subscriptions[&entry.2], transport)
+        timers::requires_goal_idle(
+            &state,
+            &state.msgs[&entry.1],
+            &state.notification_subscriptions[&entry.2],
+            transport,
+        )
     }) {
         Some(state)
     } else {
@@ -1370,6 +1385,7 @@ fn attempt_tmux_notification_with_retry(
             explicit,
             guarded_one_shot: batch_has_one_shot_invitation,
             guarded_goal: goal_submission_guard.is_some(),
+            expected_agent_kind: rex_expected_agent_kind,
         },
         if queued_tmux {
             DAEMON_LIVE_CLOSURE_MODE
@@ -2107,9 +2123,7 @@ fn notification_send_response(
                 data,
             )
         }
-        NotificationAttempt::NotAttempted(error)
-            if error.starts_with("RECIPIENT_NOT_ONLINE:") =>
-        {
+        NotificationAttempt::NotAttempted(error) if error.starts_with("RECIPIENT_NOT_ONLINE:") => {
             // The durable send succeeded. The offline recipient owns an
             // unread row and receives input only after a later online probe.
             data["durable"] = json!(true);

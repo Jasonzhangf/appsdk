@@ -412,11 +412,33 @@ impl RexLiveFixture {
         let command = codex_pane_interpreter::command(&self.root);
         self.create_receiver_with_command(
             role,
-            vec!["/bin/sh".into(), "-c".into(), format!("exec {command} \"$@\""), "codex".into()],
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("exec {command} \"$@\""),
+                "codex".into(),
+            ],
         )
     }
 
-    fn create_receiver_with_command(&mut self, role: &str, mut command: Vec<String>) -> OwnedRexSession {
+    pub fn create_agy_receiver_session(&mut self, role: &str) -> OwnedRexSession {
+        let command = codex_pane_interpreter::command_named(&self.root, "agy");
+        self.create_receiver_with_command(
+            role,
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("exec {command} \"$@\""),
+                "agy".into(),
+            ],
+        )
+    }
+
+    fn create_receiver_with_command(
+        &mut self,
+        role: &str,
+        mut command: Vec<String>,
+    ) -> OwnedRexSession {
         let token = self.unique_token();
         let run_id = format!("rex-live-{role}-{token}");
         let label = format!("rex-api-foundations-20261108-live-{role}-{token}");

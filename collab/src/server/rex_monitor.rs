@@ -45,6 +45,15 @@ struct RexMonitorInner {
 struct MonitorTarget {
     endpoint: RexEndpoint,
     agent_session_id: String,
+    agent_kind: Option<crate::host_runtime::AgentKind>,
+}
+
+impl MonitorTarget {
+    /// `current_target(&state, worker_id)` omits `agent_kind` because host agent kind lives in
+    /// `BindingControlStore`; matching endpoint and session keeps state-only checks aligned.
+    fn matches_state_target(&self, other: &Self) -> bool {
+        self.endpoint == other.endpoint && self.agent_session_id == other.agent_session_id
+    }
 }
 
 struct RexProjection {
@@ -84,9 +93,16 @@ impl RexMonitor {
         let Some(target) = current_target(state, worker_id) else {
             return false;
         };
-        self.inner.lock().unwrap().tasks.get(worker_id).is_some_and(|task| {
-            task.target == target && task.sampled.load(Ordering::Acquire)
-        })
+        self.inner
+            .lock()
+            .unwrap()
+            .tasks
+            .get(worker_id)
+            .is_some_and(|task| {
+                task.target.matches_state_target(&target)
+                    && !task.task.is_finished()
+                    && task.sampled.load(Ordering::Acquire)
+            })
     }
 
     /// Stop each owned stream. Cancellation is sent to the adapter watch;
@@ -116,11 +132,30 @@ impl RexMonitor {
 pub(crate) fn reconcile(server: &Arc<Server>, _now: i64) {
     let desired: HashMap<String, MonitorTarget> = {
         let state = server.state.lock().unwrap();
+        let route = super::server_route_scope(server, &state).ok().flatten();
+        let control =
+            super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()
+                .ok();
         state
             .workers
             .values()
             .filter_map(|worker| {
-                current_target(&state, &worker.id).map(|target| (worker.id.clone(), target))
+                let mut target = current_target(&state, &worker.id)?;
+                if let (Some(route), Some(control)) = (route.as_ref(), control.as_ref()) {
+                    target.agent_kind = control
+                        .current_for_worker(
+                            &route.project_scope_id,
+                            &route.app_scope_id,
+                            &worker.id,
+                        )
+                        .ok()
+                        .flatten()
+                        .and_then(|slot| slot.active_binding())
+                        .and_then(|value| value.host.agent_kind.as_deref())
+                        .and_then(crate::host_runtime::AgentKind::from_str);
+                }
+                Some((worker.id.clone(), target))
             })
             .collect()
     };
@@ -178,7 +213,15 @@ fn spawn_task(
     let sampled = Arc::new(AtomicBool::new(false));
     let stream_sampled = Arc::clone(&sampled);
     let task = handle.spawn(async move {
-        run_stream(server, worker_id, task_target, events_rx, stream.task, stream_sampled).await;
+        run_stream(
+            server,
+            worker_id,
+            task_target,
+            events_rx,
+            stream.task,
+            stream_sampled,
+        )
+        .await;
     });
     RexTask {
         target,
@@ -201,11 +244,22 @@ async fn run_stream(
         let worker_id = worker_id.clone();
         let target = target.clone();
         let Ok(previous) = tokio::task::spawn_blocking(move || {
-            server.state.lock().unwrap().rex_executions.get(&worker_id)
-                .filter(|record| record.endpoint == target.endpoint
-                    && record.agent_session_id == target.agent_session_id)
+            server
+                .state
+                .lock()
+                .unwrap()
+                .rex_executions
+                .get(&worker_id)
+                .filter(|record| {
+                    record.endpoint == target.endpoint
+                        && record.agent_session_id == target.agent_session_id
+                })
                 .map(|record| record.owner.clone())
-        }).await else { return };
+        })
+        .await
+        else {
+            return;
+        };
         previous
     };
     if refresh_snapshot(&server, &worker_id, &target, &mut execution).await {
@@ -244,9 +298,12 @@ async fn refresh_snapshot(
     execution: &mut Option<RexProgramStatusOwner>,
 ) -> bool {
     let projection = match observe_current(&target.endpoint).await {
-        Ok(observation) => project_observation_with_execution(&observation, execution, &|pid| {
-            current_process_exists(&target.endpoint, pid)
-        }),
+        Ok(observation) => project_observation_with_execution_for(
+            &observation,
+            target.agent_kind,
+            execution,
+            &|pid| current_process_exists(&target.endpoint, pid),
+        ),
         Err(error) => RexProjection {
             presence: AgentPresence::Unknown,
             activity: AgentActivity::Unknown,
@@ -270,7 +327,9 @@ async fn publish_projection(
     let target = target.clone();
     tokio::task::spawn_blocking(move || {
         submit_activity_with_execution(&server, &worker_id, &target, projection, execution.as_ref())
-    }).await.unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// A local PID probe belongs only to the Rex server that owns that PID.
@@ -304,12 +363,22 @@ fn current_process_exists(endpoint: &RexEndpoint, pid: u64) -> Result<bool, Stri
     }
 }
 
+#[cfg(test)]
 fn project_observation_with_execution(
     observation: &RexObservation,
     execution: &mut Option<RexProgramStatusOwner>,
     process_exists: &dyn Fn(u64) -> Result<bool, String>,
 ) -> RexProjection {
-    let mut projection = project_observation(observation);
+    project_observation_with_execution_for(observation, None, execution, process_exists)
+}
+
+fn project_observation_with_execution_for(
+    observation: &RexObservation,
+    expected_kind: Option<crate::host_runtime::AgentKind>,
+    execution: &mut Option<RexProgramStatusOwner>,
+    process_exists: &dyn Fn(u64) -> Result<bool, String>,
+) -> RexProjection {
+    let mut projection = project_observation_for(observation, expected_kind);
     if projection.presence == AgentPresence::Online {
         if let Some(process) = observation.process.as_ref() {
             *execution =
@@ -349,7 +418,7 @@ fn project_observation_with_execution(
         Ok(false) => {
             projection.presence = AgentPresence::Offline;
             projection.activity = AgentActivity::Unknown;
-            projection.reason = format!("rex current Codex process exited pid={} name={}; refreshed block foreground pid={} name={}",
+            projection.reason = format!("rex current agent process exited pid={} name={}; refreshed block foreground pid={} name={}",
                 previous.pid, previous.name, process.pid.unwrap(), process.name.as_deref().unwrap());
         }
         Ok(true) => {}
@@ -360,7 +429,15 @@ fn project_observation_with_execution(
     projection
 }
 
+#[cfg(test)]
 fn project_observation(observation: &RexObservation) -> RexProjection {
+    project_observation_for(observation, None)
+}
+
+fn project_observation_for(
+    observation: &RexObservation,
+    expected_kind: Option<crate::host_runtime::AgentKind>,
+) -> RexProjection {
     let missing_sources = [PROCESS_SOURCE, PROGRAM_STATUS_SOURCE]
         .into_iter()
         .filter(|source| !observation.sources.iter().any(|present| present == source))
@@ -377,14 +454,14 @@ fn project_observation(observation: &RexObservation) -> RexProjection {
             ),
         };
     }
-    let Some((foreground_pid, foreground_name)) =
+    let Some((process, foreground_pid, foreground_name)) =
         observation.process.as_ref().and_then(|process| {
             let pid = process.pid.filter(|pid| *pid > 0)?;
             let name = process
                 .name
                 .as_deref()
                 .filter(|name| !name.trim().is_empty())?;
-            Some((pid, name))
+            Some((process, pid, name))
         })
     else {
         return RexProjection {
@@ -399,10 +476,15 @@ fn project_observation(observation: &RexObservation) -> RexProjection {
         .program_status
         .iter()
         .filter(|record| {
-            record.app.as_deref() == Some("codex")
-                && record.owner.as_ref().is_some_and(|owner| {
-                    owner.pid == foreground_pid && owner.name == foreground_name
-                })
+            let app_matches = match expected_kind {
+                Some(kind) => record.app.as_deref() == Some(kind.rex_program_app()),
+                None => matches!(record.app.as_deref(), Some("codex" | "antigravity")),
+            };
+            app_matches
+                && record
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| process.matches_owner(owner))
         })
         .collect();
     if current.is_empty() {
@@ -526,6 +608,7 @@ fn current_target(state: &super::state::State, worker_id: &str) -> Option<Monito
     Some(MonitorTarget {
         endpoint,
         agent_session_id,
+        agent_kind: None,
     })
 }
 
@@ -560,7 +643,9 @@ fn submit_activity_with_execution(
     };
     let observed_ms = now_ms();
     let mut state = server.state.lock().unwrap();
-    if current_target(&state, worker_id).as_ref() != Some(target) {
+    if !current_target(&state, worker_id)
+        .is_some_and(|current| current.matches_state_target(target))
+    {
         return false;
     }
     let presence = AgentPresenceRecord {

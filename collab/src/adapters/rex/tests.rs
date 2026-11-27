@@ -121,6 +121,10 @@ impl TestEnv {
         Self::with_owner(scenario, 4242, "codex")
     }
 
+    fn online_agy(scenario: &str) -> Self {
+        Self::with_owner(scenario, 4242, "agy")
+    }
+
     fn exited_agent(scenario: &str) -> Self {
         Self::with_owner(scenario, 4243, "zsh")
     }
@@ -134,6 +138,8 @@ impl Drop for TestEnv {
         std::env::remove_var("REXPRIMITIVE_SCENARIO");
         std::env::remove_var("COLLAB_TEST_REX_OWNER_PID");
         std::env::remove_var("COLLAB_TEST_REX_OWNER_NAME");
+        std::env::remove_var("COLLAB_TEST_REX_OWNER_ARGV0");
+        std::env::remove_var("COLLAB_TEST_REX_OWNER_APP");
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -250,7 +256,7 @@ async fn notify_refuses_input_when_the_rex_block_has_no_current_agent() {
     assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
     assert_eq!(error.stage, RexInputStage::BeforeWrite);
     assert!(error.detail.contains("RECIPIENT_NOT_ONLINE"));
-    assert!(error.detail.contains("foreground is not Codex"));
+    assert!(error.detail.contains("foreground is not a supported agent"));
     let calls = env.calls();
     assert!(
         calls.iter().any(|call| {
@@ -275,8 +281,18 @@ async fn notify_deadline_during_settle_skips_enter() {
     let _guard = fixture_guard().await;
     let env = TestEnv::new("normal");
     let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
-    let owner = RexProgramStatusOwner { pid: 4242, name: "codex".into() };
-    let error = send_enter_until(&endpoint(), &owner, deadline).await.unwrap_err();
+    let owner = RexProgramStatusOwner {
+        pid: 4242,
+        name: "codex".into(),
+    };
+    let error = send_enter_until(
+        &endpoint(),
+        crate::host_runtime::AgentKind::Codex,
+        &owner,
+        deadline,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error.class, NotificationDeliveryClass::Unknown);
     assert!(env.calls().is_empty());
 }
@@ -289,11 +305,18 @@ async fn notify_skips_enter_when_the_rex_foreground_changes_after_write() {
         .await
         .unwrap_err();
     assert_eq!(error.class, NotificationDeliveryClass::Unknown);
-    assert_eq!(error.stage, RexInputStage::WriteQueued { bytes_written: 11 });
+    assert_eq!(
+        error.stage,
+        RexInputStage::WriteQueued { bytes_written: 11 }
+    );
     assert!(error.detail.contains("foreground Codex changed"));
-    assert_eq!(env.calls().iter().filter(|call| {
-        method(call) == "com.superlogical.terminal.write"
-    }).count(), 1);
+    assert_eq!(
+        env.calls()
+            .iter()
+            .filter(|call| { method(call) == "com.superlogical.terminal.write" })
+            .count(),
+        1
+    );
     assert!(!env.calls().iter().any(|call| method(call) == "send-key"));
 }
 
@@ -1229,6 +1252,49 @@ impl Drop for WhoamiEnv {
     fn drop(&mut self) {
         set_test_cli(None);
         let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[tokio::test]
+async fn notify_supports_agy_and_auto_updated_binary_via_argv0_while_rejecting_wrong_agent_kind() {
+    let _guard = fixture_guard().await;
+    {
+        let _env = TestEnv::online_agy("normal");
+        let receipt = notify_for_agent(
+            &selected_transport(),
+            "hello agy",
+            Some("immediate"),
+            Some(crate::host_runtime::AgentKind::Antigravity),
+        )
+        .await
+        .expect("live agy Rex foreground must accept notification");
+        let value: Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(value["enter_accepted"], true);
+    }
+    {
+        let _env = TestEnv::with_owner("normal", 4242, "agy.1795769233322723000.old");
+        std::env::set_var("COLLAB_TEST_REX_OWNER_ARGV0", "agy");
+        let receipt = notify_for_agent(
+            &selected_transport(),
+            "hello updated agy",
+            Some("immediate"),
+            Some(crate::host_runtime::AgentKind::Antigravity),
+        )
+        .await
+        .expect("auto-updated agy binary must match via argv0/base");
+        let value: Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(value["enter_accepted"], true);
+
+        let mismatch = notify_for_agent(
+            &selected_transport(),
+            "wrong target",
+            Some("immediate"),
+            Some(crate::host_runtime::AgentKind::Codex),
+        )
+        .await
+        .expect_err("expected Codex must refuse an Antigravity foreground");
+        assert_eq!(mismatch.class, NotificationDeliveryClass::KnownNotDelivered);
+        assert!(mismatch.detail.contains("RECIPIENT_NOT_ONLINE"));
     }
 }
 

@@ -177,8 +177,36 @@ pub struct RexWriteReceipt {
 pub struct RexProcessObservation {
     pub pid: Option<u64>,
     pub name: Option<String>,
+    #[serde(default)]
+    pub argv0: Option<String>,
     pub path: Option<String>,
     pub cwd: Option<String>,
+}
+
+impl RexProcessObservation {
+    pub(crate) fn matches_owner(&self, owner: &RexProgramStatusOwner) -> bool {
+        if self.pid != Some(owner.pid) {
+            return false;
+        }
+        let owner_name = owner.name.trim();
+        let owner_base = crate::host_runtime::strip_old_update_suffix(owner_name);
+        self.name.as_deref().map(str::trim).is_some_and(|name| {
+            name == owner_name || crate::host_runtime::strip_old_update_suffix(name) == owner_base
+        }) || self
+            .argv0
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|argv0| argv0 == owner_name || argv0 == owner_base)
+    }
+
+    pub(crate) fn agent_kind(&self) -> Option<crate::host_runtime::AgentKind> {
+        let chain = [self.name.as_deref(), self.argv0.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        crate::host_runtime::classify_nearest_agent(chain)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,9 +246,12 @@ pub struct RexObservation {
 }
 
 impl RexObservation {
-    /// Extract the one foreground Codex owner only when all current terminal
+    /// Extract the one foreground TUI agent owner only when all current terminal
     /// sources are complete and the program-status owner matches foreground.
-    pub(crate) fn current_foreground_codex_owner(&self) -> Result<RexProgramStatusOwner, String> {
+    pub(crate) fn current_foreground_agent_owner(
+        &self,
+        expected: Option<crate::host_runtime::AgentKind>,
+    ) -> Result<(crate::host_runtime::AgentKind, RexProgramStatusOwner), String> {
         if self.gap_possible || !self.source_errors.is_empty() {
             return Err(format!(
                 "REX_EXECUTION_UNVERIFIED: current Rex observation has source gaps: {}",
@@ -251,24 +282,39 @@ impl RexObservation {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .ok_or_else(|| "REX_EXECUTION_UNVERIFIED: Rex foreground name is missing".to_owned())?;
-        if !crate::host_runtime::is_codex_command(name) {
-            return Err(format!(
-                "REX_EXECUTION_UNVERIFIED: Rex foreground is not Codex ({name})"
-            ));
-        }
+        let detected = process.agent_kind();
+        let kind = match (expected, detected) {
+            (Some(want), Some(got)) if want == got => want,
+            (Some(want), _) => {
+                return Err(format!(
+                    "REX_EXECUTION_UNVERIFIED: Rex foreground is not {} ({name})",
+                    want.display_name()
+                ));
+            }
+            (None, Some(got)) => got,
+            (None, None) => {
+                return Err(format!(
+                    "REX_EXECUTION_UNVERIFIED: Rex foreground is not a supported agent ({name})"
+                ));
+            }
+        };
+        let _ = pid;
         self.program_status
             .iter()
             .find(|record| {
-                record.app.as_deref() == Some("codex")
+                record.app.as_deref() == Some(kind.rex_program_app())
                     && record
                         .owner
                         .as_ref()
-                        .is_some_and(|owner| owner.pid == pid && owner.name == name)
+                        .is_some_and(|owner| process.matches_owner(owner))
             })
             .and_then(|record| record.owner.clone())
+            .map(|owner| (kind, owner))
             .ok_or_else(|| {
-                "REX_EXECUTION_UNVERIFIED: Codex program_status owner does not match the Rex foreground"
-                    .to_owned()
+                format!(
+                    "REX_EXECUTION_UNVERIFIED: {} program_status owner does not match the Rex foreground",
+                    kind.display_name()
+                )
             })
     }
 }
@@ -1189,6 +1235,7 @@ async fn write_text_until(
 
 async fn send_enter_until(
     endpoint: &RexEndpoint,
+    expected_kind: crate::host_runtime::AgentKind,
     expected_owner: &RexProgramStatusOwner,
     deadline: Instant,
 ) -> Result<(), RexError> {
@@ -1203,13 +1250,18 @@ async fn send_enter_until(
     }
     let owner = observe_current_until(endpoint, deadline)
         .await
-        .map_err(|error| RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string()))?
-        .current_foreground_codex_owner();
-    if owner.as_ref().ok() != Some(expected_owner) {
+        .map_err(|error| {
+            RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string())
+        })?
+        .current_foreground_agent_owner(Some(expected_kind));
+    if owner.as_ref().ok().map(|(_, owner)| owner) != Some(expected_owner) {
         return Err(RexError::unknown(
             "send_enter",
             RexInputStage::BeforeWrite,
-            "foreground Codex changed after text was queued",
+            format!(
+                "foreground {} changed after text was queued",
+                expected_kind.display_name()
+            ),
         ));
     }
     let call = run_cli(
@@ -1355,6 +1407,10 @@ fn extract_process(value: &Value) -> RexProcessObservation {
             .and_then(|item| item.get("name"))
             .and_then(Value::as_str)
             .map(str::to_owned),
+        argv0: foreground
+            .and_then(|item| item.get("argv0"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         path: foreground
             .and_then(|item| item.get("path"))
             .and_then(Value::as_str)
@@ -1410,6 +1466,15 @@ pub async fn notify(
     text: &str,
     mode: Option<&str>,
 ) -> Result<String, RexError> {
+    notify_for_agent(transport, text, mode, None).await
+}
+
+pub(crate) async fn notify_for_agent(
+    transport: &SelectedTransport,
+    text: &str,
+    mode: Option<&str>,
+    expected_kind: Option<crate::host_runtime::AgentKind>,
+) -> Result<String, RexError> {
     let deadline = Instant::now() + default_timeout()?;
     let allowed = [
         None,
@@ -1436,18 +1501,20 @@ pub async fn notify(
         )
     })?;
     let observation = observe_current_until(endpoint, deadline).await?;
-    let owner = observation.current_foreground_codex_owner().map_err(|error| {
-        RexError::known_not_delivered(
-            "notify",
-            RexInputStage::BeforeWrite,
-            format!("RECIPIENT_NOT_ONLINE: {error}"),
-        )
-    })?;
+    let (kind, owner) = observation
+        .current_foreground_agent_owner(expected_kind)
+        .map_err(|error| {
+            RexError::known_not_delivered(
+                "notify",
+                RexInputStage::BeforeWrite,
+                format!("RECIPIENT_NOT_ONLINE: {error}"),
+            )
+        })?;
     let receipt = write_text_until(endpoint, text, deadline).await?;
     let text_stage = RexInputStage::WriteQueued {
         bytes_written: receipt.bytes_written,
     };
-    if let Err(error) = send_enter_until(endpoint, &owner, deadline).await {
+    if let Err(error) = send_enter_until(endpoint, kind, &owner, deadline).await {
         return Err(RexError {
             operation: "send_key",
             class: error.class,

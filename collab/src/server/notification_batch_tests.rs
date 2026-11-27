@@ -1758,10 +1758,9 @@ fn rex_current_owner_busy_publication_queues_the_same_message() {
     assert!(response.ok, "{response:?}");
     assert_eq!(response.data["durable"], true);
     assert_eq!(response.data["notification"], "queued");
-    assert!(response.data["notification_error"]
-        .as_str()
-        .unwrap()
-        .contains("REX_BINDING_PUBLICATION_BUSY"));
+    for key in ["notification_error", "failure", "repair_required", "escalation"] {
+        assert!(response.data.get(key).is_none(), "{response:?}");
+    }
     assert_eq!(response.data["consumed"], false);
     let id = response.data["msg_id"].as_str().unwrap();
     {
@@ -1883,7 +1882,7 @@ fn timer_resumes_only_the_current_board_invitation_after_publication_busy() {
     }]);
     let gate = server.register_gate.lock().unwrap();
     let deferred = attempt_notification_detailed_with_at(&server, invitation, &subscription, now);
-    assert!(matches!(deferred, NotificationAttempt::Deferred(_)));
+    assert!(matches!(deferred, NotificationAttempt::Deferred));
     assert!(sink_calls.lock().unwrap().is_empty());
     drop(gate);
 
@@ -4092,7 +4091,7 @@ fn four_notice_batch_uses_the_original_window_start_after_capping() {
             &subscription_id,
             window_start + 120_000,
         ),
-        NotificationAttempt::Deferred(None)
+        NotificationAttempt::Deferred
     ));
     let text = delivered.lock().unwrap().join("\n");
     assert!(!text.contains("backlog-0"));

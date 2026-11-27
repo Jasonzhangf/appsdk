@@ -945,7 +945,6 @@ use validation::*;
 mod helpers;
 use helpers::*;
 
-#[allow(dead_code)]
 pub fn run_cli(args: Vec<String>) -> CommResult<()> {
     if args.len() == 1 && args[0] == "capabilities" {
         println!("{}", serde_json::to_string_pretty(&capabilities()).unwrap());

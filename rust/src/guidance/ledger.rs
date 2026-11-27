@@ -98,29 +98,14 @@ pub(super) fn atomic_write(path: &Path, value: &Value) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|error| write_failed("create_parent", error));
     }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| fail("GUIDANCE_CLOCK_FAILED", "repair the host clock"))
-        .as_nanos();
-    let staging = path.with_extension(format!("staging.{}.{}", std::process::id(), nonce));
+    let staging = crate::primitives::staging_path_for(path)
+        .unwrap_or_else(|_| fail("GUIDANCE_CLOCK_FAILED", "repair the host clock"));
     let bytes = serde_json::to_string_pretty(value).unwrap() + "\n";
-    {
-        let mut file =
-            File::create(&staging).unwrap_or_else(|error| write_failed("create_staging", error));
-        file.write_all(bytes.as_bytes())
-            .unwrap_or_else(|error| write_failed("write_staging", error));
-        file.sync_all()
-            .unwrap_or_else(|error| write_failed("sync_staging", error));
-    }
+    crate::primitives::write_and_sync_file(&staging, bytes.as_bytes())
+        .unwrap_or_else(|error| write_failed("write_staging", error));
     fs::rename(staging, path).unwrap_or_else(|error| write_failed("replace_target", error));
-    #[cfg(not(windows))]
-    if let Some(parent) = path.parent() {
-        let directory =
-            File::open(parent).unwrap_or_else(|error| write_failed("open_parent_for_sync", error));
-        directory
-            .sync_all()
-            .unwrap_or_else(|error| write_failed("sync_parent", error));
-    }
+    crate::primitives::sync_parent_dir(path)
+        .unwrap_or_else(|error| write_failed("sync_parent", error));
 }
 
 pub(super) fn append(path: &Path, value: &Value) {

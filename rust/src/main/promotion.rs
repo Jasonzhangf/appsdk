@@ -544,7 +544,13 @@ pub(super) fn publish_active_internal(
     println!("active {} {}", module_id, version);
 }
 
+#[cfg(test)]
+pub(super) static SDK_RESOURCES_HASH_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub(super) fn assert_sdk_resources(root: &Path, required: bool, allow_reset_resource_gaps: bool) {
+    #[cfg(test)]
+    SDK_RESOURCES_HASH_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     assert_sdk_resources_inner(root, required, allow_reset_resource_gaps, true);
 }
 
@@ -835,6 +841,25 @@ pub(super) fn verify_internal(
     check_module_publications: bool,
     emit_result: bool,
 ) {
+    let mut cache = GateVerificationCache::default();
+    verify_internal_cached(
+        root,
+        admission,
+        require_project_artifact,
+        check_module_publications,
+        emit_result,
+        &mut cache,
+    );
+}
+
+pub(super) fn verify_internal_cached(
+    root: &Path,
+    admission: bool,
+    require_project_artifact: bool,
+    check_module_publications: bool,
+    emit_result: bool,
+    cache: &mut GateVerificationCache,
+) {
     let invocation =
         Arc::new(VerifyInvocation::new(root.to_path_buf()).unwrap_or_else(|error| fail(error)));
     let root_path = invocation.root().to_path_buf();
@@ -845,6 +870,9 @@ pub(super) fn verify_internal(
         .get("project")
         .cloned()
         .unwrap_or_else(|| fail("VERIFY_FOUNDATION_PROJECT_ENVELOPE_MISSING"));
+    if cache.project.is_none() {
+        cache.project = Some(project.clone());
+    }
     let mut delivery_verified = false;
     let mut baseline_status = if reset_epoch { "required" } else { "current" };
     let test_governance = if emit_result {
@@ -884,17 +912,16 @@ pub(super) fn verify_internal(
         fail(format!("UNKNOWN_PROJECT_STAGE:{}", stage));
     }
     assert_sdk_lock(root, &project);
-    assert_sdk_resources_semantics(
-        root,
-        matches!(
-            stage,
-            "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
-        ),
-        reset_epoch && !admission,
+    let sdk_resources_required = matches!(
+        stage,
+        "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
     );
+    let allow_reset_gaps = reset_epoch && !admission;
+    if !cache.sdk_resources_covers(sdk_resources_required, allow_reset_gaps) {
+        assert_sdk_resources_semantics(root, sdk_resources_required, allow_reset_gaps);
+    }
     assert_goal_contract_if_present(root);
     let artifact_file = generated_root(root, &project).join("project.compiled.json");
-    let stage = required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT");
     if require_project_artifact
         && matches!(
             stage,
@@ -915,26 +942,35 @@ pub(super) fn verify_internal(
     }
     let development_gap = reset_epoch && !admission;
     let verify_publication_graph = check_module_publications && !development_gap;
+    // Single pass over modules: partition live (`architecture_stable`) vs
+    // historical (`frozen`/`retired`), reading each module artifact at most once.
     for module in project
         .get("modules")
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"))
     {
-        if verify_publication_graph && module.get("stage").and_then(Value::as_str) == Some("frozen")
-        {
-            let id = module
-                .get("module_id")
-                .and_then(Value::as_str)
-                .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"));
-            let freeze_name = freeze_record_name(id);
-            let version = read_record(root, &freeze_name);
-            let active_version = record_str(&version, "/active_version", &freeze_name);
-            let active_root = contract_root(root, &project, "/governance/active_root");
-            let active_path = active_root.join(id).join(active_version);
-            if !active_path.is_dir() {
-                fail("ACTIVE_ARTIFACT_MISSING");
-            }
-            {
+        let module_stage = module.get("stage").and_then(Value::as_str);
+        if development_gap && module_stage == Some("frozen") {
+            delivery_verified = false;
+            baseline_status = "required";
+        }
+        if !verify_publication_graph {
+            continue;
+        }
+        match module_stage {
+            Some("frozen") => {
+                let id = module
+                    .get("module_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"));
+                let freeze_name = freeze_record_name(id);
+                let version = read_record(root, &freeze_name);
+                let active_version = record_str(&version, "/active_version", &freeze_name);
+                let active_root = contract_root(root, &project, "/governance/active_root");
+                let active_path = active_root.join(id).join(active_version);
+                if !active_path.is_dir() {
+                    fail("ACTIVE_ARTIFACT_MISSING");
+                }
                 assert_no_symlink_components(root, &active_path, "active_verified");
                 let active_index = active_root.join(id).join("current.json");
                 if fs::symlink_metadata(&active_index)
@@ -970,7 +1006,7 @@ pub(super) fn verify_internal(
                 )
                 .unwrap_or_else(|_| fail("INVALID_ACTIVE_ARTIFACT"));
                 module_artifact_matches_project(module, &active_value);
-                let generated_module = read_module_artifact(root, &project, id);
+                let generated_module = cache.module_artifact(root, &project, id);
                 module_artifact_matches_project(module, &generated_module);
                 let protected_archive = contract_root(root, &project, "/governance/protected_root")
                     .join("history")
@@ -1010,68 +1046,53 @@ pub(super) fn verify_internal(
                         fail("ACTIVE_LIBRARY_HASH_MISMATCH");
                     }
                 }
+                assert_historical_frozen_record_graph(root, id, &generated_module);
             }
-        }
-        if development_gap && module.get("stage").and_then(Value::as_str) == Some("frozen") {
-            delivery_verified = false;
-            baseline_status = "required";
-        }
-    }
-    if verify_publication_graph
-        && project
-            .get("modules")
-            .and_then(Value::as_array)
-            .map(|modules| {
-                modules.iter().any(|module| {
-                    matches!(
-                        module.get("stage").and_then(Value::as_str),
-                        Some("architecture_stable" | "frozen" | "retired")
-                    )
-                })
-            })
-            .unwrap_or(false)
-    {
-        for module in project
-            .get("modules")
-            .and_then(Value::as_array)
-            .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"))
-        {
-            if matches!(
-                module.get("stage").and_then(Value::as_str),
-                Some("architecture_stable" | "frozen" | "retired")
-            ) {
+            Some("retired") => {
                 let module_id = module
                     .get("module_id")
                     .and_then(Value::as_str)
                     .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"));
-                let module_artifact = read_module_artifact(root, &project, module_id);
+                let module_artifact = cache.module_artifact(root, &project, module_id);
                 module_artifact_matches_project(module, &module_artifact);
-                if module.get("stage").and_then(Value::as_str) == Some("architecture_stable") {
-                    let records = root.join(".appsdk/records");
-                    let effectiveness_exists = records
-                        .join(module_record_name("effectiveness-record", module_id))
-                        .is_file();
-                    let merge_exists = records
-                        .join(module_record_name("merge-record", module_id))
-                        .is_file();
-                    let promotion_exists = records
-                        .join(module_record_name("promotion-record", module_id))
-                        .is_file();
-                    if promotion_exists {
-                        assert_record_graph(root, Some(module_id), &module_artifact, false);
-                    } else {
-                        assert_fix_architecture_gate(root, module_id, &module_artifact);
-                        if merge_exists {
-                            assert_fix_effectiveness_gate(root, module_id);
-                            assert_fix_merge_gate(root, module_id);
-                        } else if effectiveness_exists {
-                            assert_fix_effectiveness_gate(root, module_id);
-                        }
-                    }
+                assert_historical_frozen_record_graph(root, module_id, &module_artifact);
+            }
+            Some("architecture_stable") => {
+                let module_id = module
+                    .get("module_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"));
+                let module_artifact = cache.module_artifact(root, &project, module_id);
+                module_artifact_matches_project(module, &module_artifact);
+                let records = root.join(".appsdk/records");
+                let effectiveness_exists = records
+                    .join(module_record_name("effectiveness-record", module_id))
+                    .is_file();
+                let merge_exists = records
+                    .join(module_record_name("merge-record", module_id))
+                    .is_file();
+                let promotion_exists = records
+                    .join(module_record_name("promotion-record", module_id))
+                    .is_file();
+                if promotion_exists {
+                    assert_record_graph_cached(
+                        root,
+                        Some(module_id),
+                        &module_artifact,
+                        false,
+                        cache,
+                    );
                 } else {
-                    assert_historical_frozen_record_graph(root, module_id, &module_artifact);
+                    assert_fix_architecture_gate_cached(root, module_id, &module_artifact, cache);
+                    if merge_exists {
+                        assert_fix_effectiveness_gate(root, module_id);
+                        assert_fix_merge_gate(root, module_id);
+                    } else if effectiveness_exists {
+                        assert_fix_effectiveness_gate(root, module_id);
+                    }
                 }
             }
+            _ => {}
         }
     }
     if emit_result {

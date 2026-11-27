@@ -40,6 +40,74 @@ accepted -> rework -> working
 * -> cancelled
 ```
 
+## Task execution operations
+
+Jenny alone schedules Collab tickets, assigns or reassigns ticket owners, and
+decides scheduling dependencies. She uses the Codex Orchestrator path for
+applicable exploration, planning, and review. Architect, executor, reviewer, QA,
+and other peers do not dispatch or schedule other peers.
+
+Each assigned ticket owner runs owner-local Codex orchestration for its own
+exploration, planning, implementation, independent review, integration, and
+cleanup, keeping durable evidence in the ticket and board record. Peers do not
+send routine progress or completion reports to peers or Jenny. Preserve real
+blocker escalation and direct peer coordination for shared-resource conflicts.
+
+Use the existing lifecycle sections below for the applicable command, evidence,
+liveness, and recovery rules, and see
+[Task execution contract](#task-execution-contract) for the single-event
+contract boundary:
+
+- Command selection, delivery/review/integration milestones, and close evidence:
+  [Task close admission (hard gate)](#task-close-admission-hard-gate) and
+  [Same-task transfer and late artifacts](#same-task-transfer-and-late-artifacts)
+- Workspace carrier and cleanup rules:
+  [Git worktree and LayerFS](#git-worktree-and-layerfs)
+- Wakes, liveness, blocker escalation, and shared-resource coordination:
+  [Task liveness and escalation](#task-liveness-and-escalation)
+- Identity, stale binding, and context repair:
+  [Lifecycle recovery](#lifecycle-recovery)
+
+## Task execution contract
+
+This section defines the documentation and evidence contract for one task event
+on one ticket; runtime code correspondence remains a separate verification
+claim. Graph owner is `collab::runtime`. The unit is one task event for one
+ticket. Its inputs are the current ticket, the actor and actual authority, the
+event, and the evidence or dependency it carries. The ticket has one owner.
+Jenny alone decides task assignment, reassignment, and scheduling dependencies.
+
+```mermaid
+flowchart TD
+    A([Current ticket event and evidence]) --> B{Event, actor and context valid?}
+    B -->|Rejected or required facts absent| F[Record explicit reason and retain responsibility]
+    B -->|Valid| C[Apply the applicable documented step]
+    C -->|Step verified or final close verified| S[Record step evidence or verified close]
+    C -->|Execution failed, rework or dependency pending| F
+    C -->|Authorized cancellation| K[Record cancellation and retain outstanding cleanup]
+    S --> Z([One task-event result])
+    F --> Z
+    K --> Z
+```
+
+- **Apply the step.** Route scheduling to Jenny. Use her Codex Orchestrator path
+  for applicable exploration, planning, and review. Route execution, evidence,
+  and direct shared-resource coordination to the assigned ticket owner under the
+  documented contract. Read current identity or ticket evidence only when the
+  step needs it.
+- **Success.** A verified intermediate step retains the open ticket and its next
+  action. Verified final close requires the applicable review, integration, and
+  cleanup evidence described by this lifecycle reference. A delivered result or
+  review verdict establishes its own milestone.
+- **Failure or wait.** Preserve the original error or missing evidence, the
+  current durable fact, the remaining owner, and the observable recovery
+  condition. An unresolved event reaches the result boundary with an open
+  obligation. A later authorized recovery or rework event enters at `A`.
+- **Cancellation.** Record the authorized cancellation and outstanding resource
+  obligations. A later verified cleanup event can settle those obligations. All
+  paths reach `Z` with one result for the current event, including when the
+  ticket remains open.
+
 ## Task close admission (hard gate)
 
 A task, board issue, or bug may move to `closed` only through the normal
@@ -211,23 +279,27 @@ worktree, records the cleanup receipt, and closes normally.
 ## Task liveness and escalation
 
 An assigned task remains live until its actual cleanup receipt and `closed`
-state exist. The owner acts on an explicit dispatch, a bounded direct-message
-lease, a supported timer/wake, or a real external event; it does not poll on a
-schedule. On a relevant wake, refresh missing or stale facts for the affected
-task and take its next actionable step; do not query every surface. Continue execution when
-work is available, resolve a blocker when it can, and record/escalate when it
-cannot. ACKing a wake is not progress and does not satisfy liveness.
+state exist. The owner acts on an explicit Jenny dispatch, a bounded
+direct-message lease, a supported timer/wake, or a real external event; it does
+not poll on a schedule. On a relevant wake, refresh missing or stale facts for
+the affected task and take its next actionable step; do not query every surface.
+Continue execution when work is available, resolve a blocker when it can, and
+record/escalate when it cannot. ACKing a wake is not progress and does not
+satisfy liveness; peers do not send routine progress or completion reports.
 
 Route escalation by role:
 
-- An ordinary peer sends missing facts to their owner, design questions to the
-  designer and scope/resource blockers to the current Collab master.
+- An ordinary peer handles technical and design choices through owner-local
+  Codex orchestration, coordinates direct shared-resource conflicts with the
+  resource owner, and sends missing facts or scope, assignment, and unresolvable
+  blockers to Jenny (the current Collab master).
   Send original failure evidence, attempted remedies and the decision needed;
   do not delay help until root cause or a solution is proven. Apply the main
   Skill's Registered patrol duties for master verification. Independent peers may
   temporarily decline a master collaboration invite to protect their own task.
-  If no current master exists, report to the collaborator that initiated the
-  task. Legacy managed records grant no new execution authority.
+  If no current master exists, record the blocker in the ticket and escalate
+  only when exclusive facts or uncovered authority require human input.
+  Legacy managed records grant no new execution authority.
 - Master authority follows the [current identity boundary](migration-daemon.md#master-and-deprecated-interfaces).
   Goal routing and patrol responsibilities follow the [main Skill](../SKILL.md#task-routing-and-role-responsibilities).
   An unanswered internal request does not become a human approval gate.

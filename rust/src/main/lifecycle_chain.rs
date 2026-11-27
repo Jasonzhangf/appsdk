@@ -1005,3 +1005,51 @@ pub(super) fn lifecycle_chain_validate_evidence(
     }
     evidence
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn lifecycle_chain_record_is_pass_enforces_status_agreement() {
+        assert!(lifecycle_chain_record_is_pass(
+            "review-record",
+            &json!({"verdict": "pass"})
+        ));
+        assert!(!lifecycle_chain_record_is_pass(
+            "review-record",
+            &json!({"verdict": "pass", "result": "fail"})
+        ));
+        assert!(!lifecycle_chain_record_is_pass(
+            "review-record",
+            &json!({"verdict": 123})
+        ));
+        assert!(lifecycle_chain_record_is_pass(
+            "promotion-record",
+            &json!({"required_gate_results": [{"gate_id": "g1", "result": "pass"}]})
+        ));
+        assert!(!lifecycle_chain_record_is_pass(
+            "promotion-record",
+            &json!({"required_gate_results": [{"gate_id": "g1", "result": "fail"}]})
+        ));
+        assert!(lifecycle_chain_record_is_pass(
+            "effectiveness-record",
+            &json!({"result": "pass"})
+        ));
+        assert!(!lifecycle_chain_record_is_pass(
+            "effectiveness-record",
+            &json!({"result": "fail"})
+        ));
+    }
+
+    #[test]
+    fn lifecycle_chain_attempt_identity_is_deterministic_and_sensitive_to_inputs() {
+        let a = lifecycle_chain_attempt_identity("mod-a", "review-record", "sha256:abc");
+        let b = lifecycle_chain_attempt_identity("mod-a", "review-record", "sha256:abc");
+        let c = lifecycle_chain_attempt_identity("mod-a", "review-record", "sha256:def");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(a.starts_with("lifecycle-attempt-"));
+    }
+}

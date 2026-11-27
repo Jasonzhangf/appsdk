@@ -64,7 +64,57 @@ installed and loaded-runtime evidence separately; do not require an MCP tool
 call or ask the user to find an assumed reconnect control.
 Detailed maintenance boundaries live in [`collab/references/migration-daemon.md`](../collab/references/migration-daemon.md); ordinary identity migration remains internal to context.
 
-## 3. Control-plane migration vs. authorized reset
+## 3. AppSDK version migration runbook (legacy `0.1.x` -> `0.1.0015`)
+
+All legacy AppSDK consumers (`0.1.5`–`0.1.0014`) must migrate to the current
+baseline (`0.1.0015`). Never guess which command to run. Inspect the actual
+project state first, then execute the single matching row in the matrix below.
+
+### Step 3.1 Read-only state inspection (run before any mutation)
+
+```bash
+cd /abs/path/project
+appsdk version
+git branch --show-current
+git status --short --branch
+test -f .appsdk/project.json && jq -r '{sdk_version: .sdk.version, stage: .lifecycle.stage}' .appsdk/project.json || echo "NO_PROJECT_JSON"
+test -f .appsdk/sdk.lock && cat .appsdk/sdk.lock || echo "NO_SDK_LOCK"
+test -f .appsdk/sdk-resources.json && jq -r '{schema_version, version}' .appsdk/sdk-resources.json || echo "NO_SDK_RESOURCES"
+appsdk verify . || true
+```
+
+### Step 3.2 Exact state-to-action decision matrix
+
+Important checkout boundary:
+- Ordinary `appsdk init .` (without `--fresh`) rejects linked `git worktree` checkouts with `INIT_REQUIRES_CANONICAL_PROJECT_MAIN_TREE:<path>`; it must run in the canonical project checkout.
+- Destructive reset `appsdk init "$PWD" --fresh --discard-legacy` must run in a clean non-`main`/`master` linked `git worktree`.
+
+| Observed state | Exact action (no guessing) | Preserved vs. replaced | Post-check |
+| --- | --- | --- | --- |
+| `.appsdk/project.json` has `.sdk.version == "0.1.0015"`, `.appsdk/sdk-resources.json` is valid, and only managed `docs`/`rules`/`skills` need refresh | From the canonical project checkout on a clean non-`main` branch, run `appsdk resources refresh .`, then `appsdk verify .`. Do NOT run `--fresh`. | Business source, `AGENTS.md`, `contracts/`, records, `active/`, `protected/` preserved; `.appsdk/docs/`, `.appsdk/rules/`, `.appsdk/skills/` refreshed | `appsdk verify .` exits 0 |
+| `.appsdk/project.json` has `.sdk.version == "0.1.0015"`, and `.appsdk/sdk-resources.json` or `.appsdk/contracts/` is missing/invalid | From the canonical project checkout, run `appsdk init .`, then `appsdk verify .`. Do NOT run `appsdk resources refresh` (it fails on missing/invalid `sdk-resources.json` and does not rebuild `contracts/`). | Business source, `AGENTS.md`, records, `active/`, `protected/` preserved; `.appsdk/contracts/`, `.appsdk/docs/`, `.appsdk/skills/`, `.appsdk/templates/`, and `.appsdk/sdk-resources.json` rebuilt | `appsdk verify .` exits 0 |
+| `.appsdk/project.json` has `.sdk.version == "0.1.0014"` and clean canonical maps | From the canonical project checkout on a clean non-`main` branch, run `appsdk pin-lock . --binary "$(command -v appsdk)"`, then `appsdk init .`, then `appsdk verify .`. If `pin-lock` rejects tampered/unreconciled maps, stop and preserve the exact error before deciding whether to reconcile or request authorized `--fresh --discard-legacy`. | Project contract, records, `active/`, `protected/` preserved; `sdk.lock` and managed resources upgraded to `0.1.0015` | `jq -r .sdk.version .appsdk/project.json` is `0.1.0015` and `appsdk verify .` exits 0 |
+| `.appsdk/project.json` has `.sdk.version` in `0.1.5`–`0.1.0013` (retired legacy baseline) or obsolete governance epoch | Obtain explicit user authorization naming the project and discard scope. Create a clean linked worktree from latest `origin/main` (`git worktree add -b codex/appsdk-migrate-<slug> <external-worktree-path> origin/main`), `cd` into it, and run: `appsdk init "$PWD" --fresh --discard-legacy` -> if Guidance is used: `appsdk guide init --task governance-reset --mode bootstrap --module <id>` & `appsdk guide compile` -> `appsdk verify .`. | Business source, runtime data, `active/`, `protected/`, `.agent-collab/` preserved; old `.appsdk/` records/pins/witnesses and declared `generated_root` rebuilt cleanly on `0.1.0015` | `appsdk verify .` exits 0; reset record has `mode: "fresh_init"` |
+| `.appsdk/project.json` is absent (first-time adoption or relocated root) | From the canonical project checkout, run `appsdk prepare`, review `.appsdk-prepare.json` with the user until `status: "confirmed"` and `questions: []`, then run `appsdk init .` and `appsdk verify .`. Never synthesize or self-confirm `.appsdk-prepare.json`. | Existing source preserved; new `.appsdk/` created | `appsdk verify .` exits 0 |
+| `.appsdk/project.json` is malformed or unreadable JSON | Stop. Do NOT delete `.appsdk/` or run `--fresh` blindly. Inspect the parse error, restore from Git history if accidental, or obtain explicit user authorization for fresh preparation. | Existing files untouched until owner decides | Exact parse error reported to owner |
+| Governance is on `0.1.0015` and only old rules/SHA checks/CI hooks need retirement | Follow [governance ablation](../appsdk-project-governance/references/bootstrap-migration.md#existing-project-governance-ablation). Never run `--fresh` or `collab reset` for rule-only ablation. | Control plane untouched; legacy hooks/rules removed | Affected project entrypoint and CI checks pass |
+
+### Step 3.3 Exact error-code recovery table
+
+| Error code | Exact meaning | Required recovery action |
+| --- | --- | --- |
+| `PREPARATION_NOT_CONFIRMED` | `.appsdk-prepare.json` is missing, still `draft`, or has unresolved `questions` | Present `.appsdk-prepare.json` to the user, fill confirmed fields, then rerun `appsdk init .` |
+| `INIT_REQUIRES_CANONICAL_PROJECT_MAIN_TREE:<path>` | Ordinary `appsdk init` was invoked inside a linked `git worktree` | Run ordinary `appsdk init .` in the canonical project checkout, or use authorized `appsdk init "$PWD" --fresh --discard-legacy` in the linked worktree |
+| `MAIN_WORKTREE_MUTATION_FORBIDDEN` | Lifecycle/mutation command attempted on `main` branch | Switch to a clean non-`main` branch (or linked worktree for `--fresh`) and rerun the exact command |
+| `GUIDANCE_MAIN_MUTATION_FORBIDDEN` | Guidance mutation attempted on `main` or `master` branch | Switch to a clean non-`main`/`master` owner worktree and rerun the exact command |
+| `PROJECT_SDK_VERSION_PIN_MISMATCH:<v>:required_binary=appsdk-<v>` / `SDK_VERSION_MIGRATION_REQUIRED:<v>:0.1.0015:run=appsdk pin-lock <project> --binary <path>` | Project `.sdk.version` or `.appsdk/sdk.lock` does not match installed `appsdk` (`0.1.0015`) | Follow Step 3.2 row for `0.1.0014` (`appsdk pin-lock . --binary "$(command -v appsdk)"`) or `0.1.5`–`0.1.0013` (authorized `appsdk init "$PWD" --fresh --discard-legacy`) |
+| `MISSING_SDK_LOCK` / `INVALID_SDK_LOCK` / `INVALID_SDK_LOCK_DIGEST` / `INVALID_SDK_BUNDLE_DIGEST` | `.appsdk/sdk.lock` is missing, malformed, or does not match the installed `0.1.0015` binary/bundle | Re-pin via `appsdk pin-lock . --binary "$(command -v appsdk)"` on a supported baseline, or run `appsdk init .` in the canonical checkout when `.sdk.version == "0.1.0015"` |
+| `MISSING_SDK_RESOURCES` / `INVALID_SDK_RESOURCES` / `SDK_REVIEW_TEMPLATE_MISMATCH` | Managed `.appsdk/` bundle files or `.appsdk/sdk-resources.json` are missing or out of sync with `0.1.0015` | Run `appsdk init .` in the canonical project checkout (use `appsdk resources refresh .` only when `sdk-resources.json` is already valid and only `docs`/`rules`/`skills` need refresh), then rerun `appsdk verify .` |
+| `LIFECYCLE_PRODUCER_MAP_TAMPERED:<map>` | Project `.appsdk/maps/<map>` diverges from canonical producer binding | Inspect `git diff .appsdk/maps/<map>`, restore or reconcile the declared map owner entry, never hand-forge hashes |
+| `GUIDANCE_SETUP_REQUIRED` | Project opted into Guidance but has no compiled manifest yet | Run `appsdk guide init --task guidance-setup --mode bootstrap`, get approval for `GuidanceSetupProposal`, then `appsdk guide compile` |
+| `REVIEW_ADMISSION_BLOCKED` | Required pre-review candidate/whitebox/deployment/blackbox evidence files are missing | Run the project's real adapters named in the `missing` JSON array; never hand-create records or retry unchanged state |
+
+## 4. Control-plane migration vs. authorized reset
 
 Choose the exact owner operation authorized by the user:
 

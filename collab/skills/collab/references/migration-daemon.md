@@ -4,7 +4,7 @@
 
 | Trigger | Operator, command and working directory | Completion evidence |
 | --- | --- | --- |
-| Current Collab session or transport changed, or the name has an explicit recovery request | Affected agent runs `collab context` from its actual project in the original host session. Read the [recovery table](stable-name-recovery.md#正常恢复) before supplying fields | Same stable name and applicable role, current verified binding, existing work and unread messages still owned by that name |
+| Current Collab session or transport changed, or the name has an explicit recovery request | Affected agent runs `collab context` from its actual project in the original host session. Read the [recovery decision table](stable-name-recovery.md#table-d-context-recovery-and-current-actions) before supplying fields | Same stable name and applicable role, current verified binding, existing work and unread messages still owned by that name |
 | Current Collab binary or daemon is behind the delivered version | Authorized installer operator uses the reviewed AppSDK checkout; the user activates from the actual project as described below | Installed CLI and running daemon both report the intended version; verify affected behavior separately |
 | Current AppSDK project needs its managed governance resources refreshed | Project owner runs `appsdk init` from an existing governed root with `.appsdk/project.json`, then `appsdk verify`. For first adoption or relocation use the confirmed `appsdk prepare` path in the AppSDK governance Skill | Existing project and business records stay in place; verify the affected entry in the consumer |
 | User explicitly requests discarding one project's Collab state | Current project master runs `collab reset --project` from that exact project after confirming the discard scope | Read the reset receipt for that project. Use the identity recovery path separately if the current session needs to bind |
@@ -17,7 +17,9 @@ storage, report the specific missing current record and preserve the source.
 
 ## Context uses the current identity map
 
-Use `collab context` in the current project. Identity selection reads only
+Use `collab context` in the current project only for registration or evidenced
+identity recovery. Ordinary task progress uses `collab task status '<id>'`, and
+identity inspection uses `collab context --query`. Identity selection reads only
 `identity-map.json`. Exact credentials and current grants serve that selected
 principal. Registration, name/session updates and communication bindings use
 the same map owner. Agents do not choose an archive, copy tokens or edit state.
@@ -31,7 +33,7 @@ stop an old process or change another session's identity.
 An explicit authorized recovery target is applied through the current map.
 Old bindings and names cannot veto that authorization. Missing map rows permit
 first registration with current facts; a corrupt map returns its real error.
-For current intent commands, see [stable-name recovery](stable-name-recovery.md).
+For all current-action branches, see the [recovery decision table](stable-name-recovery.md#table-d-context-recovery-and-current-actions).
 
 Context preserves name-owned open tasks, resources and unread messages while
 updating their carrier. Consumed messages and closed-task records stay intact.
@@ -41,7 +43,7 @@ Recovery does not change accepted goal ownership or require another human
 approval for authorized work. Reconcile finite goal/task schedules under
 [notifications](notifications.md#patrol-duties-and-finite-schedules). Standing
 project patrol and task-scoped cancellations remain owned by
-[board-idle patrol](board-idle-patrol.md), not by identity restoration.
+[board-idle patrol](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation), not by identity restoration.
 
 First registration requires the selected host's real current facts. Desktop
 uses its scoped bridge capability; it does not require tmux or borrow a managed

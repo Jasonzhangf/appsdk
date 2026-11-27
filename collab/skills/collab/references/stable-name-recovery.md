@@ -18,6 +18,27 @@ daemon 的消息、任务、有效授权和关系保存在各业务 owner 的当
 读取入口。已有业务存储缺少新当前状态时返回迁移错误，不会静默置空。
 agent 不手改身份表、复制 token、reset 项目或替换旧 worker 来绕过错误。
 
+## Table D: Context recovery and current actions
+
+This table is authoritative for choosing between task inspection, identity
+inspection and context recovery. Use the narrowest row that matches current
+evidence. A binding error or explicit registration/recovery request takes
+precedence over the ordinary progress rows.
+
+| IF observed condition | actor | THEN exact CLI action | parameter source | required result / next branch |
+| --- | --- | --- | --- | --- |
+| Current binding is valid and only task progress is needed | task owner | `collab task status '<id>'` | `<id>` from the current Board or task receipt | Read the current task state and execute its authorized next action. |
+| Only current identity inspection is needed | current agent | `collab context --query` | current project and host context | Read the current mapping and snapshot. Do not register or create a recovery effect. |
+| User requested registration/recovery, identity is unknown, or a binding error is evidenced | current agent | `collab context` | original session, actual project root and host-supplied facts | Follow the result below. |
+| `collab context` succeeds with `registered=true` | current agent | Read `role_brief`, `operations` and `next_actions` from the returned snapshot | successful context result | Execute the applicable current action. |
+| Successful context identifies an owned unfinished task with no next step | task owner, including a DSH task owner | `collab task status '<id>'` | task ID from the context snapshot or current Board | Read the current task state before choosing further work. |
+| Context returns missing facts | current agent | Query only the named fields and sources in the existing host-specific table below, then rerun `collab context` from the same session | `result.requires.fields` and `result.requires.sources` | Recovery remains incomplete until the same entry returns a successful current mapping. |
+| Context returns pending, queued or an error | current agent | Preserve the exact result and affected action | context receipt | Do not report identity recovery as completed. Continue independent work and follow the named recovery or owner path. |
+| DSH has unread messages | DSH message owner | Process native delivery; use `collab inbox` only for read-only inspection | current DSH gateway delivery | Never generate `collab recv` or `collab ack` instructions for DSH. |
+
+Do not add a recovery-only command. Do not run context recovery for a status
+read, wake or queue iteration while the current binding remains valid.
+
 ## 正常恢复
 
 在实际项目和实际宿主执行：

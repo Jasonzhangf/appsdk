@@ -101,7 +101,12 @@ fn context_workflow_template_default_base_version_for_master_and_peer() {
         let context_instruction = brief["communication_recovery"]["steps"][0]
             .as_str()
             .expect("identity recovery instruction");
-        assert!(context_instruction.contains("run `collab context` first in that session's shell"));
+        assert!(context_instruction.contains("If the binding is valid"));
+        assert!(context_instruction.contains("collab task status '<id>'"));
+        assert!(context_instruction.contains("collab context --query"));
+        assert!(
+            context_instruction.contains("only when the user requested registration or recovery")
+        );
         assert!(context_instruction.contains("recovery table for any exact missing facts"));
         assert!(context_instruction.contains("Do not use Computer Use, CUA, GUI"));
         assert!(context_instruction.contains("another agent session, or Rex layout commands"));

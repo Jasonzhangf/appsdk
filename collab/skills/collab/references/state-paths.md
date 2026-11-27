@@ -49,8 +49,11 @@ runtime profile 只在能从真实宿主观察时保存；缺少 profile 不阻�
 
 ## 当前身份入口
 
-运行 `collab context`。Desktop 可直接使用 CLI 自动发现已登记的当前 bridge，
-不要求先调用 MCP。需要补充事实时，只提供返回的 `required_fields`：
+仅需任务进展时运行 `collab task status '<id>'`；仅需查看当前身份时运行
+`collab context --query`；只有用户要求注册/恢复、身份未知或存在绑定错误时才运行
+`collab context`。完整分支以[恢复决策表](stable-name-recovery.md#table-d-context-recovery-and-current-actions)为准。
+Desktop 可直接使用 CLI 自动发现已登记的当前 bridge，不要求先调用 MCP。
+需要补充事实时，只提供返回的 `required_fields`：
 
 ```sh
 collab context --provide '{"session_id":"...","thread_id":"...","endpoint":"...","namespace":"..."}'

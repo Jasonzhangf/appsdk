@@ -1312,11 +1312,31 @@ When any board command fails, the CLI preserves the server's full typed
 response, including durable IDs and `repair_required`. Read the `collab
 response:` line before retrying: a durable outcome is not a retryable failure.
 
-### Continue the queue and recheck blockers
+### Table A: Busy slots and queued admission
+
+Apply the first matching row. A specific typed error takes precedence over the
+generic admission rows. `<id>` comes from the current Board or task receipt,
+`<revision>` comes from the same current task, and `<attempt>` comes from the
+successful claim receipt or current `Execute` phase.
+
+| IF observed condition | actor | THEN exact CLI action | parameter source | required result / next branch |
+|---|---|---|---|---|
+| Admission returned a durable task or phase ID, but execution is queued | Task owner or peer | `collab task status '<id>'` | `<id>` from the admission receipt; queued phase from the status receipt | Preserve the admitted record. Do not republish, duplicate the task, or call start without a claimed attempt. Apply the first later row that matches the current facts. |
+| Another task is executing in the current slot | Current caller | `collab task status '<running-id>'` | `<running-id>` from `collab board show` or the current slot receipt | Continue the running task's authorized next action. Leave queued work queued. |
+| Board shows an eligible pending task for the caller's slot, dependencies are satisfied, and execution capacity is available | Peer for that slot | `collab board claim '<id>' --expected-revision <revision>` | `<id>`, `<revision>`, eligibility, and capacity from `collab board show` and `collab task status '<id>'` | Read the returned phase and attempt. If the `Execute` phase is claimed, apply the next row. If admission is rejected, apply the typed-error row. |
+| Claim succeeded and the current `Execute` phase is claimed | Task owner | `collab task start '<id>' --expected-revision <revision> --attempt <attempt>` | `<revision>` from the current task; `<attempt>` from the claim receipt or current phase | Implement only after a successful start. A rejected start preserves its typed error and branches to the typed-error row. |
+| Task is queued on another slot, the binding is stale, or claim/start is rejected | Claiming peer | `collab board show`, then `collab task status '<id>'` | `<id>` from the rejected receipt; current facts from both read receipts | Preserve the typed error. Do not steal another slot, force-start, or retry the same input. |
+| Jenny finds eligible ready work without an assignee | Jenny | `collab board show`, then `collab board invite '<id>' --to '<worker-id>' --expected-revision <revision>` | `<id>`, `<revision>`, priority, eligibility, and capacity from the current Board; `<worker-id>` from `collab who` | Continue dispatch through the existing invitation entry. If no durable task exists, publish it first through the normal Board entry. |
+| A task has no eligible slot or assignment for the current caller | Peer | `collab board show` | Current Board and caller assignment | Continue other authorized work. Do not bypass assignment or execution admission. |
+| Current task completes | Task owner | Follow the existing delivery, review, integration, cleanup, and close lifecycle; then run `collab board show` | Receipts and evidence from those existing lifecycle steps | Select the next eligible item and restart Table A. A delivery report alone does not end cleanup ownership. |
+
+An invitation, queued admission, or transport acceptance is not execution. Do
+not add a `--queue`, force-start command, or busy-slot bypass.
+
+### Admission and completion sequence
 
 Use this sequence for master and peer work. Master also checks the public queue
-and its coordination tasks. Legacy managed records are inspection
-inputs only.
+and its coordination tasks. Legacy managed records are inspection inputs only.
 
 1. Before peer/master board work starts, publish its goal, delivery condition,
    and test condition, then claim it or accept its invitation. When no suitable
@@ -1331,34 +1351,50 @@ inputs only.
 2. On completion, finish the applicable delivery, review, integration, cleanup,
    and close steps. A delivery report alone does not end a cleanup obligation.
    Read `collab board show` and check for unfinished work before stopping.
-3. On a blocker, keep ownership and record the cause, release condition, and
-   next action with `board update --status blocked --next "<facts>"`. Report it
-   to master. For an actual resource conflict use
-   `collab task wait <task-id> --for <holder-task-id>`; it is not a
-   general dependency queue.
-4. Check owned blocked/waiting tasks against current evidence. If a blocker
-   has cleared, recheck resources and execution capacity, then resume through
-   `board update --status working` using the current revision. A release notice
-   requires a recheck; it does not prove the task can resume. Keep it blocked
-   while another task occupies the execution slot.
-5. If current work cannot proceed, select another authorized, nonconflicting
-   pending task and claim it. Prefer priority p0 through p4, then task ID for
-   equal priority. Pending queue entries do not occupy execution capacity.
-   Blocked/waiting tasks keep their resources and unfinished responsibility;
-   starting another task does not release or cancel them.
-6. Before entering idle, check remaining work, pending close/cleanup duties,
-   each blocker, owned worktrees and stale resources, open P0/P1 work, and any
-   new production issue requiring canonical intake. If any action is possible,
-   continue it. Otherwise record what is blocked and the event or responsible
-   actor needed to resume. Preserve dirty, active, shared, or unknown resources
-   as PROTECTED_HOLD. Reuse a valid periodic patrol batch while it has remaining
-   deliveries; do not re-register or reset it. Explicitly re-arm only a consumed
-   ordinary one-shot goal or deadline wake when continued scheduling is required.
-   If a patrol batch is exhausted and the standing duty remains authorized, renew
-   it as a whole batch. Repeat this check on the next message or supported
-   notification. Consume applicable messages with `collab recv` on non-DSH
-   transports. DSH receives full messages natively through its gateway and acts
-   directly on them.
+
+### Table B: Resource waits, block approval, and queue continuation
+
+Apply the first matching row. A pending approval or specific error takes
+precedence over a generic continuation row. `<holder-id>` is the actual
+resource-holder task from the conflict receipt; it is not a guessed task.
+
+| IF observed condition | actor | THEN exact CLI action | parameter source | required result / next branch |
+|---|---|---|---|---|
+| An actual resource conflict names its holder task | Task owner | `collab task wait '<id>' --for '<holder-id>'` | `<id>` from the current task; `<holder-id>` from the conflict receipt | Read the returned wait state. Do not use this command for a general dependency or a business-block approval. |
+| Business work cannot proceed and needs a supervisor decision | Task owner | `collab task block '<id>' --next '<cause; evidence; attempted remedies; affected scope; resume condition>'` | Current failure evidence and the observable condition that would permit resumption | Preserve the returned pending request. The requester does not self-approve it. |
+| Block request is pending | Task owner or peer | `collab task status '<id>'` | Current task receipt | Do not call the task approved `blocked` and do not assume capacity was released. Continue independent actions. |
+| Current authorized supervisor has verified the pending request | Current supervisor; current CEO only for a master-owned task | `collab task update '<id>' --blocker-action approve --decision-reason '<evidence and resume condition>'` | Pending request, current task revision, current authority receipt, and verified evidence | The exact approval receipt is the approved-block result. Any other caller branches to escalation or rejection. |
+| Current authorized supervisor rejects the request | Current supervisor; current CEO only for a master-owned task | `collab task update '<id>' --blocker-action reject --decision-reason '<missing evidence or available action>'` | Pending request and the specific evidence or action gap | Preserve the rejection. The owner applies the returned available action. |
+| A resource wait or approved block is recorded | Task owner | `collab board show` | Current wait/approval receipt and current Board | Apply Table A to select eligible authorized work by the existing priority and queue rules. Claim and start only when admission permits them. |
+| A queued candidate conflicts with resources retained by the waiting task | Task owner or peer | `collab board show` | Current wait state and the candidate's resource claim | Leave the conflicting candidate queued and select another nonconflicting candidate through Table A. Do not release the waiting task's resources implicitly. |
+| A release or recovery notice arrives | Task owner | `collab task status '<id>'`, then `collab board show` | Original wait/block receipt and the new notice | Recheck the actual blocker and current capacity before using the existing resume transition. A notice alone does not prove the task can resume. |
+| All remaining actions require an external event | Task owner | No task mutation; apply Table C | Responsible actor, affected task, and observable recovery signal from the existing task record | Keep the task and resources. Cancel only the patrol entry covered by Table C and preserve direct-message reception. |
+
+Waiting or approved-block state does not make the current execution slot available
+by itself. A continuing task keeps its resources and unfinished responsibility.
+Selecting another item is an explicit Board review. Preserve supervisor and CEO
+authority boundaries and the prohibition on self-approval. If this checkout
+rejects an expected transition, preserve the typed error and report the runtime
+dependency instead of forcing the switch.
+
+Patrol wake subjects, cancellation, and continuation use the authoritative
+Table C in [board-idle-patrol.md](references/board-idle-patrol.md). Context
+recovery and current-action selection use the authoritative Table D in
+[stable-name-recovery.md](references/stable-name-recovery.md).
+
+Before entering idle, check remaining work, pending close/cleanup duties,
+each blocker, owned worktrees and stale resources, open P0/P1 work, and any
+new production issue requiring canonical intake. If any action is possible,
+continue it. Otherwise record what is blocked and the event or responsible
+actor needed to resume. Preserve dirty, active, shared, or unknown resources
+as PROTECTED_HOLD. Reuse a valid periodic patrol batch while it has remaining
+deliveries; do not re-register or reset it. Explicitly re-arm only a consumed
+ordinary one-shot goal or deadline wake when continued scheduling is required.
+If a patrol batch is exhausted and the standing duty remains authorized, renew
+it as a whole batch. Repeat this check on the next message or supported
+notification. Consume applicable messages with `collab recv` on non-DSH
+transports. DSH receives full messages natively through its gateway and acts
+directly on them.
 
 These are agent actions within an activation. Current board mutations commit an
 automatic notice to the other current participant, but the board does not

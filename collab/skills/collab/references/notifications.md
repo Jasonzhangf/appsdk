@@ -53,7 +53,7 @@ operation controls base reception.
 Per-task `board-idle` patrol cancellation and re-arming use
 `collab notify cancel --event board-idle` and
 `collab notify subscribe --event board-idle`, with the owner scope documented in
-[board-idle-patrol.md](board-idle-patrol.md). Do not substitute a general
+[board-idle-patrol.md](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation). Do not substitute a general
 unsubscribe, goal cancellation or task closure for them, and do not cancel base
 `direct-message` reception. These entry points exist in the current source and
 passed this round's isolated public CLI/native and finite-timer compatibility
@@ -64,13 +64,21 @@ relying on them.
 
 ## Patrol duties and finite schedules
 
-The user-confirmed board idle patrol contract is maintained in
-[board-idle-patrol.md](board-idle-patrol.md). It requires master default arming,
+The user-confirmed board idle patrol contract and authoritative wake/cancellation
+table are maintained in
+[board-idle-patrol.md](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation). It requires master default arming,
 real-time idle notification where connected, a 15-minute check otherwise,
 busy-skip, and owner cancellation of board patrol only. A peer with no unclosed
 board task, or with that task's patrol cancelled, has no board-idle polling.
 The running daemon's `methods` and `status` responses remain the runtime
 authority for which parts are active.
+
+For a delivered patrol wake, non-DSH peers consume the unread batch with
+`collab recv --timeout 0`; DSH peers process native delivery and do not run
+`recv` or `ack`. Apply the subject-specific action and cancellation event in
+the authoritative table. `board-idle-patrol` maps to task-scoped `board-idle`,
+`project-patrol` maps to `master-idle`, and `master-dispatch-gap` is a
+non-cancellable scheduling notice.
 
 A registration or dispatch reminder is not a schedule. It requires the role to
 reconcile its existing scope on the next authorized activation. Do not create
@@ -144,7 +152,7 @@ Up to three active subscriptions exist per agent.
   silently. No command or interface closes the base `direct-message` lease; a
   finite owned goal schedule ends with `appsdk goal cancel`, and task-owned
   schedules end with task closure. Per-task `board-idle` cancellation follows
-  [board-idle-patrol.md](board-idle-patrol.md).
+  [board-idle-patrol.md](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation).
 - Direct-message leases are owner-scoped and reusable until expiry. Resource
   subscriptions are exact-subject and one-shot. Generic deadline subscriptions
   consume their explicit finite occurrence count; `goal:` deadlines remain

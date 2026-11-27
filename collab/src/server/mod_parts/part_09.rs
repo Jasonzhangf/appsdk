@@ -2697,6 +2697,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         .filter_map(|task| {
             task.get("next_step")
                 .and_then(serde_json::Value::as_str)
+                .filter(|step| !step.trim().is_empty())
                 .map(str::to_owned)
         })
         .collect();
@@ -2707,11 +2708,11 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             .is_some_and(|transport| transport.kind == crate::proto::TransportKind::Dsh);
         if is_dsh {
             next_actions.push(format!(
-                "Inspect {unread_count} unread message(s) via collab inbox (DSH owns delivery; do not run collab recv)"
+                "Process {unread_count} unread message(s) through DSH native delivery; inspect via collab inbox only when needed (do not run collab recv or collab ack)"
             ));
         } else {
             next_actions.push(format!(
-                "Read {unread_count} unread message(s) first: collab recv"
+                "Read {unread_count} unread message(s) first: collab recv --timeout 0"
             ));
         }
     }

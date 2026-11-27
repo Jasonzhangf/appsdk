@@ -100,7 +100,11 @@ task-owned schedules end with task closure.
   branch/Workspace. Keep Close-Before-Open for Git worktrees. CLI acceptance of
   a legacy path does not authorize a new tree there.
 - The task workspace is only the execution carrier and has no identity context.
-  Reuse valid context; run `collab context` when recovery is needed. The CLI observes runtime facts, and the
+  Reuse valid context; run `collab task status '<id>'` for task progress and
+  `collab context --query` for identity inspection. Run `collab context` only
+  when registration/recovery is requested, identity is unknown, or a binding
+  error is evidenced. Follow the [context decision table](stable-name-recovery.md#table-d-context-recovery-and-current-actions).
+  The CLI observes runtime facts, and the
   daemon owns identity selection, creation, recovery, update, registration,
   and binding persistence. Use the same snapshot for this peer's task context,
   peers, and master-authority state. Never create a worktree-local peer, and never
@@ -242,10 +246,10 @@ or deadline wake. A read, ACK, summary, or dispatch receipt is not completion.
 
 ## Lifecycle recovery
 
-Use [stable-name recovery](stable-name-recovery.md) for current identity,
+Use the [context recovery decision table](stable-name-recovery.md#table-d-context-recovery-and-current-actions) for current identity,
 binding and retained work; this reference does not define another recovery protocol.
 If worker status, board admission, or a mutation reports a stale binding
 generation or `SESSION_THREAD_BINDING_MISMATCH`, preserve the registered
-binding and run `collab context` as the only repair entry. Status and board
+binding and run `collab context` as the repair entry. Status and board
 admission do not repair state. Never manually rebind or infer a generation.
 Read task notes separately to resume work; they are not identity proof.

@@ -1,11 +1,15 @@
 # Resource Coordination and Waits
 
-Use this only for an actual shared-resource dependency. Before a conflicting
+Use this only for an actual shared-resource dependency. Apply the authoritative
+[Table B](../operations.md#table-b-resource-waits-block-approval-and-queue-continuation)
+for resource wait, business-block approval and queue continuation branches.
+Before a conflicting
 write to a feature, resource, gate, integration lease or install target:
 
 1. Refresh durable state and attempt the semantic claim.
-2. If occupied, persist the requester as blocked and return holder/responsible
-   actor synchronously.
+2. If a real resource conflict names a holder task, record a resource wait with
+   `collab task wait '<id>' --for '<holder-id>'`. Read the returned wait state.
+   A resource wait is distinct from a business-block request.
 3. Send `RESOURCE_OCCUPIED` only when coordination is needed.
 4. Create a bounded wait only for a real blocker/responsible actor.
 5. Subscribe to the exact release/deadline event only when async wake is useful.
@@ -38,8 +42,19 @@ Every wait records waiter, exact blocking task, responsible actor,
 The server rejects self-wait, missing owner, unrelated resource, terminal or
 delivered waits, missing deadline/resume path, and direct/transitive cycles.
 Timeout makes the waiter explicitly blocked and never sends a message or
-releases a claim. Holder close clears obsolete wait edges and creates a
+releases a claim. It does not approve a business-block request or establish
+that an execution slot is available. Holder close clears obsolete wait edges and creates a
 `RESOURCE_RELEASED` notification only for an exact matching subscription.
+
+After a resource wait or an approved business block is recorded, run
+`collab board show` and select only currently eligible authorized work.
+Claim/start a queued candidate only when current admission permits it. If the
+candidate conflicts with resources retained by the waiting task, leave it
+queued and select another nonconflicting candidate. Do not release resources
+implicitly. On a release or recovery notice, run `collab task status '<id>'`
+and `collab board show`; verify the actual blocker and capacity before using
+the existing resume transition. See the [patrol decision table](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation)
+for task-scoped cancellation when only an evidenced external dependency remains.
 
 Waiting is not abandonment. On a supported wake, use current conflict evidence,
 try an authorized resolution and request help when needed. Facts go to the

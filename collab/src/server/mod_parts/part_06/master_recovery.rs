@@ -292,8 +292,9 @@ fn communication_recovery_brief() -> serde_json::Value {
     json!({
         "on_error": "Preserve the exact communication error and durable IDs; an ACK, notification acceptance, daemon health, or timeout is not delivery.",
         "steps": [
-            "In the original agent session and project root, run `collab context` first in that session's shell. Use the Collab Skill's recovery table for any exact missing facts. Do not use Computer Use, CUA, GUI, another agent session, or Rex layout commands for identity recovery.",
-            "If context returns missing_facts, preserve result.requires.fields and result.requires.sources for the host maintainer. Never guess or manually fill session_id, thread_id, endpoint or namespace. Pause only identity-dependent actions and rerun `collab context` from the same shell once the host provides the required facts.",
+            "If the binding is valid and only task progress is needed, run `collab task status '<id>'`. If only current identity inspection is needed, run `collab context --query`. Run `collab context` in the original agent session and project root only when the user requested registration or recovery, identity is unknown, or a binding error is evidenced. Use the Collab Skill's recovery table for any exact missing facts. Do not use Computer Use, CUA, GUI, another agent session, or Rex layout commands for identity recovery.",
+            "If context returns missing_facts, preserve result.requires.fields and result.requires.sources for the host maintainer. Never guess or manually fill session_id, thread_id, endpoint or namespace. Pause only identity-dependent actions and rerun `collab context` from the same shell once the host provides the required facts. If context returns pending, queued, or an error, preserve that result; identity recovery is not completed.",
+            "If context succeeds with registered=true, read `role_brief`, `operations`, and `next_actions`, then execute the applicable current action. If it identifies an owned unfinished task with no next step, run `collab task status '<id>'` using its current task ID; this applies to DSH as well. DSH processes native delivery and uses `collab inbox` only for read-only inspection; never generate `collab recv` or `collab ack` instructions. Do not repeat recovery for each wake, status read, or queue iteration.",
             "If context fails, preserve the exact error. Take only binding or project-authority decisions to Jenny through an existing authorized channel. For a direct user recovery request, report the specific gap to the requester. TOKEN_MISMATCH and identity conflicts need owner repair; do not choose another worker, copy credentials, edit routes, or start a second daemon."
         ],
         "close_only_when": [
@@ -322,6 +323,9 @@ fn base_role_brief(
     let work_role_next_action_rule = workflow_template_rule("work_role_next_action");
     let peer_task_list_rule = workflow_template_rule("peer_task_list_rule");
     let scoped_dispatch_rule = workflow_template_rule("scoped_dispatch_rule");
+    let busy_slot_rule = workflow_template_rule("busy_slot_rule");
+    let block_and_resource_rule = workflow_template_rule("block_and_resource_rule");
+    let patrol_wake_rule = workflow_template_rule("patrol_wake_rule");
     if current_master_worker_id(state, Some(route_scope)).as_deref() == Some(worker_id) {
         return json!({
             "role": "master",
@@ -340,6 +344,9 @@ fn base_role_brief(
                 work_role_next_action_rule,
                 peer_task_list_rule,
                 collaboration_reply_rule,
+                busy_slot_rule,
+                block_and_resource_rule,
+                patrol_wake_rule,
                 active_progress_rule,
                 "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
                 "A master patrols only its own project. After registration, promotion, or restoration, update this project's inspection tasks and your own patrol subscriptions; refresh them when scope or monitored events change. Inspect buglist P0/P1, task and delivery exceptions visible on the board, owned worktree and runtime resource cleanup, canonical issue intake, and all currently supported monitored events. Follow up only where a concrete dispatch, dependency, acceptance or cleanup decision is needed.",
@@ -414,6 +421,9 @@ fn base_role_brief(
         serde_json::Value::String(scoped_dispatch_rule.to_owned()),
         serde_json::Value::String(work_role_next_action_rule.to_owned()),
         serde_json::Value::String(collaboration_reply_rule.to_owned()),
+        serde_json::Value::String(busy_slot_rule.to_owned()),
+        serde_json::Value::String(block_and_resource_rule.to_owned()),
+        serde_json::Value::String(patrol_wake_rule.to_owned()),
         serde_json::Value::String("Collab/AppSDK and tmux have independent lifecycles. Do not run broad process kills or perform daemon or tmux lifecycle actions. Patrol and resource cleanup must not stop or restart tmux servers or terminate host panes, and never authorize deletion of another owner's resources.".to_owned()),
         serde_json::Value::String("Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master authority, peer administration, or another peer's resources.".to_owned()),
         serde_json::Value::String("You are the sole delivery owner for your accepted scope. Delegation or asking for help does not transfer responsibility. Investigate failures, verify subworker limitations at the real entry, and pursue authorized remedies or another executor; do not wait for master or others to solve your task, exceed authority or repeat unchanged failures.".to_owned()),

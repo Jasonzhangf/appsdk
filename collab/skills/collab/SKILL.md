@@ -31,8 +31,15 @@ text(result.output);
 参数解析失败时按该工具的声明修正参数并重试。如果原生入口仍失败，沿任务合同报告
 原错、已试入口、受影响步骤和恢复条件。
 
-本入口保留日常协作规则。命令细节按下表读取 [操作手册](operations.md) 的对应章节，
-不整篇加载；手册与本入口属于同一个 Skill。
+本入口保留日常协作规则。按已观察的事实先选择下表中的唯一入口，再只读取对应章节；
+不整篇加载。手册与本入口属于同一个 Skill。
+
+| 已观察条件 | 唯一分支入口 |
+|---|---|
+| 任务已排队、当前 slot busy、认领或启动被拒 | [Table A：Busy slots and queued admission](operations.md#table-a-busy-slots-and-queued-admission) |
+| 资源冲突、业务 blocker 待批、等待后继续队列 | [Table B：Resource waits, block approval, and queue continuation](operations.md#table-b-resource-waits-block-approval-and-queue-continuation) |
+| 收到巡检唤醒、无可执行项需取消或恢复巡检 | [Table C：board idle 巡检与取消](references/board-idle-patrol.md) |
+| 需要恢复身份或从 context 选择当前动作 | [Table D：稳定名字恢复](references/stable-name-recovery.md) |
 
 ## 适用身份
 
@@ -70,7 +77,8 @@ board 修改仍先提交，自动通知在目标离线时保持未读。
 
 ### 身份恢复
 
-按[恢复操作表](references/stable-name-recovery.md#正常恢复)根据原始回执选择下一条命令。
+按 [Table D：稳定名字恢复](references/stable-name-recovery.md#正常恢复) 根据原始回执选择
+下一条命令。
 恢复动作留在同一个 agent 会话。先跑 context，再按缺项进入对应宿主的只读诊断。
 禁止先派子 agent、搜索历史身份、调用其他 context 工具碰运气，或使用
 `rex session rename`、新建窗口、切换 block、重启 daemon 来修复身份。
@@ -106,7 +114,7 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 
 | 任务 | 入口与边界 |
 |---|---|
-| 恢复当前已注册身份和状态 | 在本项目实际环境运行 `collab context`；仅给当前宿主的真实 runtime 信息 |
+| 恢复当前已注册身份和状态 | 按 [Table D](references/stable-name-recovery.md) 选择 context 或 context query；仅给当前宿主的真实 runtime 信息 |
 | 查可投递地址 | `collab list`；全局目录，不依赖当前目录，输出 `project.name`、通道和真实可达状态 |
 | 发送已授权消息（本项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址必须来自 `collab list`，显式地址失败不回退默认目标 |
 | 跨项目通信 | 仅在用户或当前任务合同明确指定目标项目与接收人时发送。无跨项目指令时，`Jenny` 指本项目的 Jenny。AppSDK CLI 或 SDK 错误不会自动把消费者项目的任务交给 `appsdk.Jenny`。只用目录核实已有授权目标，保留原发送和接收证据 |
@@ -401,14 +409,14 @@ v2 实验状态。
 
 | 当前动作 | 只读对应内容 |
 |---|---|
-| 首次使用、恢复身份或换宿主 | [功能与入口选择](operations.md#功能与入口选择)、[身份恢复](references/stable-name-recovery.md#正常恢复) |
+| 首次使用、恢复身份或换宿主 | [功能与入口选择](operations.md#功能与入口选择)、[Table D：身份恢复](references/stable-name-recovery.md) |
 | 投递、查回执或收到通知 | [通信入口与项目目录](operations.md#通信入口与项目目录) |
 | 新建、编辑、续订或结束 Longhorizon | [目标入口与参数](operations.md#目标入口与参数)、[空闲唤醒与状态核实](operations.md#空闲唤醒与状态核实) |
 | 修改角色或工作流程模板 | [角色分工](operations.md#工作角色与用户指定分工)、[流程模板](operations.md#唯一-skill-与当前工作流程) |
-| 任务板发布、认领、交付及队列接续 | [任务板与 dashboard](operations.md#public-task-board-and-read-only-dashboard) |
+| 任务板发布、认领、交付及队列接续 | [Table A](operations.md#table-a-busy-slots-and-queued-admission)、[Table B](operations.md#table-b-resource-waits-block-approval-and-queue-continuation) |
 | 通信失败、身份恢复或显式重置 | [Recovery / Failure / Reset](operations.md#recovery-failure-reset-regression)、[当前身份与用户维护边界](references/migration-daemon.md) |
 | CEO、跨项目 master 操作 | [CEO](operations.md#全局-ceo-与项目-master)、[跨项目通信](operations.md#cross-project-master-communication) |
-| board idle 巡检、取消与 CEO 回报 | [board idle 巡检](references/board-idle-patrol.md) |
+| board idle 巡检、取消与 CEO 回报 | [Table C：board idle 巡检](references/board-idle-patrol.md) |
 | 宿主注册、AppServer 或 thread 路由 | [宿主注册](operations.md#宿主注册所需信息)、[AppServer](operations.md#appserver-runtime-registration) |
 | 版本升级、项目迁移或显式 reset | [迁移、安装与激活](references/migration-daemon.md#choose-the-migration-owner)、[验证细节](references/verification.md) |
 | 通知、订阅、路径问题 | [通知](references/notifications.md)、[状态路径](references/state-paths.md) |

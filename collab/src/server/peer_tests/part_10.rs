@@ -1,3 +1,227 @@
+fn p4_decision_table_context(master: bool) -> Value {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    if master {
+        promote_master(&server, "peer", "user-approved");
+    }
+    let context = handle_context(&server, "peer".into(), "token-peer".into());
+    assert!(context.ok, "{context:?}");
+    std::fs::remove_dir_all(root).unwrap();
+    context.data
+}
+
+#[test]
+fn p4_decision_table_busy_slot_vs_queued_candidate() {
+    for master in [false, true] {
+        let context = p4_decision_table_context(master);
+        let text = context["role_brief"].to_string();
+        for required in [
+            "queued admission is not execution",
+            "collab task status '<running-id>'",
+            "collab board claim '<id>' --expected-revision <revision>",
+            "collab task start '<id>' --expected-revision <revision> --attempt <attempt>",
+            "Leave queued work queued",
+            "Preserve the typed error",
+        ] {
+            assert!(text.contains(required), "missing {required}: {text}");
+        }
+    }
+}
+
+#[test]
+fn p4_decision_table_pending_approval_vs_approved_block() {
+    let context = p4_decision_table_context(false);
+    let text = context["role_brief"].to_string();
+    for required in [
+        "collab task block '<id>' --next",
+        "pending request is not approved blocked",
+        "collab task status '<id>'",
+        "--blocker-action approve --decision-reason",
+        "--blocker-action reject --decision-reason",
+        "No self-approval",
+        "does not imply slot release",
+    ] {
+        assert!(text.contains(required), "missing {required}: {text}");
+    }
+}
+
+#[test]
+fn p4_decision_table_resource_wait_vs_business_block() {
+    let context = p4_decision_table_context(false);
+    let text = context["role_brief"].to_string();
+    for required in [
+        "actual occupancy conflict",
+        "collab task wait '<id>' --for '<holder-id>'",
+        "Resource waiting is not business-block approval",
+        "collab board show",
+        "retained resources",
+        "nonconflicting eligible work",
+    ] {
+        assert!(text.contains(required), "missing {required}: {text}");
+    }
+}
+
+#[test]
+fn p4_decision_table_patrol_subject_vs_cancellation_event() {
+    for master in [false, true] {
+        let context = p4_decision_table_context(master);
+        let text = context["role_brief"].to_string();
+        for required in [
+            "board-idle-patrol",
+            "collab notify cancel --event board-idle --task-id '<id>'",
+            "project-patrol",
+            "collab notify cancel --event master-idle",
+            "master-dispatch-gap",
+            "collab notify status",
+            "direct-message reception",
+        ] {
+            assert!(text.contains(required), "missing {required}: {text}");
+        }
+        assert!(
+            !text.contains("cancel --event master-dispatch-gap"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn p4_decision_table_valid_binding_vs_actual_recovery() {
+    let context = p4_decision_table_context(false);
+    let recovery = context["role_brief"]["communication_recovery"].to_string();
+    for required in [
+        "binding is valid",
+        "collab context --query",
+        "collab task status '<id>'",
+        "identity is unknown",
+        "binding error",
+        "registered=true",
+        "role_brief",
+        "operations",
+        "next_actions",
+    ] {
+        assert!(
+            recovery.contains(required),
+            "missing {required}: {recovery}"
+        );
+    }
+    assert!(!recovery.contains("context --recover"), "{recovery}");
+}
+
+#[test]
+fn p4_decision_table_unread_host_actions_and_owned_task_without_next_step() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    {
+        let mut state = server.state.lock().unwrap();
+        let now = now_ms();
+        for (id, next_step) in [
+            ("T-no-next", None),
+            ("T-blank-next", Some("  ")),
+            ("T-supplied-next", Some("Run the accepted consumer check")),
+        ] {
+            state
+                .apply_checked(&Event::TaskCreated {
+                    task: TaskRec {
+                        id: id.into(),
+                        owner: "peer".into(),
+                        created_by: "peer".into(),
+                        feature_id: None,
+                        worktree_path: None,
+                        branch: None,
+                        base_commit: None,
+                        priority: default_priority(),
+                        status: "working".into(),
+                        next_step: next_step.map(str::to_owned),
+                        wait: None,
+                        isolation_mode: None,
+                        created_ms: now,
+                        updated_ms: now,
+                    },
+                })
+                .unwrap();
+        }
+    }
+    server.commit(&[Event::Sent {
+        msg: Message {
+            id: "p4-unread".into(),
+            from: "peer".into(),
+            to: "peer".into(),
+            mtype: "notify".into(),
+            subject: Some("board-idle-patrol".into()),
+            body: "Inspect T-no-next".into(),
+            in_reply_to: None,
+            created_ms: now_ms(),
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        },
+    }]);
+    for dsh in [false, true] {
+        if dsh {
+            server
+                .state
+                .lock()
+                .unwrap()
+                .workers
+                .get_mut("peer")
+                .unwrap()
+                .transport
+                .as_mut()
+                .unwrap()
+                .kind = crate::proto::TransportKind::Dsh;
+        }
+        let context = handle_context(&server, "peer".into(), "token-peer".into());
+        assert!(context.ok, "{context:?}");
+        let actions = context.data["next_actions"].as_array().unwrap();
+        let text = actions
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for id in ["T-no-next", "T-blank-next"] {
+            assert!(text.contains(&format!("collab task status {id}")), "{text}");
+        }
+        assert!(actions
+            .iter()
+            .any(|a| a == "Run the accepted consumer check"));
+        assert!(!actions
+            .iter()
+            .any(|a| a.as_str().is_some_and(|s| s.trim().is_empty())));
+        if dsh {
+            assert!(
+                text.contains("native delivery") && text.contains("collab inbox"),
+                "{text}"
+            );
+            assert!(
+                text.contains("do not run collab recv or collab ack"),
+                "{text}"
+            );
+        } else {
+            assert!(text.contains("collab recv --timeout 0"), "{text}");
+        }
+        assert_eq!(
+            server.state.lock().unwrap().msgs["p4-unread"].state,
+            "pending"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn p4_decision_table_static_guidance_stays_out_of_dynamic_actions() {
+    for master in [false, true] {
+        let context = p4_decision_table_context(master);
+        assert_eq!(context["next_actions"], serde_json::json!([]));
+        for operation in context["operations"].as_array().unwrap() {
+            assert!(!matches!(
+                operation["kind"].as_str(),
+                Some("responsibility" | "next_action" | "completion_action" | "notification_rule")
+            ));
+        }
+    }
+}
+
 #[test]
 fn context_is_read_only_and_does_not_consume_notifications() {
     let (mut server, root) = test_server();

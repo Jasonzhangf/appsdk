@@ -385,6 +385,17 @@ fn start_loaded_job() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Returns true when `launchctl list <label>` finds a loaded LaunchAgent job
+/// on an autostart-eligible macOS state root, even before the plist is rewritten.
+pub fn launchd_job_loaded() -> bool {
+    if cfg!(not(target_os = "macos")) || validate_state_override().is_err() {
+        return false;
+    }
+    let label = launch_agent_label();
+    let output = Command::new("launchctl").args(["list", &label]).output();
+    matches!(output, Ok(o) if o.status.success())
+}
+
 /// Returns true when the LaunchAgent job is currently loaded.
 pub fn is_loaded() -> bool {
     let path = launch_agent_path();

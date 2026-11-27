@@ -3524,6 +3524,403 @@ fn b07_missing_facts_are_exact_and_fresh_supplement_registers_through_public_cli
 }
 
 #[test]
+fn b08_profile_persistence_register_and_query_ignore_query_override() {
+    let fixture = Fixture::without_tmux("profile-persistence-b08");
+    let suffix = std::process::id();
+    let session_id = format!("profile-session-{suffix}");
+    let thread_id = format!("profile-thread-{suffix}");
+    let appserver = TestAppServer::start(&fixture.root, &session_id, &thread_id);
+    let profile = "profile-saved-v1";
+    let facts_without_profile = json!({
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "endpoint": appserver.endpoint(),
+        "namespace": "codex_tui"
+    });
+
+    let registered = fixture.context_provide(
+        "ctxop-profile-persistence-register",
+        &facts_without_profile,
+        None,
+    );
+    assert_eq!(registered["result"]["outcome"], "completed", "{registered}");
+    assert!(registered["result"]["snapshot"]["identity"]["profile"].is_null(), "{registered}");
+
+    let map_path = fixture.host_state.join("identity-map.json");
+    let map_after_registration: Value =
+        serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    assert!(map_after_registration["slots"][0]["current"]["host"]["profile"].is_null());
+
+    let facts = json!({
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "endpoint": appserver.endpoint(),
+        "namespace": "codex_tui",
+        "profile": profile
+    });
+    let saved = fixture.context_provide("ctxop-profile-persistence-save", &facts, None);
+    assert_eq!(saved["result"]["outcome"], "completed", "{saved}");
+    assert_eq!(saved["result"]["snapshot"]["identity"]["profile"], profile, "{saved}");
+
+    let map_after_save = fs::read(&map_path).unwrap();
+    let saved_map: Value = serde_json::from_slice(&map_after_save).unwrap();
+    assert_eq!(saved_map["slots"][0]["current"]["host"]["profile"], profile);
+    let query_json = serde_json::to_string(&facts_without_profile).unwrap();
+    let queried_output = fixture.command(
+        &[
+            "context",
+            "--op",
+            "ctxop-profile-persistence-query",
+            "--query",
+            "--provide",
+            &query_json,
+        ],
+        None,
+    );
+    assert!(queried_output.status.success(), "{queried_output:?}");
+    let queried = json_stdout(&queried_output);
+    assert_eq!(
+        queried["result"]["snapshot"]["identity"]["profile"],
+        profile,
+        "{queried}"
+    );
+    assert_eq!(fs::read(&map_path).unwrap(), map_after_save);
+
+    let override_facts = json!({
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "endpoint": appserver.endpoint(),
+        "namespace": "codex_tui",
+        "profile": "profile-query-override"
+    });
+    let override_json = serde_json::to_string(&override_facts).unwrap();
+    let override_output = fixture.command(
+        &[
+            "context",
+            "--op",
+            "ctxop-profile-persistence-query-override",
+            "--query",
+            "--provide",
+            &override_json,
+        ],
+        None,
+    );
+    assert!(override_output.status.success(), "{override_output:?}");
+    let override_result = json_stdout(&override_output);
+    assert_eq!(
+        override_result["result"]["snapshot"]["identity"]["profile"],
+        profile,
+        "{override_result}"
+    );
+    assert_eq!(fs::read(&map_path).unwrap(), map_after_save);
+
+    for (label, invalid_profile) in [("empty", ""), ("control", "profile\ninvalid")] {
+        let invalid_facts = json!({
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "endpoint": appserver.endpoint(),
+            "namespace": "codex_tui",
+            "profile": invalid_profile
+        });
+        let invalid_json = serde_json::to_string(&invalid_facts).unwrap();
+        let invalid_output = fixture.command(
+            &[
+                "context",
+                "--op",
+                &format!("ctxop-profile-persistence-invalid-{label}"),
+                "--query",
+                "--provide",
+                &invalid_json,
+            ],
+            None,
+        );
+        assert!(!invalid_output.status.success(), "{invalid_output:?}");
+        assert!(
+            String::from_utf8_lossy(&invalid_output.stderr).contains("IDENTITY_FACT_INVALID: profile"),
+            "{}",
+            String::from_utf8_lossy(&invalid_output.stderr)
+        );
+    }
+    assert_eq!(fs::read(&map_path).unwrap(), map_after_save);
+    drop(appserver);
+}
+
+#[cfg(target_os = "macos")]
+fn rex_layout_public_fixture(label: &str) -> (Fixture, std::os::unix::net::UnixListener, String) {
+    let mut fixture = Fixture::without_tmux(label);
+    let cli = fixture.install_rex_fixture_cli();
+    fixture.restart_daemon_with_env("COLLAB_TEST_REX_CLI", cli.to_str().unwrap());
+    let socket = fixture.root.join("rex.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let server = format!("unix://{}", socket.display());
+    (fixture, listener, server)
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn b08_rex_layout_inherits_existing_profile_and_public_query_reads_authoritative_record() {
+    let (fixture, _rex_listener, rex_server) = rex_layout_public_fixture("rex-layout-public-profile");
+    let suffix = std::process::id();
+    let agent_session = format!("rex-layout-agent-{suffix}");
+    let thread_id = format!("rex-layout-thread-{suffix}");
+    let profile = "profile-rex-layout";
+    let appserver = TestAppServer::start(&fixture.root, &agent_session, &thread_id);
+
+    let registered = fixture.context_provide(
+        "ctxop-rex-layout-register",
+        &json!({
+            "session_id": agent_session,
+            "thread_id": thread_id,
+            "endpoint": appserver.endpoint(),
+            "namespace": "codex_tui",
+            "profile": profile,
+        }),
+        None,
+    );
+    assert_eq!(registered["result"]["outcome"], "completed", "{registered}");
+    let map_path = fixture.host_state.join("identity-map.json");
+    let before_rex: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    assert_eq!(before_rex["slots"][0]["current"]["host"]["profile"], profile);
+    assert!(before_rex["slots"][0]["current"]["rex_layout"].is_null());
+
+    let rex = json!({
+        "server": rex_server,
+        "session_id": "session:11111111-1111-1111-1111-111111111111",
+        "block_id": "block:22222222-2222-2222-2222-222222222222",
+        "cwd": fixture.root.to_string_lossy(),
+    });
+    let saved = fixture.context_provide(
+        "ctxop-rex-layout-save",
+        &json!({"session_id": agent_session, "rex": rex}),
+        None,
+    );
+    assert_eq!(saved["result"]["outcome"], "completed", "{saved}");
+    assert_eq!(
+        saved["result"]["snapshot"]["identity"]["profile"],
+        profile,
+        "{saved}"
+    );
+
+    let map_after_save = fs::read(&map_path).unwrap();
+    let saved_map: Value = serde_json::from_slice(&map_after_save).unwrap();
+    let slot = saved_map["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|slot| {
+            slot["identity_status"] == "active"
+                && slot["current"]["binding"]["session_id"] == agent_session
+        })
+        .expect("Rex layout binding is current");
+    assert_eq!(slot["current"]["host"]["profile"], profile, "{slot}");
+    assert_eq!(
+        slot["current"]["binding"]["session_id"],
+        agent_session,
+        "{slot}"
+    );
+    assert_eq!(
+        slot["current"]["transport"]["rex_endpoint"]["server"],
+        rex["server"],
+        "{slot}"
+    );
+    assert_eq!(
+        slot["current"]["rex_layout"]["session_id"],
+        rex["session_id"],
+        "{slot}"
+    );
+    assert_eq!(
+        slot["current"]["rex_layout"]["block_id"],
+        rex["block_id"],
+        "{slot}"
+    );
+    assert_eq!(
+        slot["current"]["rex_layout"]["layout"]["block_id"],
+        rex["block_id"],
+        "{slot}"
+    );
+
+    let query_facts = json!({
+        "session_id": agent_session,
+        "profile": "profile-query-must-not-override",
+        "rex": rex,
+    });
+    let query_json = serde_json::to_string(&query_facts).unwrap();
+    let queried_output = fixture.command(
+        &[
+            "context",
+            "--op",
+            "ctxop-rex-layout-query",
+            "--query",
+            "--provide",
+            &query_json,
+        ],
+        None,
+    );
+    assert!(queried_output.status.success(), "{queried_output:?}");
+    let queried: Value = serde_json::from_slice(&queried_output.stdout).unwrap();
+    assert_eq!(
+        queried["result"]["snapshot"]["identity"]["profile"],
+        profile,
+        "{queried}"
+    );
+    assert_eq!(
+        queried["result"]["snapshot"]["identity"]["rex_layout"]["layout"]["block_id"],
+        rex["block_id"],
+        "{queried}"
+    );
+    assert_eq!(fs::read(&map_path).unwrap(), map_after_save);
+
+    let conflicting_rex = json!({
+        "server": rex_server,
+        "session_id": "session:11111111-1111-1111-1111-111111111111",
+        "block_id": "block:44444444-4444-4444-4444-444444444444",
+        "cwd": fixture.root.to_string_lossy(),
+    });
+    let conflict_query = json!({"session_id": agent_session, "rex": conflicting_rex});
+    let conflict_query_json = serde_json::to_string(&conflict_query).unwrap();
+    let conflict_output = fixture.command(
+        &[
+            "context",
+            "--op",
+            "ctxop-rex-layout-conflict-query",
+            "--query",
+            "--provide",
+            &conflict_query_json,
+        ],
+        None,
+    );
+    assert!(conflict_output.status.success(), "{conflict_output:?}");
+    let conflict_result: Value = serde_json::from_slice(&conflict_output.stdout).unwrap();
+    assert_eq!(
+        conflict_result["result"]["snapshot"]["identity"]["rex_layout"]["block_id"],
+        rex["block_id"],
+        "{conflict_result}"
+    );
+    assert_eq!(fs::read(&map_path).unwrap(), map_after_save);
+    drop(appserver);
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn b08_rex_registration_keeps_restore_metadata_optional_and_save_requires_complete_layout() {
+    let (fixture, _rex_listener, rex_server) =
+        rex_layout_public_fixture("rex-registration-restore-boundary");
+    let rex = json!({
+        "server": rex_server,
+        "session_id": "session:11111111-1111-1111-1111-111111111111",
+        "block_id": "block:22222222-2222-2222-2222-222222222222",
+        "cwd": fixture.root.to_string_lossy(),
+    });
+    let map_path = fixture.host_state.join("identity-map.json");
+
+    let agent_session = "rex-agent-session-without-restore-metadata";
+    let ordinary = fixture.context_provide(
+        "ctxop-rex-ordinary-without-restore-metadata",
+        &json!({"session_id": agent_session, "rex": rex}),
+        None,
+    );
+    assert_eq!(ordinary["result"]["outcome"], "completed", "{ordinary}");
+    let ordinary_map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let current = &ordinary_map["slots"][0]["current"];
+    assert_eq!(current["binding"]["session_id"], agent_session, "{current}");
+    assert!(current["host"]["profile"].is_null(), "{current}");
+    assert!(current["rex_layout"].is_null(), "{current}");
+    assert_eq!(current["transport"]["kind"], "rex", "{current}");
+    let ordinary_calls = fs::read_to_string(fixture.root.join("invocations.jsonl")).unwrap();
+    assert!(
+        !ordinary_calls.contains("session.view"),
+        "ordinary registration must not require restore-only layout metadata: {ordinary_calls}"
+    );
+
+    let complete = fixture.context_provide(
+        "ctxop-rex-complete-save",
+        &json!({
+            "session_id": agent_session,
+            "profile": "profile-rex-layout",
+            "rex": rex,
+        }),
+        None,
+    );
+    assert_eq!(complete["result"]["outcome"], "completed", "{complete}");
+    let saved = fs::read(&map_path).unwrap();
+    let saved_map: Value = serde_json::from_slice(&saved).unwrap();
+    let current = &saved_map["slots"][0]["current"];
+    assert_eq!(current["host"]["profile"], "profile-rex-layout", "{current}");
+    assert_eq!(
+        current["rex_layout"]["layout"]["block_id"],
+        rex["block_id"],
+        "{current}"
+    );
+
+    fs::write(fixture.root.join("rex-scenario"), "layout_block_missing\n").unwrap();
+    let incomplete_provide = json!({
+            "session_id": agent_session,
+            "profile": "profile-rex-layout",
+            "rex": rex,
+        })
+        .to_string();
+    let incomplete = fixture.command(
+        &[
+            "context",
+            "--op",
+            "ctxop-rex-incomplete-save",
+            "--provide",
+            &incomplete_provide,
+        ],
+        None,
+    );
+    assert!(
+        !incomplete.status.success(),
+        "an incomplete Save must fail: {incomplete:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&incomplete.stderr).contains("REX_LAYOUT_TARGET_ABSENT"),
+        "{incomplete:?}"
+    );
+    assert_eq!(
+        fs::read(&map_path).unwrap(),
+        saved,
+        "an incomplete Save must not replace the complete association"
+    );
+
+    let (empty_fixture, _empty_listener, empty_server) =
+        rex_layout_public_fixture("rex-registration-session-required");
+    let empty_rex = json!({
+        "server": empty_server,
+        "session_id": "session:11111111-1111-1111-1111-111111111111",
+        "block_id": "block:22222222-2222-2222-2222-222222222222",
+        "cwd": empty_fixture.root.to_string_lossy(),
+    });
+    let missing_session_provide = json!({
+        "profile": "profile-rex-layout",
+        "rex": empty_rex,
+    })
+    .to_string();
+    let missing_session = empty_fixture.command(
+        &[
+            "context",
+            "--op",
+            "ctxop-rex-registration-missing-session",
+            "--provide",
+            &missing_session_provide,
+        ],
+        None,
+    );
+    assert!(
+        !missing_session.status.success(),
+        "missing agent session must fail: {missing_session:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_session.stderr).contains("REX_AGENT_SESSION_REQUIRED"),
+        "{missing_session:?}"
+    );
+    assert!(
+        !empty_fixture.host_state.join("identity-map.json").exists(),
+        "missing agent session must not write the identity map"
+    );
+}
+
+#[test]
 fn c03_unapproved_unique_pane_stale_recovery_repairs_without_approval() {
     let _fixture_lock = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, pane) = Fixture::isolated("collab-v23-c03");

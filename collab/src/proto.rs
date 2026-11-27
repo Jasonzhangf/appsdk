@@ -132,6 +132,248 @@ pub struct RexEndpoint {
     pub host_id: Option<String>,
     pub instance_id: String,
     pub cwd: String,
+    /// Captured from `session.view` during candidate verification. This stays
+    /// in memory only so the binding owner can move it into its control record;
+    /// Rex delivery continues to use only the endpoint fields above.
+    #[serde(skip)]
+    pub layout_association: Option<RexLayoutAssociation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RexLayoutAssociation {
+    pub server: String,
+    pub instance_id: String,
+    pub host_id: String,
+    pub session_id: String,
+    pub session_revision: u64,
+    pub active_window: bool,
+    pub window_id: String,
+    pub window_index: u32,
+    pub window_label: Option<String>,
+    pub focused: bool,
+    pub block_id: String,
+    pub block_label: String,
+    pub block_flavor: String,
+    pub block_host_id: String,
+    pub layer_id: Option<String>,
+    pub layer_kind: String,
+    pub layer_bounds: [serde_json::Number; 4],
+    pub layer_state: Option<String>,
+    pub layout: RexLayoutNode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RexLayoutNode {
+    pub rect: [serde_json::Number; 4],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<RexLayoutSplit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RexLayoutSplit {
+    pub split_id: String,
+    pub direction: RexSplitDirection,
+    pub ratio: serde_json::Number,
+    pub before: Box<RexLayoutNode>,
+    pub after: Box<RexLayoutNode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RexSplitDirection {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RestorePlan {
+    pub project_scope: String,
+    pub app_scope_id: String,
+    pub worker_id: String,
+    pub binding_id: String,
+    pub binding_generation: u64,
+    pub operation_id: Option<String>,
+    pub session_label: String,
+    pub saved_layout: RexLayoutAssociation,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CodexResumePlan {
+    pub profile: String,
+    pub codex_session_id: String,
+    pub canonical_cwd: String,
+    pub target_block_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RestoreLiveResume {
+    Unverified,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RestoreCarrier {
+    pub create_receipt: serde_json::Value,
+    pub layout_verification: RexLayoutAssociation,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RestoreResult {
+    pub restored_session_id: String,
+    pub restored_window_id: String,
+    pub restored_block_id: String,
+    #[serde(flatten)]
+    pub carrier: RestoreCarrier,
+    pub plan: RestorePlan,
+    pub resume: CodexResumePlan,
+    pub live_resume: RestoreLiveResume,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RestoreCreateContext {
+    pub server: String,
+    pub session_label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub(crate) enum RestoreCreateOutcome {
+    ConfirmedRejected {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        native_code: Option<String>,
+        detail: String,
+    },
+    Unknown {
+        detail: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RestoreFailure {
+    pub stage: &'static str,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_receipt: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_outcome: Option<RestoreCreateOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_context: Option<RestoreCreateContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<RestoreCleanup>,
+}
+
+impl RestoreFailure {
+    pub(crate) fn new(stage: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            stage,
+            detail: detail.into(),
+            create_receipt: None,
+            create_outcome: None,
+            create_context: None,
+            cleanup: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub(crate) enum RestoreCleanup {
+    Closed { session_id: String },
+    Unconfirmed { session_id: String, detail: String },
+}
+
+impl RexLayoutAssociation {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("server", self.server.as_str()),
+            ("instance_id", self.instance_id.as_str()),
+            ("host_id", self.host_id.as_str()),
+            ("session_id", self.session_id.as_str()),
+            ("window_id", self.window_id.as_str()),
+            ("block_id", self.block_id.as_str()),
+            ("block_label", self.block_label.as_str()),
+            ("block_flavor", self.block_flavor.as_str()),
+            ("block_host_id", self.block_host_id.as_str()),
+            ("layer_kind", self.layer_kind.as_str()),
+        ] {
+            validate_layout_string(field, value)?;
+        }
+        if self.host_id != self.block_host_id {
+            return Err("Rex layout block host differs from endpoint host".into());
+        }
+        validate_rect("layer_bounds", &self.layer_bounds)?;
+        self.layout.validate()?;
+        if self.layout.block_count(&self.block_id) != 1 {
+            return Err("Rex layout must contain the target block exactly once".into());
+        }
+        Ok(())
+    }
+}
+
+impl RexLayoutNode {
+    fn validate(&self) -> Result<(), String> {
+        validate_rect("layout.rect", &self.rect)?;
+        match (&self.block_id, &self.split) {
+            (Some(block_id), None) => validate_layout_string("layout.block_id", block_id),
+            (None, Some(split)) => {
+                validate_layout_string("layout.split.split_id", &split.split_id)?;
+                let ratio = split
+                    .ratio
+                    .as_f64()
+                    .filter(|value| value.is_finite() && *value > 0.0 && *value < 1.0)
+                    .ok_or_else(|| "Rex layout split ratio must be between 0 and 1".to_owned())?;
+                let _ = ratio;
+                split.before.validate()?;
+                split.after.validate()
+            }
+            _ => Err("Rex layout node must contain exactly one of block_id or split".into()),
+        }
+    }
+
+    fn block_count(&self, target: &str) -> usize {
+        match (&self.block_id, &self.split) {
+            (Some(block_id), None) => usize::from(block_id == target),
+            (None, Some(split)) => {
+                split.before.block_count(target) + split.after.block_count(target)
+            }
+            _ => 0,
+        }
+    }
+}
+
+fn validate_layout_string(field: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() || value.chars().any(char::is_control) {
+        return Err(format!("Rex layout {field} is incomplete"));
+    }
+    Ok(())
+}
+
+fn validate_rect(field: &str, rect: &[serde_json::Number; 4]) -> Result<(), String> {
+    let values = rect
+        .iter()
+        .map(serde_json::Number::as_f64)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| format!("Rex layout {field} must contain four finite numbers"))?;
+    if values.iter().any(|value| !value.is_finite())
+        || values[0] < 0.0
+        || values[1] < 0.0
+        || values[2] <= 0.0
+        || values[3] <= 0.0
+        || values[0] + values[2] > 1.000_000_1
+        || values[1] + values[3] > 1.000_000_1
+    {
+        return Err(format!(
+            "Rex layout {field} is not a valid window rectangle"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1771,6 +2013,7 @@ mod tests {
             host_id: Some("host-1".into()),
             instance_id: "instance-1".into(),
             cwd: candidate.cwd.clone(),
+            layout_association: None,
         };
         let value = serde_json::to_value(&endpoint).unwrap();
         assert_eq!(

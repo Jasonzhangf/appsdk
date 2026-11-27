@@ -2937,6 +2937,8 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             "kind": "peer",
             "role": role,
             "transport": mapped_current.transport,
+            "profile": mapped_current.host.profile,
+            "rex_layout": mapped_current.rex_layout,
         },
         "role_brief": current_role_brief,
         "work_roles": work_roles_by_worker.get(&worker.id).cloned().unwrap_or_default(),

@@ -10,6 +10,7 @@ fn validate_transport_candidates(
         candidates,
         registration_cwd,
         None,
+        false,
     )
 }
 
@@ -18,6 +19,7 @@ fn validate_transport_candidates_for_session(
     candidates: &TransportCandidates,
     registration_cwd: &str,
     agent_session: Option<&str>,
+    capture_restore_layout: bool,
 ) -> Result<SelectedTransport, String> {
     let requested_root = std::fs::canonicalize(registration_cwd)
         .map_err(|error| format!("RUNTIME_BINDING_REJECTED: registration cwd: {error}"))?;
@@ -40,10 +42,18 @@ fn validate_transport_candidates_for_session(
             return Err("REX_ENDPOINT_REJECTED: Rex cwd must be an absolute host path".into());
         }
         let session = agent_session.ok_or("REX_AGENT_SESSION_REQUIRED: use context --provide with the current agent session_id")?;
-        return tokio::runtime::Handle::try_current()
-            .map_err(|_| "REX_ENDPOINT_REJECTED: daemon runtime is unavailable".to_owned())?
-            .block_on(crate::client::adapters::rex::verify_candidate(candidate, session))
-            .map_err(|error| error.to_string());
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| "REX_ENDPOINT_REJECTED: daemon runtime is unavailable".to_owned())?;
+        return if capture_restore_layout {
+            runtime.block_on(crate::client::adapters::rex::verify_restorable_candidate(
+                candidate, session,
+            ))
+        } else {
+            runtime.block_on(crate::client::adapters::rex::verify_candidate(
+                candidate, session,
+            ))
+        }
+        .map_err(|error| error.to_string());
     }
     // A daemon-confirmed current pane wins over all unselected native facts.
     if let Some(candidate) = candidates.tmux.as_ref() {

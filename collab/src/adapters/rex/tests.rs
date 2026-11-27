@@ -46,6 +46,7 @@ fn endpoint() -> RexEndpoint {
         host_id: Some("host-fixture".into()),
         instance_id: "instance-fixture".into(),
         cwd: "/tmp/rex-fixture-cwd".into(),
+        layout_association: None,
     }
 }
 
@@ -144,6 +145,7 @@ fn method(call: &Value) -> String {
         "server.status",
         "session.list",
         "session.list_blocks",
+        "session.view",
         "com.superlogical.terminal.write",
         "com.superlogical.terminal.process",
         "com.superlogical.terminal.pwd",
@@ -275,8 +277,13 @@ async fn notify_deadline_during_settle_skips_enter() {
     let _guard = fixture_guard().await;
     let env = TestEnv::new("normal");
     let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
-    let owner = RexProgramStatusOwner { pid: 4242, name: "codex".into() };
-    let error = send_enter_until(&endpoint(), &owner, deadline).await.unwrap_err();
+    let owner = RexProgramStatusOwner {
+        pid: 4242,
+        name: "codex".into(),
+    };
+    let error = send_enter_until(&endpoint(), &owner, deadline)
+        .await
+        .unwrap_err();
     assert_eq!(error.class, NotificationDeliveryClass::Unknown);
     assert!(env.calls().is_empty());
 }
@@ -289,11 +296,18 @@ async fn notify_skips_enter_when_the_rex_foreground_changes_after_write() {
         .await
         .unwrap_err();
     assert_eq!(error.class, NotificationDeliveryClass::Unknown);
-    assert_eq!(error.stage, RexInputStage::WriteQueued { bytes_written: 11 });
+    assert_eq!(
+        error.stage,
+        RexInputStage::WriteQueued { bytes_written: 11 }
+    );
     assert!(error.detail.contains("foreground Codex changed"));
-    assert_eq!(env.calls().iter().filter(|call| {
-        method(call) == "com.superlogical.terminal.write"
-    }).count(), 1);
+    assert_eq!(
+        env.calls()
+            .iter()
+            .filter(|call| { method(call) == "com.superlogical.terminal.write" })
+            .count(),
+        1
+    );
     assert!(!env.calls().iter().any(|call| method(call) == "send-key"));
 }
 
@@ -483,6 +497,64 @@ async fn argv_stdin_and_environment_are_exact() {
         json!({"session_id": endpoint().session_id}).to_string()
     );
     std::env::remove_var("REX_SHOULD_NOT_LEAK");
+}
+
+#[tokio::test]
+async fn session_view_captures_one_tab_restore_layout() {
+    let _fixture = fixture_guard().await;
+    let env = TestEnv::new("normal");
+    let transport = verify_restorable_candidate(&candidate(), "agent-session")
+        .await
+        .expect("verify Rex candidate with one-window layout");
+    let layout = transport
+        .rex_endpoint
+        .as_ref()
+        .and_then(|endpoint| endpoint.layout_association.as_ref())
+        .expect("verified Rex target captures its layout association");
+    assert_eq!(layout.session_id, endpoint().session_id);
+    assert_eq!(layout.window_id, "window-fixture");
+    assert_eq!(layout.window_index, 0);
+    assert_eq!(layout.block_id, endpoint().block_id);
+    assert_eq!(layout.block_label, "fixture");
+    assert_eq!(layout.block_flavor, "com.superlogical.terminal.shell");
+    assert_eq!(
+        layout.layout.block_id.as_deref(),
+        Some(endpoint().block_id.as_str())
+    );
+    assert!(env
+        .calls()
+        .iter()
+        .any(|call| method(call) == "session.view"));
+}
+
+#[tokio::test]
+async fn session_view_absence_and_ambiguity_fail_before_publication() {
+    let _fixture = fixture_guard().await;
+    for scenario in [
+        "layout_block_missing",
+        "layout_block_duplicate",
+        "layout_malformed",
+    ] {
+        let env = TestEnv::new(scenario);
+        let error = verify_restorable_candidate(&candidate(), "agent-session")
+            .await
+            .expect_err("unverifiable Rex layout must not publish");
+        assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
+        assert_eq!(error.operation, "session.view");
+        assert!(
+            error.detail.contains("REX_LAYOUT_"),
+            "{scenario}: unexpected error {error}"
+        );
+        assert!(
+            env.calls().iter().all(|call| {
+                !matches!(
+                    method(call).as_str(),
+                    "com.superlogical.terminal.write" | "send-key"
+                )
+            }),
+            "layout refusal must not write terminal input"
+        );
+    }
 }
 
 #[tokio::test]

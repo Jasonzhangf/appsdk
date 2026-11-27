@@ -370,6 +370,37 @@ impl Fixture {
         command
     }
 
+    /// Install the repository Rex CLI fixture at the public binary's isolated
+    /// HOME location. The wrapper supplies the fixture control environment that
+    /// the production adapter intentionally strips from `REX_*` variables.
+    pub fn install_rex_fixture_cli(&self) -> PathBuf {
+        let script = self.root.join("rex-cli-fixture.py");
+        std::fs::write(
+            &script,
+            include_str!("../../src/adapters/rex/fixture_rex.py"),
+        )
+        .expect("write Rex CLI fixture");
+        let installed = self
+            .root
+            .join("home/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex");
+        std::fs::create_dir_all(installed.parent().expect("Rex CLI parent"))
+            .expect("create isolated Rex CLI directory");
+        std::fs::write(
+            &installed,
+            format!(
+                "#!/bin/sh\nexport REXPRIMITIVE_LOG_DIR={}\nexport REXPRIMITIVE_SCENARIO_FILE={}\nexec python3 {} \"$@\"\n",
+                shell_quote(&self.root.to_string_lossy()),
+                shell_quote(&self.root.join("rex-scenario").to_string_lossy()),
+                shell_quote(&script.to_string_lossy()),
+            ),
+        )
+        .expect("write Rex CLI wrapper");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o700))
+            .expect("make Rex CLI wrapper executable");
+        installed
+    }
+
     pub fn command_on_socket(&self, socket: &Path, args: &[&str], pane: &Pane) -> Command {
         self.ensure_pane_runner_on_socket(socket, &pane.pane_id);
         let mut command = self.pane_cli_script_command("client", socket, pane);
@@ -785,10 +816,14 @@ impl Fixture {
     /// Restart only this fixture daemon with one compile-time gated fault
     /// injection variable, used to prove public journal failure projections.
     pub fn restart_daemon_with_env(&mut self, key: &str, value: &str) {
+        self.restart_daemon_with_envs(&[(key, value)]);
+    }
+
+    pub fn restart_daemon_with_envs(&mut self, values: &[(&str, &str)]) {
         self.stop_daemon();
         std::fs::remove_file(self.host_state.join("DOWN")).ok();
         let mut command = self.configured_command(&["serve"], None);
-        command.env(key, value);
+        command.envs(values.iter().copied());
         self.start_daemon_with(command);
     }
 

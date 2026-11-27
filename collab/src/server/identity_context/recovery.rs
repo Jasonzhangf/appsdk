@@ -423,11 +423,20 @@ impl ProjectRuntimeManager {
             rex: Some(candidate.clone()),
             ..Default::default()
         };
+        let capture_restore_layout = facts
+            .profile
+            .as_deref()
+            .is_some_and(|profile| !profile.trim().is_empty())
+            || baseline
+                .as_ref()
+                .and_then(|baseline| baseline.current.host.profile.as_deref())
+                .is_some_and(|profile| !profile.trim().is_empty());
         let transport = validate_transport_candidates_for_session(
             Path::new(&context.canonical_root),
             &candidates,
             &context.canonical_root,
             facts.session_id.as_deref(),
+            capture_restore_layout,
         )
         .map_err(anyhow::Error::msg)?;
         let endpoint = transport
@@ -621,6 +630,7 @@ impl ProjectRuntimeManager {
             scope,
             None,
             None,
+            None,
         )
     }
 
@@ -684,6 +694,7 @@ impl ProjectRuntimeManager {
         scope: &Scope,
         rex_execution: Option<&crate::server::binding_slot::VerifiedRexExecutionAssociation>,
         expected_baseline: Option<&RexRecoveryBaseline>,
+        host_facts: Option<&IdentityFacts>,
     ) -> anyhow::Result<RuntimeBinding> {
         let _register = self.register_gate.lock().unwrap();
         if let (Some(expected), Some(execution)) = (expected_baseline, rex_execution) {
@@ -804,6 +815,10 @@ impl ProjectRuntimeManager {
         };
         let control = self.binding_control_store().load().map_err(anyhow::Error::msg)?;
         let mut value = crate::server::binding_slot::BindingValue::new(next.clone(), transport.clone());
+        if let Some(facts) = host_facts {
+            value.host.agent_kind = facts.agent_kind.clone();
+            value.host.profile = facts.profile.clone();
+        }
         Self::prepare_control_value(&control, &key, &mut value).map_err(anyhow::Error::msg)?;
         if transport.kind == TransportKind::Rex && rex_execution.is_none()
             && expected_baseline.is_none() && next.session_id != saved.session_id {
@@ -865,7 +880,7 @@ impl ProjectRuntimeManager {
         if transport.kind != TransportKind::Rex {
             anyhow::bail!("REX_CURRENT_BINDING_CHANGED: notification refresh requires Rex transport");
         }
-        self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None)
+        self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None, None)
     }
 
     fn reconcile_identity_context(
@@ -1035,11 +1050,17 @@ impl ProjectRuntimeManager {
                                 &candidates,
                                 &context.canonical_root,
                                 facts.session_id.as_deref(),
+                                facts.profile.as_deref().is_some_and(|profile| !profile.trim().is_empty())
+                                    || rex_recovery
+                                        .as_ref()
+                                        .and_then(|recovery| recovery.baseline.as_ref())
+                                        .and_then(|baseline| baseline.current.host.profile.as_deref())
+                                        .is_some_and(|profile| !profile.trim().is_empty()),
                             ).map_err(anyhow::Error::msg)?,
                         };
                         current = Some(self.refresh_session_transport(
                             &runtime, saved, transport, &mut ident, &scope,
-                            execution.as_ref(), baseline.as_ref(),
+                            execution.as_ref(), baseline.as_ref(), Some(&facts),
                         )?);
                     }
                 } else if facts.tmux.is_none() {
@@ -1063,7 +1084,7 @@ impl ProjectRuntimeManager {
                             .map_err(anyhow::Error::msg)?;
                             current = Some(self.refresh_session_transport(
                                 &runtime, saved, transport, &mut ident, &scope,
-                                None, None,
+                                None, None, Some(&facts),
                             )?);
                         } else if let Some(candidate) = facts.rex.as_ref() {
                             let (execution, baseline) = self.rex_execution_for_refresh(
@@ -1083,6 +1104,12 @@ impl ProjectRuntimeManager {
                                         &candidates,
                                         &context.canonical_root,
                                         facts.session_id.as_deref(),
+                                        facts.profile.as_deref().is_some_and(|profile| !profile.trim().is_empty())
+                                            || rex_recovery
+                                                .as_ref()
+                                                .and_then(|recovery| recovery.baseline.as_ref())
+                                                .and_then(|baseline| baseline.current.host.profile.as_deref())
+                                                .is_some_and(|profile| !profile.trim().is_empty()),
                                     )
                                     .map_err(anyhow::Error::msg)?,
                                 );
@@ -1094,6 +1121,7 @@ impl ProjectRuntimeManager {
                                 &scope,
                                 execution.as_ref(),
                                 baseline.as_ref(),
+                                Some(&facts),
                             )?);
                         } else if facts.desktop_bridge.is_some()
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -1106,7 +1134,7 @@ impl ProjectRuntimeManager {
                             .map_err(|e| anyhow::anyhow!(e))?;
                             current = Some(self.refresh_session_transport(
                                 &runtime, saved, transport, &mut ident, &scope,
-                                None, None,
+                                None, None, Some(&facts),
                             )?);
                         } else if transport.kind == TransportKind::AppServer
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -1123,7 +1151,7 @@ impl ProjectRuntimeManager {
                             transport.tmux_endpoint = None;
                             current = Some(self.refresh_session_transport(
                                 &runtime, saved, transport, &mut ident, &scope,
-                                None, None,
+                                None, None, Some(&facts),
                             )?);
                         } else if transport.kind == TransportKind::Tmux
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -1135,7 +1163,7 @@ impl ProjectRuntimeManager {
                             // projection, but does not authorize a new claim.
                             current = Some(self.refresh_session_transport(
                                 &runtime, saved, transport, &mut ident, &scope,
-                                None, None,
+                                None, None, Some(&facts),
                             )?);
                         }
                     }
@@ -1621,6 +1649,7 @@ mod anchor_provenance_tests {
                 host_id: Some("host-fixture".into()),
                 instance_id: "instance-fixture".into(),
                 cwd: root.display().to_string(),
+                layout_association: None,
             }),
             capabilities: vec!["send_message_to_block".into()],
             self_check: "rex execution association test".into(),

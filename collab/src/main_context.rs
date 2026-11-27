@@ -185,6 +185,8 @@ struct IdentitySupplement {
     endpoint: Option<String>,
     #[serde(default, deserialize_with = "provided_string")]
     namespace: Option<String>,
+    #[serde(default, deserialize_with = "provided_string")]
+    profile: Option<String>,
 }
 
 fn provided_string<'de, D: serde::Deserializer<'de>>(
@@ -212,6 +214,7 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         ("thread_id", supplement.thread_id.as_deref()),
         ("endpoint", supplement.endpoint.as_deref()),
         ("namespace", supplement.namespace.as_deref()),
+        ("profile", supplement.profile.as_deref()),
     ] {
         if let Some(value) = value {
             validate_supplement_string(field, value)?;
@@ -222,6 +225,7 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
         && supplement.thread_id.is_none()
         && supplement.endpoint.is_none()
         && supplement.namespace.is_none()
+        && supplement.profile.is_none()
         && supplement.desktop_bridge.is_none()
         && supplement.dsh.is_none()
     {
@@ -229,7 +233,7 @@ fn parse_identity_supplement(raw: &str) -> anyhow::Result<IdentityFacts> {
     }
     Ok(IdentityFacts {
         agent_kind: None,
-        profile: None,
+        profile: supplement.profile,
         dsh_session_id: supplement.dsh.as_ref().map(|dsh| dsh.session_id.clone()),
         dsh: supplement.dsh,
         rex: supplement.rex,
@@ -294,6 +298,11 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
                 .as_ref()
                 .and_then(|report| report.session_id.clone()),
         )?;
+        merge_supplied_fact(
+            "profile",
+            &mut facts.profile,
+            supplied.as_ref().and_then(|report| report.profile.clone()),
+        )?;
         facts.thread_id = None;
         facts.endpoint = None;
         facts.namespace = None;
@@ -341,6 +350,7 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
     let Some(supplied) = supplied else {
         return Ok(facts);
     };
+    merge_supplied_fact("profile", &mut facts.profile, supplied.profile.clone())?;
     if let Some(candidate) = supplied.dsh {
         if supplied.desktop_bridge.is_some()
             || supplied.session_id.is_some()
@@ -361,7 +371,17 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
         return Ok(facts);
     }
     if facts.dsh_session_id.is_some() {
-        anyhow::bail!("IDENTITY_FACT_CONFLICT: a DSH caller must report DSH facts, not its launcher's native facts");
+        if supplied.desktop_bridge.is_some()
+            || supplied.session_id.is_some()
+            || supplied.thread_id.is_some()
+            || supplied.endpoint.is_some()
+            || supplied.namespace.is_some()
+        {
+            anyhow::bail!(
+                "IDENTITY_FACT_CONFLICT: a DSH caller must report DSH facts, not its launcher's native facts"
+            );
+        }
+        return Ok(facts);
     }
     if supplied.desktop_bridge.is_some() {
         facts.session_id = supplied.session_id;

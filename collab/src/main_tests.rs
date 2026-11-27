@@ -1154,6 +1154,7 @@ fn explicit_rex_facts_win_over_block_environment_discovery() {
     std::env::set_var("REX_BLOCK", "block:01a1c47f-7e66-7e9a-bdf1-84a9bd310276");
     let explicit = json!({
         "session_id": "agent-session",
+        "profile": "rex-profile",
         "rex": {
             "server": "unix:///explicit-rex.sock",
             "session_id": "session:11111111-1111-4111-8111-111111111111",
@@ -1173,6 +1174,7 @@ fn explicit_rex_facts_win_over_block_environment_discovery() {
 
     let facts = result.expect("explicit Rex facts are authoritative");
     assert_eq!(facts.session_id.as_deref(), Some("agent-session"));
+    assert_eq!(facts.profile.as_deref(), Some("rex-profile"));
     assert_eq!(
         facts
             .rex

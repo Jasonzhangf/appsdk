@@ -184,8 +184,36 @@ pub struct RexWriteReceipt {
 pub struct RexProcessObservation {
     pub pid: Option<u64>,
     pub name: Option<String>,
+    #[serde(default)]
+    pub argv0: Option<String>,
     pub path: Option<String>,
     pub cwd: Option<String>,
+}
+
+impl RexProcessObservation {
+    pub(crate) fn matches_owner(&self, owner: &RexProgramStatusOwner) -> bool {
+        if self.pid != Some(owner.pid) {
+            return false;
+        }
+        let owner_name = owner.name.trim();
+        let owner_base = crate::host_runtime::strip_old_update_suffix(owner_name);
+        self.name.as_deref().map(str::trim).is_some_and(|name| {
+            name == owner_name || crate::host_runtime::strip_old_update_suffix(name) == owner_base
+        }) || self
+            .argv0
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|argv0| argv0 == owner_name || argv0 == owner_base)
+    }
+
+    pub(crate) fn agent_kind(&self) -> Option<crate::host_runtime::AgentKind> {
+        let chain = [self.name.as_deref(), self.argv0.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        crate::host_runtime::classify_nearest_agent(chain)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,20 +253,20 @@ pub struct RexObservation {
 }
 
 impl RexObservation {
-    /// Extract the one foreground Codex owner only when all current terminal
+    /// Extract the one foreground TUI agent owner only when all requested terminal
     /// sources are complete and the program-status owner matches foreground.
-    pub(crate) fn current_foreground_codex_owner(&self) -> Result<RexProgramStatusOwner, String> {
+    fn current_foreground_agent_record(
+        &self,
+        expected: Option<crate::host_runtime::AgentKind>,
+        required_sources: &[&str],
+    ) -> Result<(crate::host_runtime::AgentKind, &RexProgramStatusRecord, RexProgramStatusOwner), String> {
         if self.gap_possible || !self.source_errors.is_empty() {
             return Err(format!(
                 "REX_EXECUTION_UNVERIFIED: current Rex observation has source gaps: {}",
                 self.source_errors.join("; ")
             ));
         }
-        for required in [
-            "com.superlogical.terminal.process",
-            "com.superlogical.terminal.pwd",
-            "com.superlogical.terminal.program_status",
-        ] {
+        for required in required_sources {
             if !self.sources.iter().any(|source| source == required) {
                 return Err(format!(
                     "REX_EXECUTION_UNVERIFIED: current Rex observation is missing {required}"
@@ -258,25 +286,79 @@ impl RexObservation {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .ok_or_else(|| "REX_EXECUTION_UNVERIFIED: Rex foreground name is missing".to_owned())?;
-        if !crate::host_runtime::is_codex_command(name) {
-            return Err(format!(
-                "REX_EXECUTION_UNVERIFIED: Rex foreground is not Codex ({name})"
-            ));
-        }
+        let detected = process.agent_kind();
+        let kind = match (expected, detected) {
+            (Some(want), Some(got)) if want == got => want,
+            (Some(want), _) => {
+                return Err(format!(
+                    "REX_EXECUTION_UNVERIFIED: Rex foreground is not {} ({name})",
+                    want.display_name()
+                ));
+            }
+            (None, Some(got)) => got,
+            (None, None) => {
+                return Err(format!(
+                    "REX_EXECUTION_UNVERIFIED: Rex foreground is not a supported agent ({name})"
+                ));
+            }
+        };
+        let _ = pid;
         self.program_status
             .iter()
             .find(|record| {
-                record.app.as_deref() == Some("codex")
+                record.app.as_deref() == Some(kind.rex_program_app())
                     && record
                         .owner
                         .as_ref()
-                        .is_some_and(|owner| owner.pid == pid && owner.name == name)
+                        .is_some_and(|owner| process.matches_owner(owner))
             })
-            .and_then(|record| record.owner.clone())
+            .and_then(|record| record.owner.clone().map(|owner| (kind, record, owner)))
             .ok_or_else(|| {
-                "REX_EXECUTION_UNVERIFIED: Codex program_status owner does not match the Rex foreground"
-                    .to_owned()
+                format!(
+                    "REX_EXECUTION_UNVERIFIED: {} program_status owner does not match the Rex foreground",
+                    kind.display_name()
+                )
             })
+    }
+
+    pub(crate) fn current_foreground_agent_owner(
+        &self,
+        expected: Option<crate::host_runtime::AgentKind>,
+    ) -> Result<(crate::host_runtime::AgentKind, RexProgramStatusOwner), String> {
+        let (kind, _, owner) = self.current_foreground_agent_record(
+            expected,
+            &[
+                "com.superlogical.terminal.process",
+                "com.superlogical.terminal.pwd",
+                "com.superlogical.terminal.program_status",
+            ],
+        )?;
+        Ok((kind, owner))
+    }
+
+    fn deliverable_foreground_agent_owner(
+        &self,
+        expected: Option<crate::host_runtime::AgentKind>,
+    ) -> Result<(crate::host_runtime::AgentKind, RexProgramStatusOwner), String> {
+        let (kind, record, owner) = self.current_foreground_agent_record(
+            expected,
+            &[
+                "com.superlogical.terminal.process",
+                "com.superlogical.terminal.program_status",
+            ],
+        )?;
+        let normalized_state = record
+            .state
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase);
+        if let Some(state @ ("blocked" | "error")) = normalized_state.as_deref() {
+            return Err(format!(
+                "REX_EXECUTION_UNVERIFIED: {} foreground state is {state}; refusing terminal input",
+                kind.display_name()
+            ));
+        }
+        Ok((kind, owner))
     }
 }
 
@@ -1354,15 +1436,18 @@ async fn verify_service_until(endpoint: &RexEndpoint, deadline: Instant) -> Resu
 }
 
 pub async fn write_text(endpoint: &RexEndpoint, text: &str) -> Result<RexWriteReceipt, RexError> {
-    write_text_until(endpoint, text, Instant::now() + default_timeout()?).await
+    write_text_inner(endpoint, text, Instant::now() + default_timeout()?, true).await
 }
 
-async fn write_text_until(
+async fn write_text_inner(
     endpoint: &RexEndpoint,
     text: &str,
     deadline: Instant,
+    verify_service: bool,
 ) -> Result<RexWriteReceipt, RexError> {
-    verify_service_until(endpoint, deadline).await?;
+    if verify_service {
+        verify_service_until(endpoint, deadline).await?;
+    }
     let request = json!({
         "session_id": endpoint.session_id,
         "block_id": endpoint.block_id,
@@ -1412,6 +1497,7 @@ async fn write_text_until(
 
 async fn send_enter_until(
     endpoint: &RexEndpoint,
+    expected_kind: crate::host_runtime::AgentKind,
     expected_owner: &RexProgramStatusOwner,
     deadline: Instant,
 ) -> Result<(), RexError> {
@@ -1424,17 +1510,26 @@ async fn send_enter_until(
             "Rex operation deadline elapsed while waiting to submit the queued text",
         ));
     }
-    let owner = observe_current_until(endpoint, deadline)
-        .await
-        .map_err(|error| {
-            RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string())
-        })?
-        .current_foreground_codex_owner();
-    if owner.as_ref().ok() != Some(expected_owner) {
+    let owner = observe_methods_until(
+        endpoint,
+        deadline,
+        &[
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.program_status",
+        ],
+        false,
+    )
+    .await
+    .map_err(|error| RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string()))?
+    .deliverable_foreground_agent_owner(Some(expected_kind));
+    if owner.as_ref().ok().map(|(_, owner)| owner) != Some(expected_owner) {
         return Err(RexError::unknown(
             "send_enter",
             RexInputStage::BeforeWrite,
-            "foreground Codex changed after text was queued",
+            format!(
+                "foreground {} changed after text was queued",
+                expected_kind.display_name()
+            ),
         ));
     }
     let call = run_cli(
@@ -1512,17 +1607,34 @@ async fn observe_current_until(
     endpoint: &RexEndpoint,
     deadline: Instant,
 ) -> Result<RexObservation, RexError> {
-    verify_service_until(endpoint, deadline).await?;
+    observe_methods_until(
+        endpoint,
+        deadline,
+        &[
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.pwd",
+            "com.superlogical.terminal.program_status",
+        ],
+        true,
+    )
+    .await
+}
+
+async fn observe_methods_until(
+    endpoint: &RexEndpoint,
+    deadline: Instant,
+    methods: &[&str],
+    verify_service: bool,
+) -> Result<RexObservation, RexError> {
+    if verify_service {
+        verify_service_until(endpoint, deadline).await?;
+    }
     let mut sources = Vec::new();
     let mut source_errors = Vec::new();
     let mut process = None;
     let mut pwd = None;
     let mut program_status = Vec::new();
-    for method in [
-        "com.superlogical.terminal.process",
-        "com.superlogical.terminal.pwd",
-        "com.superlogical.terminal.program_status",
-    ] {
+    for &method in methods {
         let call = run_cli(
             "observe_current",
             Path::new(&official_cli_path()),
@@ -1580,6 +1692,10 @@ fn extract_process(value: &Value) -> RexProcessObservation {
             .and_then(|item| item.get("name"))
             .and_then(Value::as_str)
             .map(str::to_owned),
+        argv0: foreground
+            .and_then(|item| item.get("argv0"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         path: foreground
             .and_then(|item| item.get("path"))
             .and_then(Value::as_str)
@@ -1635,6 +1751,15 @@ pub async fn notify(
     text: &str,
     mode: Option<&str>,
 ) -> Result<String, RexError> {
+    notify_for_agent(transport, text, mode, None).await
+}
+
+pub(crate) async fn notify_for_agent(
+    transport: &SelectedTransport,
+    text: &str,
+    mode: Option<&str>,
+    expected_kind: Option<crate::host_runtime::AgentKind>,
+) -> Result<String, RexError> {
     let deadline = Instant::now() + default_timeout()?;
     let allowed = [
         None,
@@ -1660,9 +1785,18 @@ pub async fn notify(
             "selected transport carries no verified Rex endpoint",
         )
     })?;
-    let observation = observe_current_until(endpoint, deadline).await?;
-    let owner = observation
-        .current_foreground_codex_owner()
+    let observation = observe_methods_until(
+        endpoint,
+        deadline,
+        &[
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.program_status",
+        ],
+        true,
+    )
+    .await?;
+    let (kind, owner) = observation
+        .deliverable_foreground_agent_owner(expected_kind)
         .map_err(|error| {
             RexError::known_not_delivered(
                 "notify",
@@ -1670,11 +1804,11 @@ pub async fn notify(
                 format!("RECIPIENT_NOT_ONLINE: {error}"),
             )
         })?;
-    let receipt = write_text_until(endpoint, text, deadline).await?;
+    let receipt = write_text_inner(endpoint, text, deadline, false).await?;
     let text_stage = RexInputStage::WriteQueued {
         bytes_written: receipt.bytes_written,
     };
-    if let Err(error) = send_enter_until(endpoint, &owner, deadline).await {
+    if let Err(error) = send_enter_until(endpoint, kind, &owner, deadline).await {
         return Err(RexError {
             operation: "send_key",
             class: error.class,
@@ -2011,6 +2145,9 @@ pub(crate) async fn restore_carrier(
         return Err(RestoreFailure::new("cancelled", "RESTORE_CANCELLED"));
     }
     service?;
+    if is_cancelled() {
+        return Err(RestoreFailure::new("cancelled", "RESTORE_CANCELLED"));
+    }
     let listing = api("session.list", None, json!({})).await;
     if is_cancelled() {
         return Err(RestoreFailure::new("cancelled", "RESTORE_CANCELLED"));
@@ -2079,12 +2216,22 @@ pub(crate) async fn restore_carrier(
         Some(create_body.to_string()),
     )
     .await;
-    let receipt = match create_call {
+    let parsed_receipt = match create_call {
         Ok(call) => parse_json_call("session.create", &call),
         Err(error) => Err(error),
-    }
-    .map_err(create_failure)?;
-    let session_id = receipt["session_id"]
+    };
+    let receipt = match parsed_receipt {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let failure = create_failure(error);
+            return Err(if is_cancelled() {
+                cancelled_create_failure(failure)
+            } else {
+                failure
+            });
+        }
+    };
+    let session_id = match receipt["session_id"]
         .as_str()
         .filter(|id| {
             *id != saved.session_id
@@ -2093,7 +2240,9 @@ pub(crate) async fn restore_carrier(
                     .any(|session| session["session_id"].as_str() == Some(id))
                 && validate_target_fields(&saved.server, id, &saved.block_id).is_ok()
         })
-        .ok_or_else(|| {
+    {
+        Some(session_id) => session_id,
+        None => {
             let detail = "RESTORE_OWNERSHIP_UNCONFIRMED: receipt lacks a fresh full session ID";
             let mut error = RestoreFailure::new("session.create", detail);
             error.create_receipt = Some(receipt.clone());
@@ -2101,8 +2250,13 @@ pub(crate) async fn restore_carrier(
                 detail: detail.into(),
             });
             error.create_context = Some(create_context.clone());
-            error
-        })?;
+            return Err(if is_cancelled() {
+                cancelled_create_failure(error)
+            } else {
+                error
+            });
+        }
+    };
 
     if is_cancelled() {
         let mut failure = RestoreFailure::new("cancelled", "RESTORE_CANCELLED");
@@ -2188,11 +2342,7 @@ pub(crate) async fn restore_carrier(
             });
         }
         Ok(_) => RestoreFailure::new("cancelled", "RESTORE_CANCELLED"),
-        Err(failure) if is_cancelled() => {
-            let mut cancelled = RestoreFailure::new("cancelled", "RESTORE_CANCELLED");
-            cancelled.detail = format!("RESTORE_CANCELLED: {}", failure.detail);
-            cancelled
-        }
+        Err(failure) if is_cancelled() => cancelled_create_failure(failure),
         Err(failure) => failure,
     };
     failure.cleanup =
@@ -2200,6 +2350,15 @@ pub(crate) async fn restore_carrier(
     failure.create_receipt = Some(receipt);
     failure.create_context = Some(create_context);
     Err(failure)
+}
+
+fn cancelled_create_failure(mut failure: RestoreFailure) -> RestoreFailure {
+    let mut cancelled = RestoreFailure::new("cancelled", "RESTORE_CANCELLED");
+    cancelled.detail = format!("RESTORE_CANCELLED: {}", failure.detail);
+    cancelled.create_receipt = failure.create_receipt.take();
+    cancelled.create_outcome = failure.create_outcome.take();
+    cancelled.create_context = failure.create_context.take();
+    cancelled
 }
 
 async fn cleanup_restore_session(

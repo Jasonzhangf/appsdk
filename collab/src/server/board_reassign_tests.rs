@@ -212,8 +212,10 @@ fn reassign_fixture(status: &str) -> (Server, std::path::PathBuf, RouteScope) {
         .invitation = Some(crate::board::BoardInvitation {
         peer_id: "current".into(),
         binding_id: binding.binding_id.as_str().into(),
+        binding_generation: 0,
         message_id: "reassign-invite".into(),
         created_ms: 3,
+        one_shot: false,
         original_status: Some(status.into()),
         original_owner: Some("old".into()),
         inviter_name: None,
@@ -1225,8 +1227,10 @@ fn pending_reassignment_invitation_does_not_move_the_task_subscription() {
     details.invitation = Some(crate::board::BoardInvitation {
         peer_id: "current".into(),
         binding_id: binding.binding_id.as_str().into(),
+        binding_generation: 1,
         message_id: "pending-task-invitation".into(),
         created_ms: now,
+        one_shot: false,
         original_status: Some("working".into()),
         original_owner: Some("old".into()),
         inviter_name: None,
@@ -2232,6 +2236,8 @@ fn master_can_reassign_ownerless_task_and_preserve_status_and_evidence() {
         "named-work".into(),
         "current".into(),
         1,
+        false,
+        Default::default(),
     );
     assert!(invited.ok, "{:?}", invited.error);
     assert_eq!(invited.data["task"]["owner"], "");
@@ -2261,7 +2267,7 @@ fn master_can_reassign_ownerless_task_and_preserve_status_and_evidence() {
 }
 
 #[tokio::test]
-async fn architect_receives_invitation_response_after_mailbox_retention() {
+async fn historical_architect_invitation_response_survives_mailbox_retention() {
     let (server, root, route) = ownerless_fixture("rework");
     assert!(peer_tests::register_synthetic_peer(&server, "architect", "architect").ok);
     let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
@@ -2280,26 +2286,34 @@ async fn architect_receives_invitation_response_after_mailbox_retention() {
             },
         }).unwrap();
     }
-    let architect = current_map_runtime(&server, &route, "architect");
+    let master = current_map_runtime(&server, &route, "master");
     let current = current_map_runtime(&server, &route, "current");
-    let architect_context = ProjectContext::for_registered_route(&root, &architect).unwrap();
+    let master_context = ProjectContext::for_registered_route(&root, &master).unwrap();
     let current_context = ProjectContext::for_registered_route(&root, &current).unwrap();
     let server = Arc::new(server);
     let manager = ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
     manager.install_runtime(&ProjectRuntimeManager::route_key(&current_context), server.clone(), None);
     let (_, invited) = manager.dispatch_sync(
-        Some(architect_context),
+        Some(master_context),
         Req::Board {
-            worker_id: "architect".into(),
-            token: "token-architect".into(),
+            worker_id: "master".into(),
+            token: "token-master".into(),
             command: crate::board::BoardCommand::Invite {
                 id: "named-work".into(),
                 to: "current".into(),
                 expected_revision: 1,
+                one_shot: false,
+                long_horizon: Default::default(),
             },
         },
     );
     assert!(invited.ok, "{invited:?}");
+    // Older daemons permitted an architect to create this invitation.
+    // Preserve the historical inviter while exercising current acceptance.
+    server.state.lock().unwrap().board_details
+        .get_mut("named-work").unwrap()
+        .invitation.as_mut().unwrap()
+        .inviter_name = Some(name.clone());
     let invitation_id = invited.data["msg_id"].as_str().unwrap();
     let (_, read) = dispatch_wire_routed(
         manager.clone(),

@@ -157,15 +157,19 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
     if !details.public_visibility && task.owner != actor {
         return Resp::err("BOARD_PRIVATE_TASK: private queue work is claimable only by its publisher");
     }
-    let ordinary_pending = task.status == "pending" && task.owner == task.created_by;
+    let ordinary_pending =
+        task.status == "pending" && (task.owner == actor || task.owner == task.created_by);
     let not_pending_error = Resp::err_data(
-        "BOARD_TASK_NOT_PENDING: only pending publisher-owned work may be claimed",
+        "BOARD_TASK_NOT_PENDING: only pending owned or scheduled work may be claimed",
         json!({"task_id": id, "status": task.status}),
     );
     let control;
     let claimable;
     let name_session;
     if ordinary_pending {
+        if task.owner != actor && details.long_horizon.is_some() {
+            return Resp::err("BOARD_LONG_HORIZON_DISPATCH_REQUIRED: use Jenny's dispatch and accept the scheduled invitation");
+        }
         if let Err(error) = board_unstarted_resources(&state, &task) { return error; }
         let route = match server_route_scope(server, &state) {
             Ok(Some(route)) => route,
@@ -178,12 +182,20 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         if let Err(error) = board_execution_gate_with_control(server, &state, &control, &actor, &id) {
             return error;
         }
+        if let Err(error) = board_dependency_gate(&state, &id) {
+            return error;
+        }
         let slot = match control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &actor) {
             Ok(slot) => slot,
             Err(error) => return Resp::err(error),
         };
         if let Some(slot) = &slot {
-            if let Err(error) = execution_candidate_gate(&state, &id, &slot.identity_key.name) {
+            if let Err(error) = execution_candidate_gate(
+                &state,
+                route.project_scope_id.as_str(),
+                &id,
+                &slot.identity_key.name,
+            ) {
                 return error;
             }
         }
@@ -193,11 +205,9 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
                     session.to_string(),
                     slot.generation,
                 ))));
-        // An admitted ticket's pending phase is its queue position. A peer may
-        // only advance the phase queued on its own slot; a WaitingAssignment
-        // phase has no slot and stays open to any claimer. The current manager
-        // may still pull another slot's queued ticket, and that claim moves the
-        // phase to the manager's slot so the phase and the task never disagree.
+        // An admitted ticket's pending phase is its queue position. A peer
+        // takes their own work or a phase already queued on their slot.
+        // Jenny can assign an unbound phase or take it into her own slot.
         let admitted_public = state
             .board_details
             .get(&id)
@@ -228,6 +238,14 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
             current_master_holder(server, &state),
             Ok(Some(master)) if master == actor
         );
+        if task.owner != actor
+            && !manager_claim
+            && !queued_phase.as_ref().is_some_and(|phase| {
+                phase.status == crate::server::ticket_state::TicketPhaseStatus::Queued
+            })
+        {
+            return Resp::err("BOARD_ASSIGNMENT_REQUIRED: only the current owner or a scheduled peer may claim");
+        }
         claimable = slot_claim.or_else(|| manager_claim.then_some(queued_phase).flatten());
         if admitted_public && claimable.is_none() {
             return Resp::err_data(
@@ -281,7 +299,6 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
                 &slot_name,
                 session.as_str(),
                 &id,
-                &actor,
                 binding_generation,
             )
         }) else {
@@ -290,25 +307,43 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         if let Err(error) = board_execution_gate_with_control(server, &state, &control, &actor, &id) {
             return error;
         }
-        if let Err(error) = execution_candidate_gate(&state, &id, &slot_name) {
+        if let Err(error) = execution_candidate_gate(
+            &state,
+            route.project_scope_id.as_str(),
+            &id,
+            &slot_name,
+        ) {
             return error;
         }
         claimable = Some(recovered);
         name_session = Some((slot_name, session.to_string(), binding_generation));
     }
+    if let (Some(_), Some((slot_name, _, _))) = (&claimable, &name_session) {
+        use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
+
+        if state.ticket_phases.iter().any(|phase| {
+            phase.task_id != id
+                && phase.phase == TicketPhaseKind::Execute
+                && phase.slot_name.as_deref() == Some(slot_name.as_str())
+                && matches!(
+                    phase.status,
+                    TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
+                )
+        }) {
+            return Resp::err_data(
+                "TICKET_ADMISSION_SLOT_OCCUPIED: owner slot already holds a claimed or running phase",
+                json!({"task_id": id, "slot": slot_name}),
+            );
+        }
+    }
     task.owner = actor.clone();
     task.status = "working".into();
     task.updated_ms = now_ms();
     details.revision += 1;
-    let auto_notice = match board_auto_notice_events(server, &state, None, &task, &actor, "task was claimed") {
-        Ok(notice) => notice,
-        Err(error) => return error,
-    };
     let mut events = vec![
         Event::TaskUpdated { task },
         Event::BoardDetailsChanged { task_id: id.clone(), details },
     ];
-    events.extend(auto_notice.events.clone());
     // Advance the admitted execute phase with the same claim. Legacy TaskRec
     // status stays "working" for old entry compatibility; the phase record is
     // the ticket-level claim fact consumed by queue projections.
@@ -360,16 +395,7 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         } });
     }
     if let Err(error) = server.commit_locked_checked_with_control(&mut state, &events, &control) { return Resp::err(format!("BOARD_DURABILITY_FAILED: {error}")); }
-    let mut response = board_task_response(server, &state, &id, &actor);
-    if let (Some(notice), Some(object)) =
-        (auto_notice.notice.as_ref(), response.data.as_object_mut())
-    {
-        object.insert("notification".into(), json!("auto-board-change"));
-        object.insert("notification_message_id".into(), json!(notice.message_id));
-    }
-    drop(state);
-    deliver_board_auto_notice(server, &response);
-    response
+    board_task_response(server, &state, &id, &actor)
 }
 
 fn board_start(
@@ -458,7 +484,12 @@ fn board_start_locked(
         return Resp::err("TICKET_SESSION_MISSING: current identity binding has no session");
     }
     let slot_name = slot.identity_key.name.clone();
-    if let Err(error) = execution_candidate_gate(state, &id, &slot_name) {
+    if let Err(error) = execution_candidate_gate(
+        state,
+        binding.project_scope.as_str(),
+        &id,
+        &slot_name,
+    ) {
         return error;
     }
     let Some(phase) = state.ticket_phases.iter().find(|phase| {

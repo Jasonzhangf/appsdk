@@ -7,6 +7,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[path = "codex_pane_interpreter.rs"]
+mod codex_pane_interpreter;
+
 const REX_PARENT_TIMEOUT: Duration = Duration::from_secs(30);
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -19,9 +22,12 @@ fn collab_test_binary() -> PathBuf {
 fn official_rex_cli() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        return PathBuf::from(
-            "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex",
-        );
+        let helper = "Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
+        let stable = Path::new("/Applications/Rex.app").join(helper);
+        if stable.is_file() {
+            return stable;
+        }
+        return Path::new("/Applications/Rex Beta.app").join(helper);
     }
     #[cfg(target_os = "linux")]
     {
@@ -399,20 +405,53 @@ impl RexLiveFixture {
     }
 
     pub fn create_receiver_session(&mut self, role: &str) -> OwnedRexSession {
+        self.create_receiver_with_command(role, vec![self.python.to_string_lossy().into_owned()])
+    }
+
+    pub fn create_codex_receiver_session(&mut self, role: &str) -> OwnedRexSession {
+        let command = codex_pane_interpreter::command(&self.root);
+        self.create_receiver_with_command(
+            role,
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("exec {command} \"$@\""),
+                "codex".into(),
+            ],
+        )
+    }
+
+    pub fn create_agy_receiver_session(&mut self, role: &str) -> OwnedRexSession {
+        let command = codex_pane_interpreter::command_named(&self.root, "agy");
+        self.create_receiver_with_command(
+            role,
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("exec {command} \"$@\""),
+                "agy".into(),
+            ],
+        )
+    }
+
+    fn create_receiver_with_command(
+        &mut self,
+        role: &str,
+        mut command: Vec<String>,
+    ) -> OwnedRexSession {
         let token = self.unique_token();
         let run_id = format!("rex-live-{role}-{token}");
         let label = format!("rex-api-foundations-20261108-live-{role}-{token}");
         let agent_session_id = format!("rex-live-agent-{role}-{token}");
         let ack_file = self.root.join(format!("receiver-{role}-{token}.jsonl"));
-        let command = vec![
-            self.python.to_string_lossy().into_owned(),
+        command.extend([
             "-u".to_owned(),
             self.receiver_script.to_string_lossy().into_owned(),
             "--run-id".to_owned(),
             run_id.clone(),
             "--ack-file".to_owned(),
             ack_file.to_string_lossy().into_owned(),
-        ];
+        ]);
         let request = json!({
             "label": label,
             "initial_windows": [{

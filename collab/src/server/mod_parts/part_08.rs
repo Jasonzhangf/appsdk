@@ -2559,10 +2559,7 @@ fn task_update_locked(
                 {
                     return error;
                 }
-                if board_check_master_or_task_architect_locked(
-                    server, st, control, &task_id, &worker_id,
-                )
-                .is_err()
+                if board_check_master_locked(server, st, &worker_id).is_err()
                 {
                     return Resp::err("only the task owner may update its lifecycle");
                 }
@@ -2614,8 +2611,7 @@ fn task_update_locked(
         // review records continue through the evidence-bearing integrated path.
         let legacy_accepted_merge = new_status == "merged"
             && task.status == "accepted"
-            && !st.task_lifecycle.contains_key(&task.id)
-            && required_work_reviewer(st, &task.id).is_none();
+            && !st.task_lifecycle.contains_key(&task.id);
         if new_status == "accepted" || (new_status == "merged" && !legacy_accepted_merge) {
             return Resp::err(
                 "use collab task review/integrated for integration-owned lifecycle transitions",
@@ -2691,8 +2687,7 @@ fn task_update_locked(
         )
     {
         let mut record = st.task_lifecycle[&task_id].clone();
-        let reviewer = required_work_reviewer(st, &task_id);
-        events.extend(invalidate_work_review(st, &task, &mut record, reviewer));
+        events.extend(invalidate_work_review(st, &task, &mut record, None));
         events.push(Event::TaskLifecycleUpdated {
             task_id: task_id.clone(),
             record,
@@ -2900,9 +2895,63 @@ fn task_block_decide_locked(
             task: updated_task.clone(),
         });
     }
+    let mut continuation_message_id = None;
     let commit = match control {
-        Some(control) => server.commit_locked_checked_with_control(st, &events, control),
-        None => server.commit_locked_checked(st, &events),
+        Some(control) => {
+            if decision == "approve" {
+                if let Ok(Some(route)) = server_route_scope(server, st) {
+                    let mut continuation_state = st.clone();
+                    let _ = continuation_state.apply_checked(&Event::TaskUpdated {
+                        task: updated_task.clone(),
+                    });
+                    let continuation = ticket_continuation_events(
+                        &continuation_state,
+                        control,
+                        &route,
+                        &updated_task.owner,
+                        &[],
+                        false,
+                    );
+                    for event in &continuation {
+                        if let Event::WakeBound { message_id, .. } = event {
+                            continuation_message_id = Some(message_id.clone());
+                        }
+                    }
+                    events.extend(continuation);
+                }
+            }
+            server.commit_locked_checked_with_control(st, &events, control)
+        }
+        None => {
+            if decision == "approve" {
+                if let Ok(Some(route)) = server_route_scope(server, st) {
+                    if let Ok(loaded) =
+                        binding_store::BindingControlStore::new(server.host_paths.state_root())
+                            .load()
+                    {
+                        let mut continuation_state = st.clone();
+                        let _ = continuation_state.apply_checked(&Event::TaskUpdated {
+                            task: updated_task.clone(),
+                        });
+                        let continuation = ticket_continuation_events(
+                            &continuation_state,
+                            &loaded,
+                            &route,
+                            &updated_task.owner,
+                            &[],
+                            false,
+                        );
+                        for event in &continuation {
+                            if let Event::WakeBound { message_id, .. } = event {
+                                continuation_message_id = Some(message_id.clone());
+                            }
+                        }
+                        events.extend(continuation);
+                    }
+                }
+            }
+            server.commit_locked_checked(st, &events)
+        }
     };
     if let Err(error) = commit {
         return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
@@ -2912,7 +2961,12 @@ fn task_block_decide_locked(
         "status": updated_task.status,
         "owner": updated_task.owner,
         "block_request": request,
-        "notification": "none",
+        "notification": if continuation_message_id.is_some() {
+            "auto-ticket-continuation"
+        } else {
+            "none"
+        },
+        "notification_message_id": continuation_message_id,
         "next_action": if decision == "approve" {
             "task is blocked; resume only after the blocker is resolved"
         } else {
@@ -3125,31 +3179,10 @@ fn handle_task_deliver_with_intent(
     worktree: Option<String>,
     no_candidate: bool,
 ) -> Resp {
-    let mut pending_notice = None;
-    let response = {
-        let mut st = server.state.lock().unwrap();
-        handle_task_deliver_with_intent_locked(
-            server,
-            &mut st,
-            None,
-            worker_id,
-            token,
-            task_id,
-            evidence,
-            attempt,
-            worktree,
-            no_candidate,
-            &mut pending_notice,
-        )
-    };
-    finish_task_deliver_notification(server, response, pending_notice)
-}
-
-struct PendingTaskReviewNotice {
-    message_id: String,
-    subscription_id: Option<String>,
-    method: &'static str,
-    now: i64,
+    let mut st = server.state.lock().unwrap();
+    handle_task_deliver_with_intent_locked(
+        server, &mut st, None, worker_id, token, task_id, evidence, attempt, worktree, no_candidate,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3164,7 +3197,6 @@ fn handle_task_deliver_with_intent_locked(
     attempt: Option<u64>,
     worktree: Option<String>,
     no_candidate: bool,
-    pending_notice: &mut Option<PendingTaskReviewNotice>,
 ) -> Resp {
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
@@ -3245,14 +3277,13 @@ fn handle_task_deliver_with_intent_locked(
     let now = now_ms();
     task.status = "delivered".to_string();
     task.wait = None;
-    task.next_step = Some(
-        "task owner or live master reviews delivery with collab task review --accept or --rework"
-            .to_string(),
-    );
+    task.next_step = Some(RECORD_OWNER_REVIEW.to_owned());
     task.updated_ms = now;
     let mut lifecycle = st.task_lifecycle.get(&task.id).cloned().unwrap_or_default();
-    let required_reviewer = required_work_reviewer(&st, &task_id);
-    let mut events = invalidate_work_review(&st, &task, &mut lifecycle, required_reviewer.clone());
+    if lifecycle.review_subject_revision == 0 && lifecycle.delivered_ms.is_some() {
+        lifecycle.review_subject_revision = 1;
+    }
+    let mut events = invalidate_work_review(&st, &task, &mut lifecycle, None);
     if let Some(ticket_event) = ticket_result_event.clone() {
         events.push(ticket_event);
     }
@@ -3265,74 +3296,12 @@ fn handle_task_deliver_with_intent_locked(
     lifecycle.delivered_ms = Some(now);
     lifecycle.review_evidence = None;
     lifecycle.reviewer = None;
+    lifecycle.review_recorded_by = None;
     lifecycle.reviewed_ms = None;
     lifecycle.integration_commit = None;
     lifecycle.integration_evidence = None;
     lifecycle.integrated_ms = None;
     let delivery_kind = lifecycle.delivery_kind;
-    let mut review_notice = None;
-    let mut reviewer_waiting = None;
-    if let Some(name) = required_reviewer.as_deref() {
-        task.next_step = Some(format!(
-            "await review by {name}; use collab task review --accept or --rework"
-        ));
-        let route = match server_route_scope(server, &st) {
-            Ok(Some(route)) => route,
-            _ => return Resp::err("required reviewer project route is not ready"),
-        };
-        let loaded;
-        let control = match control {
-            Some(control) => control,
-            None => {
-                loaded =
-                    match binding_store::BindingControlStore::new(server.host_paths.state_root())
-                        .load()
-                    {
-                        Ok(control) => control,
-                        Err(error) => return Resp::err(error),
-                    };
-                &loaded
-            }
-        };
-        let recipient =
-            match control.current_for_name(&route.project_scope_id, &route.app_scope_id, name) {
-                Ok(slot) => slot
-                    .and_then(|slot| slot.active_binding())
-                    .map(|current| current.binding.agent_id.as_str().to_owned()),
-                Err(error) => return Resp::err(error),
-            };
-        if let Some(recipient) = recipient.filter(|id| st.workers.contains_key(id)) {
-            let message_id = gen_msg_id();
-            events.push(Event::Sent { msg: Message {
-                id:message_id.clone(),from:worker_id.clone(),to:recipient.clone(),mtype:"request".into(),
-                subject:Some(format!("review-required:{task_id}")),
-                body:format!("Task {task_id} is delivered and requires your review as {name}. Read its task status and evidence. Submit collab task review with --accept or --rework and your evidence. The author's delivery evidence is: {evidence}"),
-                in_reply_to:None,created_ms:now,state:"pending".into(),wake_attempt_count:0,
-                last_wake_attempt_ms:0,retry_attempted:false,
-            }});
-            events.push(Event::DeliveryMode {
-                msg_id: message_id.clone(),
-                mode: "explicit-notification".into(),
-                source_thread_id: None,
-            });
-            let subscription = st
-                .matching_subscription(&recipient, "direct-message", None, now)
-                .cloned();
-            if let Some(subscription) = &subscription {
-                events.push(Event::WakeBound {
-                    message_id: message_id.clone(),
-                    subscription_id: subscription.id.clone(),
-                });
-            }
-            review_notice = Some((
-                message_id,
-                subscription,
-                notification_method_for_worker(&st, &recipient),
-            ));
-        } else {
-            reviewer_waiting = Some(format!("reviewer {name} is currently unavailable"));
-        }
-    }
     // A completed execute phase releases the slot. Run the same continuation
     // entry so the next queued item for that slot is claimed in this batch.
     if let Some(Event::TicketPhaseRecorded { phase: completed }) = ticket_result_event.as_ref() {
@@ -3385,57 +3354,17 @@ fn handle_task_deliver_with_intent_locked(
         return Resp::err(format!("TASK_DELIVER_DURABILITY_FAILED: {error}"));
     }
 
-    let data = json!({
+    Resp::data(json!({
         "delivered": task.id,
         "status": task.status,
         "evidence": evidence,
         "worktree": worktree,
         "delivery_kind": delivery_kind.as_str(),
         "notification": "none",
-        "required_reviewer": required_reviewer,
-        "review_waiting": reviewer_waiting,
         "delivery_complete": false,
         "next_action": task.next_step,
         "identity": {"worker_id": worker.id, "kind": "peer"},
-    });
-    if let Some((message_id, subscription, method)) = review_notice {
-        let mut data = data;
-        data["review_message_id"] = json!(message_id);
-        *pending_notice = Some(PendingTaskReviewNotice {
-            message_id,
-            subscription_id: subscription.map(|subscription| subscription.id),
-            method,
-            now,
-        });
-        Resp::data(data)
-    } else {
-        Resp::data(data)
-    }
-}
-
-fn finish_task_deliver_notification(
-    server: &Server,
-    response: Resp,
-    pending_notice: Option<PendingTaskReviewNotice>,
-) -> Resp {
-    let Some(notice) = pending_notice else {
-        return response;
-    };
-    let attempt = match notice.subscription_id.as_deref() {
-        Some(subscription_id) => attempt_notification_detailed_with_at(
-            server,
-            &notice.message_id,
-            subscription_id,
-            notice.now,
-        ),
-        None => NotificationAttempt::NotAttempted(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR.into()),
-    };
-    notification_send_response(
-        response.data,
-        notice.subscription_id.is_some(),
-        notice.method,
-        &attempt,
-    )
+    }))
 }
 
 fn task_integration_authorized(

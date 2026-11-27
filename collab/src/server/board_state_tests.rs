@@ -143,7 +143,7 @@ fn task(id: &str, owner: &str) -> TaskRec {
 }
 
 #[test]
-fn reviewer_rebind_keeps_delivered_task_stable_and_updates_next_step() {
+fn historical_reviewer_is_removed_from_the_effective_next_step() {
     let (server, root) = test_server();
     for worker in ["author", "master"] {
         let response = crate::server::peer_tests::register_synthetic_peer(&server, worker, worker);
@@ -197,14 +197,13 @@ fn reviewer_rebind_keeps_delivered_task_stable_and_updates_next_step() {
     let task = &state.tasks["reviewer-rebind"];
     assert_eq!(task.status, "delivered");
     assert_eq!(
-        task.next_step.as_deref(),
-        Some("await review by Carol; use collab task review --accept or --rework")
+        task_next_step(task),
+        Some(RECORD_OWNER_REVIEW)
     );
     let lifecycle = &state.task_lifecycle["reviewer-rebind"];
-    assert_eq!(lifecycle.required_reviewer_name.as_deref(), Some("Carol"));
     assert!(lifecycle.reviewer.is_none());
     assert!(lifecycle.review_evidence.is_none());
-    assert_eq!(lifecycle.review_subject_revision, 3);
+    assert_eq!(lifecycle.review_subject_revision, 2);
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -593,8 +592,10 @@ fn current_state_preserves_invitation_and_its_capacity_reservation() {
                 invitation: Some(crate::board::BoardInvitation {
                     peer_id: "peer".into(),
                     binding_id: "test-binding".into(),
+                    binding_generation: 0,
                     message_id: "offer-message".into(),
                     created_ms: now_ms(),
+                    one_shot: false,
                     original_status: None,
                     original_owner: None,
                     inviter_name: None,
@@ -845,7 +846,7 @@ fn task_view_omits_lifecycle_sections_that_hold_no_evidence() {
 /// The facts an actor needs for the next step survive the trimmed projection:
 /// a pending merge, the pinned reviewer, and cleanup that is still outstanding.
 #[test]
-fn task_view_keeps_pending_merge_pinned_reviewer_and_outstanding_cleanup() {
+fn task_view_keeps_historical_merge_and_cleanup_without_old_reviewer_gate() {
     let (server, root) = test_server();
     let mut state = server.state.lock().unwrap();
     register_worker(&mut state, "peer");
@@ -871,10 +872,7 @@ fn task_view_keeps_pending_merge_pinned_reviewer_and_outstanding_cleanup() {
         .unwrap();
 
     let pending_reviewer = task_view(&state, &state.tasks["delivered-work"]);
-    assert_eq!(
-        pending_reviewer["review"]["required_reviewer_name"], "Bob",
-        "the pinned reviewer is a next-step fact even before delivery: {pending_reviewer}"
-    );
+    assert!(pending_reviewer["review"]["required_reviewer_name"].is_null());
     assert!(
         pending_reviewer.get("delivery").is_none(),
         "{pending_reviewer}"

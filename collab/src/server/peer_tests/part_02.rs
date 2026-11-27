@@ -1,5 +1,5 @@
 #[test]
-fn pending_merge_requires_master_and_main_reachable_commit() {
+fn owner_resolves_legacy_merge_with_main_reachable_commit() {
     let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -73,8 +73,8 @@ fn pending_merge_requires_master_and_main_reachable_commit() {
     assert!(
         handle_task_review(
             &server,
-            "master".into(),
-            "token-master".into(),
+            "owner".into(),
+            "token-owner".into(),
             "task".into(),
             true,
             false,
@@ -83,27 +83,34 @@ fn pending_merge_requires_master_and_main_reachable_commit() {
         .ok
     );
 
-    // The pending merge must stay master-owned; the task owner cannot resolve it.
-    let owner_attempt = handle_task_integrated(
+    server.commit(&[Event::MergeRequested {
+        request: crate::server::state::PendingMerge {
+            task_id: "task".into(),
+            owner: "owner".into(),
+            requested_by: "master".into(),
+            requested_ms: now_ms(),
+            candidate_commit: None,
+        },
+    }]);
+    let master_attempt = handle_task_integrated(
         &server,
-        "owner".into(),
-        "token-owner".into(),
+        "master".into(),
+        "token-master".into(),
         "task".into(),
         main_before_merge.clone(),
-        "owner bypass attempt".into(),
+        "master override attempt".into(),
     );
-    assert!(!owner_attempt.ok, "{owner_attempt:?}");
-    assert_eq!(owner_attempt.error.as_deref(), Some("TASK_MERGE_PENDING"));
+    assert!(!master_attempt.ok, "{master_attempt:?}");
     assert!(
         server.state.lock().unwrap().pending_merges.contains_key("task"),
-        "the obligation must survive a non-master integration attempt"
+        "the historical record remains after a rejected integration attempt"
     );
 
     // The supplied commit itself must already be reachable from refs/heads/main.
     let off_main = handle_task_integrated(
         &server,
-        "master".into(),
-        "token-master".into(),
+        "owner".into(),
+        "token-owner".into(),
         "task".into(),
         candidate.clone(),
         "feature branch sha before it lands on main".into(),
@@ -118,13 +125,13 @@ fn pending_merge_requires_master_and_main_reachable_commit() {
         "the obligation must survive an off-main integration attempt"
     );
 
-    // Once the supplied commit is reachable from main, the current master may
+    // Once the supplied commit is reachable from main, the current owner may
     // record it and resolve the durable merge obligation.
     git_ok(&root, &["merge", "--no-ff", "-q", "codex/candidate", "-m", "merge candidate"]);
     let merged = handle_task_integrated(
         &server,
-        "master".into(),
-        "token-master".into(),
+        "owner".into(),
+        "token-owner".into(),
         "task".into(),
         candidate.clone(),
         "candidate merged onto main".into(),
@@ -220,7 +227,7 @@ fn stale_registered_branch_does_not_block_delivery() {
 }
 
 #[test]
-fn review_accept_surfaces_failed_immediate_wake_attempt() {
+fn owner_review_accept_does_not_require_notifications() {
     let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
@@ -251,9 +258,7 @@ fn review_accept_surfaces_failed_immediate_wake_attempt() {
         .ok
     );
 
-    // Disable notifications so the immediate wake cannot deliver; the
-    // obligation must still be durable, but the response must surface the
-    // explicit failure instead of pretending success.
+    // Review acceptance is local to the delivery owner.
     server.config.notifications.enabled = false;
     let response = handle_task_review(
         &server,
@@ -265,22 +270,9 @@ fn review_accept_surfaces_failed_immediate_wake_attempt() {
         "review passed".into(),
     );
     assert!(response.ok, "{}", response.error.clone().unwrap_or_default());
-    assert_eq!(
-        response.data["notification"],
-        serde_json::json!("subscribed-not-sent")
-    );
-    assert_eq!(response.data["repair_required"], serde_json::json!(true));
-    assert!(
-        response.data["notification_error"]
-            .as_str()
-            .is_some_and(|error| error.contains("notifications are disabled")),
-        "{}",
-        response.data
-    );
-    assert!(
-        server.state.lock().unwrap().pending_merges.contains_key("task"),
-        "the obligation remains durable even when the wake cannot deliver"
-    );
+    assert_eq!(response.data["merge_pending"], serde_json::json!(false));
+    assert!(response.data.get("notification_error").is_none());
+    assert_eq!(server.state.lock().unwrap().tasks["task"].status, "accepted");
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -293,6 +285,15 @@ fn legacy_accepted_update_to_rework_resolves_pending_merge() {
     assert!(create_task(&server, "owner", "task", "feature").ok);
 
     accept_task(&server, "owner", "task");
+    server.commit(&[Event::MergeRequested {
+        request: crate::server::state::PendingMerge {
+            task_id: "task".into(),
+            owner: "owner".into(),
+            requested_by: "master".into(),
+            requested_ms: now_ms(),
+            candidate_commit: None,
+        },
+    }]);
     assert!(server.state.lock().unwrap().pending_merges.contains_key("task"));
 
     assert!(

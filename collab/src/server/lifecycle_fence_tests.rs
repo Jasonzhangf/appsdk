@@ -162,8 +162,10 @@ fn public_details() -> crate::board::BoardTaskDetails {
         invitation: Some(crate::board::BoardInvitation {
             peer_id: "invitee".into(),
             binding_id: "invite-binding".into(),
+            binding_generation: 0,
             message_id: "offer-message".into(),
             created_ms: 3,
+            one_shot: false,
             original_status: None,
             original_owner: None,
             inviter_name: None,
@@ -1130,6 +1132,7 @@ fn ack_marked_occurrence_below_retained_read_count_cannot_reactivate_retired_sub
                 message_id: "msg-unread".into(),
                 subscription_id: "sub-retired".into(),
                 trigger_ms,
+                idle_triggered: false,
             },
             Event::Sent {
                 msg: delivery_message(TARGET, "msg-unread", "delivered"),

@@ -61,20 +61,43 @@ fn workflow_base_card(target: &str) -> serde_json::Value {
     })
 }
 
-fn workflow_default_specialty(
-    role: &str,
-) -> Option<(&'static str, &'static crate::board::WorkflowTemplateSpec)> {
+fn workflow_canonical_specialty(role: &str) -> Option<&'static str> {
     let normalized = role.trim().to_lowercase();
     let asset = workflow_template_asset();
+    if asset.specialty_templates.contains_key(&normalized) {
+        return asset
+            .specialty_templates
+            .get_key_value(&normalized)
+            .map(|(canonical, _)| canonical.as_str());
+    }
     for (canonical, aliases) in &asset.specialty_aliases {
         if aliases.iter().any(|alias| alias == &normalized) {
             return asset
                 .specialty_templates
-                .get(canonical)
-                .map(|spec| (canonical.as_str(), spec));
+                .contains_key(canonical)
+                .then_some(canonical.as_str());
         }
     }
     None
+}
+
+fn workflow_role_matches(role: &str, expected: &str) -> bool {
+    if role.trim().eq_ignore_ascii_case(expected.trim()) {
+        return true;
+    }
+    workflow_canonical_specialty(role)
+        .zip(workflow_canonical_specialty(expected))
+        .is_some_and(|(role, expected)| role == expected)
+}
+
+fn workflow_default_specialty(
+    role: &str,
+) -> Option<(&'static str, &'static crate::board::WorkflowTemplateSpec)> {
+    let canonical = workflow_canonical_specialty(role)?;
+    workflow_template_asset()
+        .specialty_templates
+        .get(canonical)
+        .map(|spec| (canonical, spec))
 }
 
 fn workflow_default_specialty_card(target: &str) -> serde_json::Value {
@@ -122,7 +145,11 @@ fn effective_workflow_templates(
 ) -> EffectiveWorkflow {
     let identity_role = if base_role == "master" { "master" } else { "peer" };
     let configured = state.workflow_templates.get(project_scope);
-    let (identity, identity_card) = match configured.and_then(|targets| targets.get(identity_role)) {
+    let current_base_version = workflow_template_asset().base_version;
+    let (identity, identity_card) = match configured
+        .and_then(|targets| targets.get(identity_role))
+        .filter(|entry| entry.base_version == current_base_version)
+    {
         Some(entry) => (
             entry.spec.clone(),
             workflow_override_card(identity_role, entry),
@@ -145,7 +172,10 @@ fn effective_workflow_templates(
     let mut selected_defaults = std::collections::BTreeSet::new();
     for role in roles {
         let target = format!("role:{role}");
-        if let Some(entry) = configured.and_then(|targets| targets.get(&target)) {
+        if let Some(entry) = configured
+            .and_then(|targets| targets.get(&target))
+            .filter(|entry| entry.base_version == current_base_version)
+        {
             specialties.push(EffectiveSpecialty {
                 target: target.clone(),
                 spec: entry.spec.clone(),
@@ -265,7 +295,7 @@ fn plan_workflow_template_set(
         .normalized()
         .map_err(|error| format!("WORKFLOW_TEMPLATE_INVALID: {error}"))?;
     if let Some(existing) = existing {
-        if existing.spec == spec {
+        if existing.base_version == workflow_template_asset().base_version && existing.spec == spec {
             return Ok(WorkflowTemplatePlan {
                 target,
                 outcome: "unchanged",
@@ -400,10 +430,10 @@ mod workflow_template_state_tests {
         let mut state = State::default();
 
         let base = workflow_template_projection(&state, "/project", "peer", &[]);
-        assert_eq!(base["base_version"], json!(1));
+        assert_eq!(base["base_version"], json!(2));
         assert_eq!(base["identity"]["target"], json!("peer"));
         assert_eq!(base["identity"]["source"], json!("base"));
-        assert_eq!(base["identity"]["base_version"], json!(1));
+        assert_eq!(base["identity"]["base_version"], json!(2));
         assert_eq!(base["identity"]["revision"], json!(0));
         assert_eq!(base["specialties"], json!([]));
         assert!(base["identity"].get("template").is_none());

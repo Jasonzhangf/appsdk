@@ -121,12 +121,48 @@ fn legacy_task_owner_gate(state: &State, task_id: &str, actor: &str) -> Result<(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecutionCandidateIneligible {
     PinnedExecutorMismatch,
-    RequiredReviewer,
+    ProtectedRole,
+}
+
+fn protected_specialty(role: &str) -> Option<&'static str> {
+    workflow_canonical_specialty(role)
+        .filter(|specialty| matches!(*specialty, "patrol" | "memory"))
+}
+
+fn work_policy_authorizes_specialty(policy: &crate::board::WorkPolicy, specialty: &str) -> bool {
+    policy.protected_role_authorized
+        && policy.preferred_roles.as_ref().is_some_and(|roles| {
+            roles
+                .iter()
+                .any(|role| workflow_role_matches(role, specialty))
+        })
+}
+
+fn work_policy_explicitly_grants_protected_specialty(policy: &crate::board::WorkPolicy) -> bool {
+    policy
+        .preferred_roles
+        .as_ref()
+        .is_some_and(|roles| roles.iter().any(|role| protected_specialty(role).is_some()))
+        || policy
+            .work_kind
+            .as_deref()
+            .is_some_and(|kind| protected_specialty(kind).is_some())
+}
+
+fn work_policy_matches_roles(policy: &crate::board::WorkPolicy, roles: &[String]) -> bool {
+    policy.preferred_roles.as_ref().is_some_and(|preferred| {
+        preferred.iter().any(|preferred_role| {
+            roles
+                .iter()
+                .any(|role| workflow_role_matches(preferred_role, role))
+        })
+    })
 }
 
 fn execution_candidate_eligibility(
     policy: &crate::board::WorkPolicy,
     candidate_name: &str,
+    work_roles: &[String],
 ) -> Result<(), ExecutionCandidateIneligible> {
     if policy
         .executor_name
@@ -135,19 +171,39 @@ fn execution_candidate_eligibility(
     {
         return Err(ExecutionCandidateIneligible::PinnedExecutorMismatch);
     }
-    if policy.reviewer_name.as_deref() == Some(candidate_name) {
-        return Err(ExecutionCandidateIneligible::RequiredReviewer);
+    let protected_roles = work_roles
+        .iter()
+        .filter_map(|role| protected_specialty(role))
+        .collect::<Vec<_>>();
+    if !protected_roles.is_empty()
+        && !protected_roles
+            .iter()
+            .any(|specialty| work_policy_authorizes_specialty(policy, specialty))
+    {
+        return Err(ExecutionCandidateIneligible::ProtectedRole);
     }
     Ok(())
 }
 
 fn execution_candidate_gate(
     state: &State,
+    project_scope: &str,
     task_id: &str,
     candidate_name: &str,
 ) -> Result<(), Resp> {
     let policy = state.effective_work_policy(task_id);
-    match execution_candidate_eligibility(&policy, candidate_name) {
+    execution_candidate_policy_gate(state, project_scope, task_id, candidate_name, &policy)
+}
+
+fn execution_candidate_policy_gate(
+    state: &State,
+    project_scope: &str,
+    task_id: &str,
+    candidate_name: &str,
+    policy: &crate::board::WorkPolicy,
+) -> Result<(), Resp> {
+    let work_roles = state.name_work_roles(project_scope, candidate_name);
+    match execution_candidate_eligibility(policy, candidate_name, &work_roles) {
         Ok(()) => Ok(()),
         Err(ExecutionCandidateIneligible::PinnedExecutorMismatch) => Err(Resp::err_data(
             "WORK_EXECUTOR_REQUIRED: task is pinned to another stable name",
@@ -158,12 +214,12 @@ fn execution_candidate_gate(
                 "delivery_complete": false
             }),
         )),
-        Err(ExecutionCandidateIneligible::RequiredReviewer) => Err(Resp::err_data(
-            "WORK_REVIEWER_EXECUTION_CONFLICT: required reviewer cannot execute the same task",
+        Err(ExecutionCandidateIneligible::ProtectedRole) => Err(Resp::err_data(
+            "WORK_EXECUTOR_PROTECTED_ROLE: patrol and memory roles cannot receive engineering Execute work",
             json!({
                 "task_id": task_id,
                 "candidate_name": candidate_name,
-                "reviewer_name": policy.reviewer_name,
+                "work_roles": work_roles,
                 "delivery_complete": false
             }),
         )),
@@ -179,7 +235,12 @@ fn execution_admission_gate_with_control(
     candidate_name: &str,
 ) -> Result<(), Resp> {
     work_executor_gate_with_control(state, control, route, task_id, actor)?;
-    execution_candidate_gate(state, task_id, candidate_name)
+    execution_candidate_gate(
+        state,
+        route.project_scope_id.as_str(),
+        task_id,
+        candidate_name,
+    )
 }
 
 fn parse_work_policy(
@@ -231,14 +292,38 @@ fn parse_work_policy(
     Ok(crate::board::WorkPolicy {
         work_kind: name(kind)?,
         preferred_roles,
+        protected_role_authorized: false,
         executor_name: name(executor)?,
         reviewer_name: name(reviewer)?,
         cleared_fields,
     })
 }
 
+fn overlay_task_work_policy(
+    policy: &mut crate::board::WorkPolicy,
+    patch: &crate::board::WorkPolicy,
+    is_scheduler: bool,
+) {
+    overlay_work_policy(policy, patch);
+    if patch.preferred_roles.is_some()
+        || patch
+            .cleared_fields
+            .iter()
+            .any(|field| field == "preferred_roles")
+    {
+        policy.protected_role_authorized = is_scheduler
+            && policy
+                .preferred_roles
+                .as_ref()
+                .is_some_and(|roles| roles.iter().any(|role| protected_specialty(role).is_some()));
+    }
+}
+
 fn overlay_work_policy(base: &mut crate::board::WorkPolicy, patch: &crate::board::WorkPolicy) {
     let cleared = |field: &str| patch.cleared_fields.iter().any(|value| value == field);
+    if patch.preferred_roles.is_some() || cleared("preferred_roles") {
+        base.protected_role_authorized = false;
+    }
     crate::board::apply_policy_field(&patch.work_kind, cleared("work_kind"), &mut base.work_kind);
     crate::board::apply_policy_field(
         &patch.preferred_roles,
@@ -276,25 +361,6 @@ fn overlay_work_policy(base: &mut crate::board::WorkPolicy, patch: &crate::board
     }
 }
 
-/// Stable-name review capability used by the three-tier review route.
-pub(crate) fn ticket_review_group(
-    state: &State,
-    route: &RouteScope,
-    slot_name: &str,
-) -> Option<crate::server::ticket_state::ReviewRouteGroup> {
-    use crate::server::ticket_state::ReviewRouteGroup;
-    let roles = state.name_work_roles(route.project_scope_id.as_str(), slot_name);
-    if roles.iter().any(|role| role == "reviewer") {
-        return Some(ReviewRouteGroup::Reviewer);
-    }
-    if roles
-        .iter()
-        .any(|role| role == "architect" || role == "expert")
-    {
-        return Some(ReviewRouteGroup::ArchitectExpert);
-    }
-    Some(ReviewRouteGroup::IndependentPeer)
-}
 
 /// Phase-group queue key. Execute and plan use the work-kind group already
 /// persisted for rotation; reviews use one group per review subject.
@@ -473,12 +539,13 @@ pub(crate) fn ticket_recovery_claim_phase(
 /// this slot while the newest execute attempt is still on another slot with no
 /// submitted result. `rework` is included because a reopened rework attempt
 /// can be left at an older generation with no other recovery path.
+/// The caller resolves the current binding. The stable assignment and session
+/// establish ownership even if the task still stores a retired worker ID.
 pub(crate) fn ticket_stale_active_claim_phase(
     state: &State,
     slot_name: &str,
     current_session: &str,
     task_id: &str,
-    current_worker_id: &str,
     current_generation: u64,
 ) -> Option<crate::server::ticket_state::TicketPhaseRecord> {
     use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
@@ -491,9 +558,7 @@ pub(crate) fn ticket_stale_active_claim_phase(
         return None;
     }
     let task = state.tasks.get(task_id)?;
-    if !matches!(task.status.as_str(), "working" | "blocked" | "rework")
-        || task.owner != current_worker_id
-    {
+    if !matches!(task.status.as_str(), "working" | "blocked" | "rework") {
         return None;
     }
     let assignment = state.task_assignment(task_id)?;
@@ -527,61 +592,6 @@ pub(crate) fn ticket_stale_active_claim_phase(
     Some((*newest).clone())
 }
 
-/// Eligible review receivers for one admitted ticket phase. A participating
-/// actor or stable name is excluded by the route itself; the caller only has to
-/// supply every bound, project-authorized peer.
-pub(crate) fn ticket_review_candidates(
-    state: &State,
-    control: &binding_slot::BindingControlSet,
-    route: &RouteScope,
-    phases: &[crate::server::ticket_state::TicketPhaseRecord],
-) -> Vec<crate::server::ticket_state::ReviewCandidate> {
-    use crate::server::ticket_state::{ReviewCandidate, ReviewRouteGroup};
-    let master = current_master_worker_id(state, None);
-    let mut candidates = Vec::new();
-    for worker in state.workers.values() {
-        if is_managed_subagent(state, &worker.id)
-            || authoritative_send_binding(state, route, &worker.id).is_err()
-        {
-            continue;
-        }
-        if master.as_deref() == Some(worker.id.as_str()) {
-            continue;
-        }
-        let Ok(Some(slot)) =
-            control.current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id)
-        else {
-            continue;
-        };
-        let name = slot.identity_key.name.clone();
-        let Some(group) = ticket_review_group(state, route, &name) else {
-            continue;
-        };
-        let participated = phases.iter().any(|phase| {
-            phase.slot_name.as_deref() == Some(name.as_str())
-                && phase
-                    .result
-                    .as_ref()
-                    .is_some_and(|result| result.submitted_by == worker.id)
-        }) || phases.iter().any(|phase| {
-            phase.slot_name.as_deref() == Some(name.as_str())
-                && matches!(
-                    phase.status,
-                    crate::server::ticket_state::TicketPhaseStatus::Claimed
-                        | crate::server::ticket_state::TicketPhaseStatus::Running
-                )
-        });
-        candidates.push(ReviewCandidate {
-            slot_name: name,
-            worker_id: worker.id.clone(),
-            group,
-            participated,
-        });
-    }
-    candidates.sort_by(|left, right| left.slot_name.cmp(&right.slot_name));
-    candidates.dedup_by(|left, right| left.slot_name == right.slot_name);
-    candidates
-}
 
 /// Eligible non-master slots for a plan or execute phase. Plan requires a
 /// `plan` or `planner` specialty. Execute is the project default for every
@@ -604,7 +614,8 @@ fn ticket_slot_candidates(
     let mut candidates = Vec::new();
     if phase == TicketPhaseKind::Execute {
         if let Some(name) = policy.executor_name.as_deref() {
-            if execution_candidate_eligibility(policy, name).is_err() {
+            let roles = state.name_work_roles(route.project_scope_id.as_str(), name);
+            if execution_candidate_eligibility(policy, name, &roles).is_err() {
                 return Ok(candidates);
             }
             let current = control
@@ -635,21 +646,18 @@ fn ticket_slot_candidates(
             .map_err(Resp::err)?;
         let Some(slot) = slot else { continue };
         let name = slot.identity_key.name.clone();
+        let roles = state.name_work_roles(route.project_scope_id.as_str(), &name);
         if phase == TicketPhaseKind::Execute
-            && execution_candidate_eligibility(policy, &name).is_err()
+            && execution_candidate_eligibility(policy, &name, &roles).is_err()
         {
             continue;
         }
-        let roles = state.name_work_roles(route.project_scope_id.as_str(), &name);
         if phase == TicketPhaseKind::Plan
             && !roles.iter().any(|role| role == "plan" || role == "planner")
         {
             continue;
         }
-        let matched = policy
-            .preferred_roles
-            .as_ref()
-            .is_some_and(|preferred| preferred.iter().any(|role| roles.contains(role)));
+        let matched = work_policy_matches_roles(policy, &roles);
         candidates.push(TicketCandidate {
             slot_name: name,
             worker_id: worker.id.clone(),
@@ -726,6 +734,8 @@ fn board_work_policy_locked(
             .cloned()
             .unwrap_or_default();
         overlay_work_policy(&mut policy, &patch);
+        policy.protected_role_authorized =
+            work_policy_explicitly_grants_protected_specialty(&policy);
         let events = [Event::ProjectWorkPolicyUpdated {
             work_kind: kind.clone(),
             policy: policy.clone(),
@@ -747,11 +757,11 @@ fn board_work_policy_locked(
             json!({"outcome":"rules_updated","scope":"project","work_kind":kind,"policy":policy}),
         );
     }
-    if !matches!(scope.as_str(), "goal" | "task") {
-        return Resp::err("policy scope must be project, goal or task");
+    if scope != "task" {
+        return Resp::err("policy scope must be project or task");
     }
     let Some(id) = id else {
-        return Resp::err("goal/task policy requires --id");
+        return Resp::err("task policy requires --id");
     };
     let Some(revision) = expected_revision else {
         return Resp::err("goal/task policy requires --expected-revision");
@@ -773,64 +783,31 @@ fn board_work_policy_locked(
         return Resp::err("withdraw the invitation before changing its contract");
     }
     let mut events = Vec::new();
-    if scope == "goal" {
-        if let Err(error) = board_check_master_locked(server, &state, &actor) {
+    let changes_executor = patch.executor_name.is_some()
+        || patch.cleared_fields.iter().any(|field| field == "executor_name");
+    if changes_executor
+        || task_owner_gate_maybe_with_control(server, state, control, &id, &actor).is_err()
+    {
+        if let Err(error) = board_check_master_locked(server, state, &actor) {
             return error;
         }
-        let Some(kind) = patch
-            .work_kind
-            .as_ref()
-            .or(details.work_policy.work_kind.as_ref())
-            .cloned()
-        else {
-            return Resp::err("goal policy requires --work-kind");
-        };
-        let policy = details.child_work_policies.entry(kind).or_default();
-        overlay_work_policy(policy, &patch);
-    } else {
-        if task_owner_gate_maybe_with_control(server, state, control, &id, &actor).is_err() {
-            if let Err(error) =
-                board_check_master_or_task_architect_locked(server, state, control, &id, &actor)
-            {
-                return error;
-            }
-        }
-        let previous = details.work_policy.clone();
-        overlay_work_policy(&mut details.work_policy, &patch);
-        if previous != details.work_policy {
-            details.dispatch_selection = None;
-            details.dispatch_reason = None;
-            // Only a changed review requirement invalidates current acceptance;
-            // executor reassignment and selection preferences preserve evidence.
-            if previous.reviewer_name != details.work_policy.reviewer_name {
-                let mut record = state.task_lifecycle.get(&id).cloned().unwrap_or_default();
-                events.extend(invalidate_work_review(
-                    &state,
-                    &task,
-                    &mut record,
-                    details.work_policy.reviewer_name.clone(),
-                ));
-                // A reviewer rebind invalidates the previous verdict, but it is
-                // not itself a typed rework decision. Keep a delivered (or
-                // accepted) task delivered so the new reviewer can decide, and
-                // point next_step at the current required reviewer.
-                if matches!(task.status.as_str(), "accepted" | "delivered") {
-                    task.status = "delivered".into();
-                    task.next_step = Some(match details.work_policy.reviewer_name.as_deref() {
-                        Some(name) => format!(
-                            "await review by {name}; use collab task review --accept or --rework"
-                        ),
-                        None => "task owner or live master reviews delivery with collab task review --accept or --rework".into(),
-                    });
-                }
-                if record.delivered_ms.is_some() {
-                    events.push(Event::TaskLifecycleUpdated {
-                        task_id: id.clone(),
-                        record,
-                    });
-                }
-            }
-        }
+    }
+    if work_policy_explicitly_grants_protected_specialty(&patch)
+        && board_check_master_locked(server, state, &actor).is_err()
+    {
+        return Resp::err(
+            "BOARD_MASTER_REQUIRED: only the current project master may grant protected-role Execute work",
+        );
+    }
+    let previous = details.work_policy.clone();
+    overlay_task_work_policy(
+        &mut details.work_policy,
+        &patch,
+        board_check_master_locked(server, state, &actor).is_ok(),
+    );
+    if previous != details.work_policy {
+        details.dispatch_selection = None;
+        details.dispatch_reason = None;
     }
     details.revision += 1;
     task.updated_ms = now_ms();
@@ -854,8 +831,7 @@ fn board_work_policy_locked(
         },
     ]);
     events.extend(auto_notice.events.clone());
-    // Only an executing state reopens a completed execute phase. A reviewer
-    // rebind that keeps the task delivered must not restart execution.
+    // An executing task can reopen its completed execute phase.
     if matches!(
         resulting_status.as_str(),
         "working" | "verifying" | "rework"
@@ -928,6 +904,9 @@ fn prepare_board_dispatch_locked(
     if details.invitation.is_some() {
         return Err(Resp::err("task already has a pending invitation"));
     }
+    details.work_policy.protected_role_authorized =
+        board_check_master_locked(server, state, actor).is_ok()
+            && work_policy_explicitly_grants_protected_specialty(&details.work_policy);
     let policy = details.work_policy.clone();
     let eligible_ids = dispatch_eligible_worker_ids(state, route, control, actor, &policy)?;
     let selected = if let Some(name) = policy.executor_name.as_deref() {
@@ -952,10 +931,7 @@ fn prepare_board_dispatch_locked(
             };
             let name = slot.identity_key.name.clone();
             let roles = state.name_work_roles(route.project_scope_id.as_str(), &name);
-            let matched = policy
-                .preferred_roles
-                .as_ref()
-                .is_some_and(|preferred| preferred.iter().any(|role| roles.contains(role)));
+            let matched = work_policy_matches_roles(&policy, &roles);
             let unassigned = !state.tasks.values().any(|task| {
                 !matches!(task.status.as_str(), "closed" | "cancelled")
                     && (task.owner == *worker_id
@@ -1024,7 +1000,9 @@ fn prepare_board_dispatch_locked(
         expected_revision,
         Some((name.clone(), reason)),
         details.long_horizon,
+        false,
         None,
+        Default::default(),
         now,
     )?;
     let _ = peer;
@@ -1046,7 +1024,7 @@ fn board_dispatch_work(
         };
     let mut state = server.state.lock().unwrap();
     if let Err(error) = board_check_actor(&state, &actor, &token).and_then(|()| {
-        board_check_master_or_task_architect_locked(server, &state, Some(&control), &id, &actor)
+        board_check_master_locked(server, &state, &actor)
     }) {
         return error;
     }
@@ -1141,7 +1119,7 @@ fn board_dispatch_current_map(
 ) -> Resp {
     let outcome = manager.with_current_state_response(server, |control, state| {
         board_current_map_actor_gate(state, &actor, &token, &id)?;
-        board_check_master_or_task_architect_locked(server, state, Some(control), &id, &actor)?;
+        board_check_master_locked(server, state, &actor)?;
         let route = server_route_scope(server, state)
             .map_err(Resp::err)?
             .ok_or_else(|| Resp::err("project route is not ready"))?;
@@ -1245,13 +1223,15 @@ pub(super) fn dispatch_eligible_worker_ids(
     let available = |worker: &WorkerRec| {
         worker.id != actor
             && !is_managed_subagent(state, &worker.id)
-            && authoritative_send_binding(state, route, &worker.id).is_ok()
-            && !state
-                .agent_presence(route.project_scope_id.as_str(), &worker.id)
-                .is_some_and(|presence| presence.presence == name_state::AgentPresence::Offline)
+            && authoritative_send_binding(state, route, &worker.id).is_ok_and(|binding| {
+                binding.session_id.as_ref().is_some_and(|session| {
+                    board_target_online(state, route, &worker.id, session.as_str())
+                })
+            })
     };
     if let Some(name) = policy.executor_name.as_deref() {
-        if execution_candidate_eligibility(policy, name).is_err() {
+        let roles = state.name_work_roles(route.project_scope_id.as_str(), name);
+        if execution_candidate_eligibility(policy, name, &roles).is_err() {
             return Ok(Vec::new());
         }
         let current = control
@@ -1271,7 +1251,9 @@ pub(super) fn dispatch_eligible_worker_ids(
             .current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id)
             .map_err(Resp::err)?;
         if let Some(slot) = current {
-            if execution_candidate_eligibility(policy, &slot.identity_key.name).is_err() {
+            let roles =
+                state.name_work_roles(route.project_scope_id.as_str(), &slot.identity_key.name);
+            if execution_candidate_eligibility(policy, &slot.identity_key.name, &roles).is_err() {
                 continue;
             }
             eligible.push(worker.id.clone());
@@ -1290,6 +1272,7 @@ pub(crate) fn board_ticket_admission_events(
     task: &TaskRec,
     details: &crate::board::BoardTaskDetails,
     depends_on: Vec<String>,
+    is_scheduler: bool,
 ) -> Result<Vec<Event>, Resp> {
     use crate::server::ticket_state::{
         select_shortest_queue, slot_queue_len, TicketPhaseKind, TicketPhaseRecord,
@@ -1308,7 +1291,11 @@ pub(crate) fn board_ticket_admission_events(
         };
 
     let first_phase = TicketPhaseKind::Execute;
-    let candidates = ticket_slot_candidates(state, &control, &route, policy, first_phase)?;
+    let candidates = if is_scheduler && details.long_horizon.is_none() {
+        ticket_slot_candidates(state, &control, &route, policy, first_phase)?
+    } else {
+        Vec::new()
+    };
 
     let group = ticket_phase_group(first_phase, policy.work_kind.as_deref());
     let cursor = state.ticket_rotation.get(&group).map(String::as_str);
@@ -1345,7 +1332,11 @@ pub(crate) fn board_ticket_admission_events(
             )
         }
         None => {
-            let reason = if policy.executor_name.is_some() {
+            let reason = if details.long_horizon.is_some() {
+                "waiting for long-horizon dispatch with subscription".to_owned()
+            } else if !is_scheduler {
+                "waiting for the owner to claim after dependencies complete".to_owned()
+            } else if policy.executor_name.is_some() {
                 format!(
                     "specified executor {} is unavailable",
                     policy.executor_name.as_deref().unwrap_or_default()
@@ -1551,14 +1542,27 @@ pub(crate) fn ticket_continuation_events_with_pending(
         &owned
     };
 
-    // One active claim per slot. A claimed or running phase already occupies
-    // the slot's execution capacity.
+    // One active claim per slot. A claimed or running phase occupies the slot's
+    // active execution capacity unless its task entered a paused ("waiting" or
+    // "blocked") or delivered/terminal state.
     if phases.iter().any(|phase| {
-        phase.slot_name.as_deref() == Some(slot_name.as_str())
-            && matches!(
+        if phase.slot_name.as_deref() != Some(slot_name.as_str())
+            || !matches!(
                 phase.status,
                 TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
             )
+        {
+            return false;
+        }
+        let publishing = pending_task.is_some_and(|task| task.id == phase.task_id);
+        let task_status = pending_task
+            .filter(|_| publishing)
+            .or_else(|| state.tasks.get(&phase.task_id))
+            .map(|task| task.status.as_str());
+        !matches!(
+            task_status,
+            Some("waiting" | "blocked" | "delivered" | "accepted" | "merged" | "closed" | "cancelled")
+        )
     }) {
         return Vec::new();
     }
@@ -1588,7 +1592,23 @@ pub(crate) fn ticket_continuation_events_with_pending(
                 && phase.status == TicketPhaseStatus::Completed
         })
     };
-    let Some(next) = next_queued_for_slot(phases, &slot_name, dependency_satisfied).cloned() else {
+    let ready_phases = phases.iter().filter(|phase| {
+        let task_id = &phase.task_id;
+        let publishing = pending_task.is_some_and(|task| task.id == *task_id);
+        let task = pending_task.filter(|_| publishing).or_else(|| state.tasks.get(task_id));
+        let details = pending_details.filter(|_| publishing).or_else(|| state.board_details.get(task_id));
+        if task.is_some_and(|task| {
+            matches!(
+                task.status.as_str(),
+                "waiting" | "blocked" | "closed" | "cancelled"
+            )
+        }) {
+            return false;
+        }
+        !task.is_some_and(|task| task.status == "pending")
+            || !details.is_some_and(|details| details.long_horizon.is_some())
+    });
+    let Some(next) = next_queued_for_slot(ready_phases, &slot_name, dependency_satisfied).cloned() else {
         return Vec::new();
     };
     let pending_matches = pending_task.is_some_and(|task| task.id == next.task_id);
@@ -1603,8 +1623,9 @@ pub(crate) fn ticket_continuation_events_with_pending(
         .filter(|_| pending_matches)
         .map(|details| details.work_policy.clone())
         .unwrap_or_else(|| state.effective_work_policy(&next.task_id));
+    let roles = state.name_work_roles(route.project_scope_id.as_str(), &slot_name);
     if next.phase == TicketPhaseKind::Execute
-        && execution_candidate_eligibility(&policy, &slot_name).is_err()
+        && execution_candidate_eligibility(&policy, &slot_name, &roles).is_err()
     {
         return Vec::new();
     }
@@ -1736,6 +1757,24 @@ pub(crate) fn ticket_dependency_release_events(
     completed: &crate::server::ticket_state::TicketPhaseRecord,
     exclude_worker: &str,
 ) -> Vec<Event> {
+    ticket_dependency_release_events_for_task_id(
+        state,
+        control,
+        route,
+        &completed.task_id,
+        std::slice::from_ref(completed),
+        exclude_worker,
+    )
+}
+
+pub(crate) fn ticket_dependency_release_events_for_task_id(
+    state: &State,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+    completed_task_id: &str,
+    pending_phases: &[crate::server::ticket_state::TicketPhaseRecord],
+    exclude_worker: &str,
+) -> Vec<Event> {
     use crate::server::ticket_state::TicketPhaseStatus;
 
     let mut slots: Vec<String> = state
@@ -1743,7 +1782,7 @@ pub(crate) fn ticket_dependency_release_events(
         .iter()
         .filter(|phase| {
             phase.status == TicketPhaseStatus::Queued
-                && phase.depends_on.iter().any(|dep| dep == &completed.task_id)
+                && phase.depends_on.iter().any(|dep| dep == completed_task_id)
         })
         .filter_map(|phase| phase.slot_name.clone())
         .collect();
@@ -1769,7 +1808,7 @@ pub(crate) fn ticket_dependency_release_events(
             control,
             route,
             &worker_id,
-            std::slice::from_ref(completed),
+            pending_phases,
             false,
         ));
     }
@@ -1779,6 +1818,179 @@ pub(crate) fn ticket_dependency_release_events(
 #[cfg(test)]
 mod work_policy_state_tests {
     use super::*;
+
+    #[test]
+    fn execute_eligibility_normalizes_protected_aliases_and_requires_matching_authorization() {
+        let mut state = State::default();
+        for (name, work_roles) in [
+            ("PatrolAlias", vec!["巡察者"]),
+            ("MemoryAlias", vec!["记忆 agent"]),
+            ("Executor", Vec::new()),
+        ] {
+            state
+                .apply_checked(&Event::NameWorkRolesUpdated {
+                    project_scope: "/project".into(),
+                    record: crate::board::NameWorkRoles {
+                        name: name.into(),
+                        work_roles: work_roles.into_iter().map(String::from).collect(),
+                    },
+                })
+                .unwrap();
+        }
+
+        let ordinary_policy = crate::board::WorkPolicy::default();
+        let mut accepted_protected = Vec::new();
+        for name in ["PatrolAlias", "MemoryAlias"] {
+            let work_roles = state.name_work_roles("/project", name);
+            if !matches!(
+                execution_candidate_eligibility(&ordinary_policy, name, &work_roles),
+                Err(ExecutionCandidateIneligible::ProtectedRole)
+            ) {
+                accepted_protected.push(name);
+            }
+        }
+        assert!(
+            accepted_protected.is_empty(),
+            "protected roles accepted as Execute candidates: {accepted_protected:?}"
+        );
+        assert_eq!(
+            execution_candidate_eligibility(
+                &ordinary_policy,
+                "Executor",
+                &state.name_work_roles("/project", "Executor"),
+            ),
+            Ok(()),
+            "an ordinary executor without a specialty must remain eligible"
+        );
+
+        let pinned_policy = crate::board::WorkPolicy {
+            executor_name: Some("Executor".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            execution_candidate_eligibility(&pinned_policy, "Other", &[]),
+            Err(ExecutionCandidateIneligible::PinnedExecutorMismatch)
+        );
+
+        let patrol_authorized = crate::board::WorkPolicy {
+            work_kind: Some("maintenance".into()),
+            preferred_roles: Some(vec!["patrol".into()]),
+            protected_role_authorized: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            execution_candidate_eligibility(
+                &patrol_authorized,
+                "PatrolAlias",
+                &state.name_work_roles("/project", "PatrolAlias"),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            execution_candidate_eligibility(
+                &patrol_authorized,
+                "MemoryAlias",
+                &state.name_work_roles("/project", "MemoryAlias"),
+            ),
+            Err(ExecutionCandidateIneligible::ProtectedRole)
+        );
+
+        let memory_work_kind = crate::board::WorkPolicy {
+            work_kind: Some("记忆 agent".into()),
+            protected_role_authorized: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            execution_candidate_eligibility(
+                &memory_work_kind,
+                "MemoryAlias",
+                &state.name_work_roles("/project", "MemoryAlias"),
+            ),
+            Err(ExecutionCandidateIneligible::ProtectedRole)
+        );
+    }
+
+    #[test]
+    fn protected_execute_requires_persisted_master_authorization() {
+        let legacy: crate::board::WorkPolicy = serde_json::from_value(json!({
+            "preferred_roles": ["memory"]
+        }))
+        .unwrap();
+        assert!(!legacy.protected_role_authorized);
+        let roles = vec!["记忆 agent".into()];
+        assert_eq!(
+            execution_candidate_eligibility(&legacy, "Memory", &roles),
+            Err(ExecutionCandidateIneligible::ProtectedRole)
+        );
+        let explicitly_unauthorized = crate::board::WorkPolicy {
+            preferred_roles: Some(vec!["memory".into()]),
+            protected_role_authorized: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            execution_candidate_eligibility(&explicitly_unauthorized, "Memory", &roles),
+            Err(ExecutionCandidateIneligible::ProtectedRole)
+        );
+        let authorized = crate::board::WorkPolicy {
+            protected_role_authorized: true,
+            ..legacy
+        };
+        let persisted = serde_json::to_value(&authorized).unwrap();
+        let restored = serde_json::from_value(persisted).unwrap();
+        assert_eq!(
+            execution_candidate_eligibility(&restored, "Memory", &roles),
+            Ok(())
+        );
+        assert_eq!(
+            execution_candidate_eligibility(&restored, "Patrol", &["巡察者".into()]),
+            Err(ExecutionCandidateIneligible::ProtectedRole)
+        );
+        let mut changed = restored;
+        overlay_work_policy(
+            &mut changed,
+            &crate::board::WorkPolicy {
+                preferred_roles: Some(vec!["巡察者".into()]),
+                ..Default::default()
+            },
+        );
+        assert!(!changed.protected_role_authorized);
+        assert_eq!(
+            execution_candidate_eligibility(&changed, "Patrol", &["巡察者".into()]),
+            Err(ExecutionCandidateIneligible::ProtectedRole)
+        );
+    }
+
+    #[test]
+    fn unrelated_policy_edits_preserve_authorization_without_granting_legacy_tasks() {
+        for (authorized, is_scheduler) in [(false, true), (true, false)] {
+            let mut policy: crate::board::WorkPolicy = serde_json::from_value(json!({
+                "preferred_roles": ["memory"]
+            }))
+            .unwrap();
+            policy.protected_role_authorized = authorized;
+            let patch = parse_work_policy(
+                Some("maintenance".into()),
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+            overlay_task_work_policy(&mut policy, &patch, is_scheduler);
+            assert_eq!(policy.work_kind.as_deref(), Some("maintenance"));
+            assert_eq!(policy.protected_role_authorized, authorized);
+            assert_eq!(
+                execution_candidate_eligibility(&policy, "Memory", &["记忆 agent".into()]),
+                if authorized {
+                    Ok(())
+                } else {
+                    Err(ExecutionCandidateIneligible::ProtectedRole)
+                }
+            );
+        }
+    }
 
     #[test]
     fn category_defaults_overrides_and_explicit_clear_survive_current_state() {
@@ -1798,67 +2010,25 @@ mod work_policy_state_tests {
                 .unwrap(),
             })
             .unwrap();
-        let goal = crate::board::BoardTaskDetails {
-            work_policy: crate::board::WorkPolicy {
-                work_kind: Some("frontend".into()),
-                ..Default::default()
-            },
-            child_work_policies: std::collections::BTreeMap::from([
-                (
-                    "frontend".into(),
-                    parse_work_policy(None, None, Some("Bob".into()), None, false, false, false)
-                        .unwrap(),
-                ),
-                (
-                    "backend".into(),
-                    parse_work_policy(None, None, Some("Carol".into()), None, false, false, false)
-                        .unwrap(),
-                ),
-            ]),
-            ..Default::default()
-        };
-        state
-            .apply_checked(&Event::BoardDetailsChanged {
-                task_id: "goal".into(),
-                details: goal,
-            })
-            .unwrap();
         let override_policy =
             parse_work_policy(None, None, Some("Alice".into()), None, true, false, false).unwrap();
-        let resolved = state.materialize_work_policy(None, Some("goal"), &override_policy);
+        let resolved = state.materialize_work_policy(Some("frontend"), &override_policy);
         assert_eq!(resolved.executor_name.as_deref(), Some("Alice"));
-        assert_eq!(resolved.reviewer_name.as_deref(), Some("Bob"));
+        assert!(resolved.reviewer_name.is_none());
         assert!(resolved.preferred_roles.is_none());
-        assert_eq!(
-            state
-                .materialize_work_policy(Some("backend"), Some("goal"), &Default::default())
-                .executor_name
-                .as_deref(),
-            Some("Carol")
-        );
-        state
-            .apply_checked(&Event::BoardDetailsChanged {
-                task_id: "child".into(),
-                details: crate::board::BoardTaskDetails {
-                    parent_task_id: Some("goal".into()),
-                    work_policy: resolved.clone(),
-                    ..Default::default()
-                },
-            })
-            .unwrap();
+        state.apply_checked(&Event::BoardDetailsChanged {
+            task_id: "task".into(),
+            details: crate::board::BoardTaskDetails {
+                work_policy: resolved.clone(),
+                ..Default::default()
+            },
+        }).unwrap();
         let mut replay: State =
             serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
-        assert_eq!(replay.effective_work_policy("child"), resolved);
-        assert_eq!(
-            replay
-                .materialize_work_policy(Some("frontend"), None, &Default::default())
-                .reviewer_name
-                .as_deref(),
-            Some("Bob")
-        );
+        assert_eq!(replay.effective_work_policy("task"), resolved);
         replay.project_work_policy.clear();
         assert_eq!(
-            replay.effective_work_policy("child"),
+            replay.effective_work_policy("task"),
             resolved,
             "saved tasks never re-resolve changed defaults"
         );

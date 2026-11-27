@@ -427,16 +427,11 @@ pub(super) fn safe_module_artifact_path(
 }
 
 pub(super) fn file_sha256(path: &Path, label: &str) -> String {
-    if fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
+    if crate::primitives::is_symlink(path) {
         fail(format!("ARTIFACT_PATH_SYMLINK:{}", label));
     }
     let bytes = fs::read(path).unwrap_or_else(|_| fail(format!("ARTIFACT_PATH_MISSING:{}", label)));
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+    crate::primitives::sha256_bytes(&bytes)
 }
 
 pub(super) fn hash_tree(root: &Path, prefix: &Path, label: &str) -> String {
@@ -924,7 +919,13 @@ pub(super) fn build_module_artifact(
     Value::Object(artifact)
 }
 
+#[cfg(test)]
+pub(super) static MODULE_ARTIFACT_READ_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub(super) fn read_module_artifact(root: &Path, project: &Value, module_id: &str) -> Value {
+    #[cfg(test)]
+    MODULE_ARTIFACT_READ_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let file = module_artifact_file(root, project, module_id);
     if fs::symlink_metadata(&file)
         .map(|metadata| metadata.file_type().is_symlink())

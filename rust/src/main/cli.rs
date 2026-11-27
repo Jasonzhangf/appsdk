@@ -100,9 +100,6 @@ where
     }
 }
 
-#[allow(dead_code)]
 pub(super) fn digest_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+    crate::primitives::sha256_bytes(bytes)
 }

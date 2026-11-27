@@ -541,7 +541,7 @@ fn ceo_cross_project_task_message_reply_progress_and_clear_roundtrip() {
     let role_brief = &current["role_brief"];
     let role_task = role_brief["role_task"].as_str().unwrap_or_default();
     assert!(
-        role_task.starts_with("Execute your accepted task as an ordinary peer."),
+        role_task.starts_with("Own and complete your assigned independent Collab task."),
         "base peer identity duty must stay ahead of the CEO text: {role_task}"
     );
     let serialized = current.to_string();
@@ -1673,8 +1673,15 @@ fn ceo_bootstrap_quotes_approval_profile_and_project_without_execution() {
     );
     assert_eq!(launched["phase"], "launched", "{launched}");
     assert!(
-        wait_until(Duration::from_secs(15), || fake_log.exists()),
-        "fake codex did not receive the quoted command"
+        wait_until(Duration::from_secs(15), || {
+            std::fs::read_to_string(&fake_log).is_ok_and(|output| {
+                output.ends_with('\n')
+                    && output.lines().last().is_some_and(|line| {
+                        line.starts_with("ENV_CODEX_APP_TOOLS_PIPE_PATH=")
+                    })
+            })
+        }),
+        "fake codex did not finish recording the quoted command"
     );
     assert!(
         !marker.exists(),

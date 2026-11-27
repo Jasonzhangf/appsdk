@@ -75,6 +75,9 @@ pub struct WorkPolicy {
     pub work_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_roles: Option<Vec<String>>,
+    /// Task-specific protected-role exception granted by the project master.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub protected_role_authorized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,6 +117,13 @@ pub struct LongHorizonArgs {
 }
 
 impl LongHorizonArgs {
+    pub(crate) fn has_values(&self) -> bool {
+        self.long_horizon_content.is_some()
+            || self.long_horizon_every_ms.is_some()
+            || self.long_horizon_repeat.is_some()
+            || self.long_horizon_ttl_seconds.is_some()
+    }
+
     pub fn merge(
         self,
         previous: Option<&LongHorizonTaskSpec>,
@@ -221,6 +231,13 @@ pub enum BoardCommand {
         to: String,
         #[arg(long)]
         expected_revision: u64,
+        /// Invite without creating or changing a long-horizon goal subscription.
+        #[arg(long)]
+        #[serde(default)]
+        one_shot: bool,
+        #[command(flatten)]
+        #[serde(flatten)]
+        long_horizon: LongHorizonArgs,
     },
     /// Accept or decline the invitation addressed to this peer.
     Respond {
@@ -343,8 +360,12 @@ pub struct BoardInvitationSource {
 pub struct BoardInvitation {
     pub peer_id: String,
     pub binding_id: String,
+    #[serde(default)]
+    pub binding_generation: u64,
     pub message_id: String,
     pub created_ms: i64,
+    #[serde(default)]
+    pub one_shot: bool,
     #[serde(default)]
     pub original_status: Option<String>,
     #[serde(default)]

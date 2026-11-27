@@ -10,10 +10,8 @@ Collab 只有一个 Skill。master、peer、designer、reviewer 等不建立独�
 安装产物；宿主入口链接到该安装目录。流程模板属于本 Skill 的资源，不是另一个 Skill。
 
 标准流程唯一资源为 [workflow-templates.json](references/workflow-templates.json)，
-基础版本为 1；身份流程和默认专长均从该源码资产编译。普通 peer 按合同执行并可
-编排职责内的简单工作。复杂问题有合适 architect 可承接时，由 architect 设计。
-职责内的有界子任务先选合适的授权 peer，无可承接者再用 Codex 编排。peer、reviewer 和设计师均按
-[完整派单与交回](#完整派单与交回)交付给合同指定的接收人。
+基础版本为 2。Jenny 派发独立任务。Owner 使用 Codex 编排完成规划、执行、
+独立 Review、合并和清理。第一版自定义模板留作历史，不再投影。
 
 执行以本次 `collab context` 的 `role_brief` 为准：有效流程正文只在 `role_task`、
 `responsibilities`、`next_action`、`completion_action` 组合输出一次。identity 和
@@ -25,16 +23,13 @@ specialties 模板卡只含 target、source、base_version、revision；master �
 
 新 peer 或角色变化只触发对受影响职责、依赖和交接的处理。只有实际任务需要时才改
 模板或分工策略。普通注册不要求先设置专长，不要求例行写规则或向用户汇报。
-内部任务的必要确认沿[角色分工](SKILL.md#task-routing-and-role-responsibilities)交派单
-architect 或 Jenny。已有授权内直接推进，只暂停受影响的步骤。需要用户决定时，由获
-授权的负责人沿汇报链处理。
+内部技术决定在任务内处理。需要项目授权或任务归属裁决时找 Jenny。
 更新正在执行的任务时，必须显式落实交接。
 
 ### 完整派单与交回
 
-master 负责项目总目标、跨 peer 依赖和最终集成。peer 负责接受的子目标，管理自己的
-执行者、验证和资源。master 用一次派单交齐合同与可访问的必要材料，peer 按合同完成
-约定的交付终点。工作专长不是接单前置，也不授予权限。master 可把下列内容填入
+Jenny 负责分配和项目级决定。每个任务由一个 owner 独立完成。
+Codex 子角色只服务于该任务。Jenny 可把下列内容填入
 现有任务的 description；没有额外依赖时写“无”：
 
 ```text
@@ -47,7 +42,7 @@ master 负责项目总目标、跨 peer 依赖和最终集成。peer 负责接�
 输入与依赖：<可访问的材料路径、已知依赖和交付前必须完成的交接；没有则写无>
 验收：<交付物/位置；可重复的验证及通过条件>
 执行唤醒：<注册执行者每 10 分钟唤醒一次，可填写任务约定的其他周期>
-交回：<派单 owner；需要时指定 reviewer 和集成人>
+交付位置：<原任务的证据路径和完成状态>
 停止条件：<什么情况只暂停受影响工作；向谁报告原错与下一步>
 ```
 
@@ -69,8 +64,7 @@ peer，再按稳定名字排序。指定执行者保持硬约束；邀请不等�
 ### 无可用执行 peer 时的派单
 
 Jenny 先核对当前 Board 的执行容量、任务权限和依赖。需要新规划或关键方案变更时，
-有可承接 architect 就交其完成详细计划。Jenny 或受托 architect 核对计划后安排执行。
-无可承接 architect 时，Jenny 按 Codex 编排的独立 Plan 合同启动新的只读 Planner。
+Jenny 按 Codex 编排的独立 Plan 合同启动新的只读 Planner。
 本派发分支使用 `codex exec --profile oauth --model gpt-6.2-sol -c 'model_reasoning_effort="medium"'`。
 沿 Plan 合同传入真实工作目录、用户需求、约束、任务与 DAG 路径及现有证据，
 用 `--sandbox read-only --ephemeral --output-last-message "$plan_run/plan.md"` 保存完整计划。
@@ -78,7 +72,7 @@ Jenny 先核对当前 Board 的执行容量、任务权限和依赖。需要新�
 
 Jenny 读取 `plan.md`，确认目标、边界、依赖、行动项和可观察验收。计划缺必要事实
 时交实际 owner 补齐，待受影响项 READY 后才派执行。已有有效计划可直接复用。
-有合适执行 peer 时派 peer。无可用执行 peer 时，由 Jenny 或受托 architect 用
+有合适执行 peer 时派 peer。无可用执行 peer 时，Jenny 用
 独立 `codex exec --profile gcm` 执行 worker，传可访问的计划与执行合同路径，
 写入执行 owner、允许写入范围、具体产物、验证、交回和停止条件。计划或执行入口失败
 时保留原错，只暂停实际依赖的步骤。
@@ -88,19 +82,13 @@ peer 将执行细节留在本人任务记录。Jenny 只按需看 board 状态�
 无需跟踪实现步骤、子 worker 动态和中间结果。双方省略手动确认接单、进度汇报、
 催报、预告交付、申请 idle，以及收到结果后的客套回信。
 
-执行中，只有真实阻塞需要对方行动、实质变更影响对方授权或依赖、合同明确约定的
-中途交接才发消息。先查已有材料，并在授权内自行解决。确需协调时，
-一次说明受影响任务、已试办法、证据和需要的决定或动作。其余工作继续推进。
-
-peer 在约定终点一次交回可用产物、验收证据、仍待处理的事项及其 owner，并更新原任务。
-交给合同指定的接收人。正式交付若需消息或关联回复，用同一份结果完成；不要另发一份
-给 Jenny 备案。Jenny 核验证据，按需安排具体返工或下一任务。没有后续动作时保留可接收状态。
+技术问题由 owner 沿 Codex 编排处理。实际资源占用冲突由涉及的 owner 直接协调。
+需要项目权限或改变任务归属时交 Jenny。交付物、证据、合并和清理回执写入原任务。
 
 #### 执行任务的定时唤醒
 
 发给已注册执行 peer 的任务，在原任务单写明执行唤醒周期。默认每 10 分钟
-（`600000` 毫秒），任务约定的周期优先。Architect 与 peer 直接交接时，沿
-[直接发布与认领](#public-task-board-and-read-only-dashboard) 使用执行者自己的目标订阅。
+（`600000` 毫秒），任务约定的周期优先。直接认领自有任务时使用执行者自己的目标订阅。
 需要由 master 代派并自动绑定 board 订阅时，用
 `--long-horizon-content` 写入完整执行要求，用 `--long-horizon-every-ms` 写入该周期。
 派发或邀请后检查 `goal_schedule` 回执，确认订阅归执行者、绑定原任务且周期正确。
@@ -128,36 +116,9 @@ manager（全局 CEO 或项目 master）为任何承担计划、编排或任务�
 
 ### 设计规划与审查角色的文件交接合同
 
-总设计师、架构师、规划师、reviewer 及承担同类职责的角色共同适用本合同，不依赖特定
-英文角色名。执行 worker 不被假设具备设计者同等判断力、项目背景或继承父会话。
-
-- Jenny 按项目优先级将 buglist 缺陷和项目任务交给 architect。在原任务单记明本阶段
-  的 architect，关联缺陷和证据，邀请时指定该 architect。
-  Architect 查清问题和根因、完成详细设计、选定一个或多个执行 peer，并把各自不重叠的
-  执行合同直接交给他们。执行子任务关联原任务，记录指定的执行 peer（`--executor`）和
-  负责验收的 architect（`--reviewer`）。普通授权内分工使用下方的直接发布与认领，
-  仅在权限、跨任务依赖或项目交付需要 Jenny 决定时请她处理对应事项。
-  Peer 按合同实现、验证并向 architect 交回证据。Architect review 并按验收条件作出
-  通过或返工决定，保留真实行为证据。适用 Review 门禁照常执行。
-  用户明确指定 architect 参与实现时，交给其他人 review 该 architect 的实现。
-- 详细设计须落盘。对每位执行者写清任务要求与输入、负责和禁止改动的模块或路径、适用的
-  接口和数据流、实施步骤及顺序、依赖、必须做的事项与明确排除的事项、交付物和接收人、
-  验收入口和通过条件。按实际范围写出须处理的失败、副作用和停止条件。以执行者只读
-  合同和引用材料就能开工为准。
-- 交接一律引用已落盘文件。消息携带文件路径、必要摘要及接收者，正文不能代替交接文件；
-  接收者必须能访问文件，不可访问时沿已授权资料交付通道提供文件，不让 worker 猜测或
-  自行补齐关键设计。
-- 执行中，peer 和 architect 直接处理必须澄清的设计问题、真实阻塞和约定的依赖交接。
-  执行细节和进度写入原任务记录。一次交回产物和验收证据；省略催报、例行确认和抄送。
-- worker 按设计实现和验证。发现设计缺口、矛盾或新证据导致方案不成立时，把具体问题
-  交回负责设计的人。有 architect 的任务由 architect 修订原设计。执行者只暂停受影响的
-  步骤，待设计补齐后继续。
-- 上述设计、规划与审查角色负责分析、设计落盘、指导和审查。具体实现交给执行者，除非
-  用户明确指定其他分工。reviewer 输出带定位、理由、修改要求和复验条件的文件，由执行者
-  修复，不亲自代修；保留必要的只读检查和文案落盘能力。
-- 项目 master 创建或更新这些角色的流程模板时，将本合同写入 `responsibilities` 并沿下游
-  派单传递；示例模板不能继续只写泛泛的“推进设计任务”。不增加权限；普通 peer 不越权更新
-  项目持久模板，由当前 master 在已有授权内更新。
+文件交接用于同一任务内的 Codex 子角色。Owner 落盘目标、输入路径、写入范围、
+产物、验收和停止条件。Planner 输出设计，执行子角色按范围完成，独立 Reviewer
+留下 findings 和复验条件。Owner 核对结果并完成交付。
 
 模板更新沿用 `context`，仅当前项目 master 可执行，正文为四字段 JSON：
 
@@ -179,6 +140,23 @@ daemon 已为真实角色和模板变化通知相关 peer，不再要求 master 
 额外任务交接仍走已有派单通道，不新建定时轮询。context 派发流程不等于 daemon
 自动生成任务或替 agent 执行。
 
+## 功能与入口选择
+
+Collab 提供稳定身份、持久消息、任务板和订阅。项目由实际工作目录选定，
+名字承载任务和未读消息，当前 sessionID 承载执行，daemon 管理全局状态。
+在原 agent 会话的项目根目录运行 CLI。压缩后继续沿用已核实的绑定和任务。
+
+| 当前事实 | 操作人和入口 | 判断结果 |
+| --- | --- | --- |
+| 用户要求首次注册、明确恢复，或当前绑定确有异常 | 本会话运行 `collab context`；只按返回的缺失字段和[恢复表](references/stable-name-recovery.md#正常恢复)补当前宿主事实 | 看 `registered`、稳定名和当前绑定；待确认或缺字段时按该回执继续 |
+| 只查现有身份；没有发起恢复或注册 | 本会话运行 `collab context --query` | 返回当前已登记事实或原始错误；查询没有注册、换绑或消费副作用 |
+| 要给已知项目成员发送消息 | 本会话从 `collab list` 取精确地址，再按[通信入口](#通信入口与项目目录)发送 | 分别记录消息 ID、宿主投递和消费 |
+| 收到当前会话的未消费 `COLLAB_NOTIFY` | 原收件会话运行 `collab recv --timeout 0`；DSH 原生回合按[通信入口](#通信入口与项目目录)处理 | 以正文和实际消费回执决定下一步 |
+| 要派发 Board 上的任务 | Jenny 从 `collab board show` 取任务 ID、当前 revision 和受托者，按[长程登记](#register-the-long-horizon-goal-before-dispatch)填写合同并派发 | 检查任务状态和 `goal_schedule`；执行者从本人任务记录推进 |
+| 要处理已有任务、排查派发容量或查状态 | 任务 owner 读 `collab board show`；Jenny 用 `collab worker status <worker-id>` 核对选定执行者 | 任务 ID 来自 Board，worker ID 来自当前项目成员回执；未知容量交 Jenny 核实 |
+| 只需要随目标推进唤醒、停止巡检或调整周期 | 目标 owner 用[目标入口](#目标入口与参数)，巡检者用[巡检订阅](references/board-idle-patrol.md) | 核对具体目标或巡检的订阅 ID、状态、已执行次数 |
+| 二进制旧、宿主换绑、旧项目治理资源要升级或要重置 | 按[迁移选择表](references/migration-daemon.md#choose-the-migration-owner)选对应 owner | 用该路径的公开回执确认结果 |
+
 ## 通信入口与项目目录
 
 普通消息默认走公开 CLI。使用成功注册时的项目根目录；未注册调用者或后台脚本亦可在项目根目录下运行 `collab directory` 与 `collab sendmessage --unknown-sender`，无需先注册 peer 身份。业务代码可以在独占
@@ -199,14 +177,14 @@ teammate 或 worker 标识；不知道这些内部标识不构成转请 master �
 | --- | --- |
 | 首次注册或明确恢复身份 | 在自己的项目运行 `collab context` |
 | 查可投递地址 | `collab list`；全局目录，不依赖当前目录 |
-| 发送或通知 reviewer（同项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址来自 `collab list`。例如同项目可直接用 `--to Alice`，不需要先找内部 worker ID 或让 master 转发 |
+| 协调实际资源占用冲突 | `collab send --to '<project.name>' --subject '<资源与任务>' --content '<当前占用、影响和所需释放条件>'`；地址来自 `collab list` |
 | 回复原请求 | 同一发送命令，原消息确有 ID 时加 `--in-reply-to '<原消息ID>'`；没有 ID 不猜、不查内部信箱找值 |
 | 回复外部通道消息（如 QQBot） | 先读消息视图的 `channel`；按 `qqbot-channel` Skill 用 `qqbot.mjs send --file` 原路回复并保留平台 `message_id`。普通 `collab send --in-reply-to` 不能替代平台投递 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
 | 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 | DSH 收件 | gateway 将完整正文送入原生回合；直接处理和回信，不运行 `recv/ack` |
 | 非 DSH 收件 | 按本 Skill 的 `collab recv` 流程消费 |
-| 跨项目 | 同一个 `collab send`。任意两个已注册对象可直接收发，不受 master/peer/CEO 组合限制，不要求 master 代转。保留真实 sender、精确地址和持久回执 |
+| 跨项目 | 仅按用户或当前任务合同指定的目标项目和接收人，用同一个 `collab send` 发送。消费者项目的 SDK 报错先留在消费者项目，除非合同授权交给 SDK 项目。精确地址和持久回执记录在原任务 |
 
 ### 未注册脚本与固定 Session
 
@@ -276,18 +254,15 @@ daemon 不判断正文是否完成，也不保存回复义务。
 收到 daemon 待回复提醒时，读取其引用的原消息，按原回复要求处理，不把提醒再当新任务，
 不对提醒本身回“收到”。daemon 仅追踪待回复标记，不替 agent 生成业务答复或判定任务完成。
 
-peer 向原请求方答复具体请求，按合同向指定接收人交付任务。执行细节由 peer 自持。
-回复用户直接提出的问题和向用户发起确认是两个动作。执行派单时，必须由用户决定的
-事项或重大异常先交派单 architect 或 Jenny，由负责人按既有链路汇报。
+每项任务的产物与证据写入原 Board。确需项目权限或任务归属裁决时找 Jenny。
 
 ## 工作角色与用户指定分工
 
 工作角色是稳定名字的专长，例如 `designer`、`reviewer`。同一 peer 可有多个专长。
 它们不改变 master/peer 职责，也不增加项目权限。省略 `--work-roles` 保留原值，
 明确传空字符串清空。当前 master 可按用户指令为其他稳定名字设置角色。
-普通 peer 在已接受合同内执行；`patrol` 核查 Jenny 的执行并收集 live runtime bug；
-`memory` 只做记忆总结和记忆巡检；`architect` 按
-[文件交接合同](#设计规划与审查角色的文件交接合同)产出架构计划及代码准入文件。
+每个 peer 完成自己的任务。巡检者检查本人的巡检目标；记忆 agent 只做记忆总结和
+巡检；Architect 完成自己的架构或复杂技术任务。
 具体职责正文以当前 `collab context` 的 `role_brief` 为准。
 
 先判断用户要求：注册/恢复协作身份、设置工作角色、指派具体任务是三种独立操作，
@@ -297,40 +272,8 @@ peer 向原请求方答复具体请求，按合同向指定接收人交付任务
 
 ### 指派前分析并保存
 
-master 或负责子目标的 peer 在指派前先分析 scope、交付与验收及角色要求。master 在
-上述自动安排授权内保存分工、派发并报告，不逐轮等待用户批准。复用用户已明确要求；
-只有超出授权、改变用户显式硬约束或关键事实不清时，才确认受影响部分，其余工作继续。
-未指定固定执行者或 reviewer 是允许的，不将可选字段为空当作必须补问的缺口。
-
-角色用 `collab context --work-roles` 按项目和稳定名字持久保存；分工用 `collab board policy` 与
-任务明确字段保存。scope、交付与测试条件写入已有 board 任务的 description、
-delivery-condition、test-condition，适用授权原文或所在对话位置及安排依据记入任务描述。
-角色及执行者约束以正式控制字段为准，不能只留在聊天、消息正文或 agent 临时记忆。
-不新增第二份角色表或审批状态。保存后读取任务回执，确认范围和有效分工符合用户要求。
-
-同一已授权 scope 内的后续请求沿用这些要求；master 自动更新默认分工并报告。
-超出授权或改变用户显式指定的 scope、执行者、reviewer 时，再确认受影响部分。
-普通进度更新、重新唤醒、换会话不构成重新确认的理由。
-
-工作角色可动态新增、修改或撤销。用户明确提出的角色变更就是该次确认，不重复请示。
-`context --work-roles` 设置完整角色集合：新增时保留仍需要的旧角色，删除时省去对应
-角色，全部撤销时传空字符串。修改后读取回执，后续分派和每次接单读取最新持久角色，
-不缓存注册时的旧角色。角色更新不自动改写已有任务的 scope、指定执行者或 reviewer；
-需要同步变更任务时，按适用授权显式更新对应约束并落实交接。不能凭角色变化自行接管或放弃任务。
-
-### 每次接收协作请求
-
-仅具体执行、交付或审查请求需要任务 ID。注册/恢复身份、更新工作角色、需求讨论和
-状态查询不要求先有 board 任务；不要为这些请求虚构或补建任务。
-master 与 peer 收到具体执行请求，在接受邀请或开始执行前，读取当前任务，
-核对已确认 scope、有效角色要求、指定执行者、reviewer、交付与验收条件。恢复会话时
-通过 `collab context` 读取持久身份与角色，不从旧消息或会话身份猜测工作归属。
-具体执行请求缺少任务或必要条件时，由指派者补齐，只暂停受影响的执行。
-
-请求符合已确认要求时，按原约束接受并编排执行；角色偏好不等于执行授权。请求与
-保存的约束冲突或超出 scope 时，向指派者报告具体差异，由其取得用户确认并更新任务，
-接收者不自行放宽要求。向下派发也必须传递任务 ID、scope、角色与审查要求；每次交付
-按同一任务的当前条件验收，并送指定 reviewer 审查，不能以消息已读或已接受代替完成。
+Jenny 核对授权、范围、交付、验收和实际可用容量后分配任务。各 owner
+使用 Codex 编排完成本任务，按最新 Board 回执登记结果。
 
 ### 按当前请求选择命令
 
@@ -343,13 +286,13 @@ master 与 peer 收到具体执行请求，在接受邀请或开始执行前，�
 | 设置或修改自己的工作角色 | `collab context --work-roles '<完整角色集合，逗号分隔>'` | 检查 work_roles_update 回执；保留仍需的原角色。成功即完成角色设置，不继续创建任务或设置执行者。 |
 | 撤销自己的全部工作角色 | `collab context --work-roles ''` | 仅在用户明确要求清空时执行，不用作排障试探。 |
 | 当前 master 按用户指令给别人设置角色 | `collab context --for-name '<稳定名字>' --work-roles '<完整角色集合>'` | `--for-name` 是设置目标名字的专长，不是切换调用者身份。 |
-| 当前 master 保存用户要求或自动安排授权内的某类工作默认分工 | `collab board policy --scope project --work-kind '<类别>' --prefer-role '<角色>'` | 指定执行者时用 `--executor '<名字>'`，指定审查者时加 `--reviewer '<名字>'`；自动选择依据当前角色与任务，保留用户显式硬约束，并报告生效分工。 |
+| Jenny 保存类别默认策略 | `collab board policy --scope project --work-kind '<类别>' --prefer-role '<角色>'` | 执行者硬约束用 `--executor '<稳定名字>'` |
 | 查具体任务的当前条件、邀请或 revision | `collab board show` | 从当前回执读取任务 ID、scope、有效分工和 revision；不能把消息中的旧 revision 当当前值。 |
-| 发布已确认的具体任务 | `collab board publish '<任务ID>' --title '<标题>' --description '<scope与确认来源>' --delivery-condition '<交付条件>' --test-condition '<验收条件>'` | 仅按已确认要求附加 `--work-kind`、`--prefer-role`、`--executor`、`--reviewer`；不因发布任务而强制创建项目默认。 |
+| 发布已确认的具体任务 | `collab board publish '<任务ID>' --title '<标题>' --description '<范围与授权来源>' --delivery-condition '<交付条件>' --test-condition '<验收条件>'` | Jenny 发布可调度任务，peer 可发布自有任务 |
 | 指派者按任务有效分工发邀请 | `collab board dispatch '<任务ID>' --expected-revision <当前revision>` | 使用 publish 或 board show 的真实回执；不写死为 1。邀请不等于接受。 |
 | 接收者接受发给自己的邀请 | `collab board respond '<任务ID>' --accept --expected-revision <当前revision>` | 核对 scope、约束与资源后执行；成功后才转移责任。 |
 | 接收者主动认领允许认领的待办 | `collab board claim '<任务ID>' --expected-revision <当前revision>` | 遵守现有认领门禁；有工作角色不等于已有执行授权，也不要求所有合法认领必须先收到邀请。 |
-| 指定 reviewer 接受交付 | `collab task review '<任务ID>' --accept --evidence '<实际审查证据>'` | 必须实际完成审查；角色标签、读消息和接受邀请不等于审查通过。 |
+| Owner 登记本任务审查结果 | `collab task review '<任务ID>' --accept --expected-subject-revision '<交付代际>' --evidence '<独立审查人、结论和证据路径>'` | 在交给独立 Reviewer 前，从 `collab task status '<任务ID>'` 的 `review.subject_revision` 取值。登记时使用审查实际对应的值。 |
 
 例如用户只要求“你担任 iOS app 执行负责人”，且已确认当前角色为空，执行
 `collab context --work-roles 'iOS app执行负责人'`；不接着运行 `board policy`。
@@ -368,23 +311,9 @@ master 代写来绕过当前身份失败。只读一次 `collab --version` 可�
 需要产品排障时单独提出具体问题，只有用户明确授权该维修范围后才进入开发流程。
 不在普通角色设置中自行安装、重启 daemon 或把修客户端列为用户必须完成的初始化步骤。
 
-用户在 master 任务中指派某类工作时，master 将要求保存为明确分工字段。
-项目默认、目标默认、任务明确字段逐项覆盖。目标使用已有 board 任务，子任务用
-`--parent-task` 引用。已保存的任务约束不随默认规则变化而自动改变。
-`board policy --scope goal --id <目标任务>` 保存目标默认；`--scope task` 修改指定任务，
-两者使用当前 `--expected-revision`。清除约束使用 `--clear-executor`、
-`--clear-reviewer` 或 `--clear-prefer-role`，不能用空名字猜测清除意图。
-
-明确指定执行者时，只能邀请该名字当前持有者；不可用就报告等待，不自行换人。
-只有角色偏好时优先选匹配者；无匹配可退选其他可用 peer，并保存理由。
-邀请不等于接受，接受后才转移执行责任。peer 可编排多个目标，仍须遵守真实资源约束。
-
-明确指定 reviewer 时，将交付交给该名字当前持有者审查。作者或 master 不能代审。
-`task deliver` 表示提交待审；审查通过后仍须完成原有代码集成或只读交付流程。
-重新交付或实质改变验收合同会使旧审查失效；普通进度更新和同名换会话不会。
-人工终止、资源清理和验收完成分别报告，不能以 `closed` 或清理成功替代交付证据。
-
-源码合同与三张操作图见 [工作角色与分工设计](../../docs/design/work-roles-and-assignment.md)。
+类别默认和任务显式字段逐项覆盖。使用 `board policy --scope task --id <任务>` 修改
+任务策略，revision 取当前 Board。指定 executor 由 Jenny 决定，目标不可用时保持等待。
+接受邀请后才转移执行责任。重新交付或实质变更验收合同会使旧审查证据失效。
 
 ## 升级交接：TUI 固定 tmux session 名字，弃用 pane/$N 身份规则
 
@@ -515,18 +444,9 @@ fixed command that runs for hours is still bounded work. A goal that needs
 planning, delegation, evidence review, unblocking, integration, and resource
 closure is a long-horizon goal.
 
-- Use the [role duties and dispatch order](SKILL.md#task-routing-and-role-responsibilities).
-  The manager coordinates the project, and an ordinary peer executes the
-  accepted written contract with wire role `worker` and derivation `peer`.
-  An entrusted architect handles design, bounded execution handoff and review.
-- `patrol`, `memory`, and `architect` are work specialties, not new identity
-  authority. Patrol performs its authorized standing inspection and reports
-  evidenced findings, but does not take temporary implementation dispatch.
-  Memory refines source-backed facts and corrects stale conclusions through the
-  owning memory entry. Architect plans the work, updates the entrusted task
-  contract, dispatches an eligible peer, and reviews the completed
-  implementation under the file handoff contract above. This authority is
-  limited to the task scope entrusted to that architect.
+- See [role duties](SKILL.md#task-routing-and-role-responsibilities). Jenny assigns
+  tasks; each peer completes their own contract using Codex orchestration.
+  Patrol and memory retain their authorized specialty boundaries.
 - A managed-subagent record is legacy compatibility state. It preserves
   existing facts for diagnosis and grants no new production
   execution authority.
@@ -548,6 +468,23 @@ content or cadence, stale revision, authority failure or schedule admission erro
 returns an explicit failure before any partial dispatch. A saved task sheet alone
 does not prove a subscription is armed.
 
+Jenny reads the task ID, current revision and selected executor from
+`collab board show`. If its stored declaration is incomplete, dispatch with
+the authorized goal text and interval in milliseconds:
+
+```sh
+collab board dispatch '<task-id>' --expected-revision '<revision>' \
+  --long-horizon-content '<full goal, acceptance criteria and Action Items>' \
+  --long-horizon-every-ms 1800000
+```
+
+Here `1800000` represents an explicitly agreed 30-minute interval. Use the
+actual contract interval. On success verify `goal_schedule.armed` and its
+subscription ID. The invited peer uses the latest revision to run
+`collab board respond '<task-id>' --accept --expected-revision '<revision>'`.
+If dispatch fails, read the current task and fix the documented missing input or
+capacity condition before retrying.
+
 The AppSDK entry is `appsdk goal subscribe --goal <existing-goal.md> --interval <agreed-period>`;
 a periodic long-horizon goal defaults to one 100-delivery batch;
 when the user specifies another count, use that count. Reuse the valid batch while deliveries remain; do not re-register, reset
@@ -565,6 +502,13 @@ Other peers retain self-management. `--every-ms` without `--repeat` uses 100 tot
 cycles. `--content` supplies an independent goal's full instructions. Task-linked
 content remains on the authoritative task form. SessionID is the execution
 carrier. A worktree or transport change retains the target's ownership and progress.
+Each goal must have a nonempty `Action Items` field. Use the Markdown heading
+`## Action Items` in the goal document or Board long-horizon content.
+Every item names its owner, concrete action,
+expected output, pass condition, and completion evidence. Update this field in
+the same document or Board revision as any goal change. On wake, compare every
+goal and its items against the current acceptance criteria and record missing,
+empty, or stale items as gaps for the goal owner to correct.
 Read-only status does not modify another owner's records.
 A runtime that refuses an ordinary peer's own goal has an implementation defect;
 report its exact error, do not promote the peer or route registration through master.
@@ -591,6 +535,37 @@ report its exact error, do not promote the peer or route registration through ma
 Close owned goal scheduling and patrol subscriptions after completion or when
 no new task and no actionable work remain. Retain direct-message reception;
 assess a new assignment before registering/rearming its goal schedule.
+
+### 目标入口与参数
+
+| 触发条件 | 从项目根目录运行 | 参数来源和验收 |
+| --- | --- | --- |
+| 本人有获授权的独立目标，需要开始周期唤醒 | `appsdk goal subscribe --goal '<目标文档路径>' --interval '<获授权周期>'` | 路径取当前目标文档，周期取合同，例 `30m`。默认 100 次；仅按授权加 `--repeat`。记录真实目标 ID 和 armed 批次 |
+| 不确定当前目标 ID、周期或剩余次数 | `appsdk goal list --json`，再用 `appsdk goal status --goal-id '<目标ID>' --json`；Collab 批次用 `collab notify status` | 目标 ID 取列表，订阅 ID 取批次回执。有效批次直接复用，换绑后也沿用 |
+| 独立目标内容或验收变化 | 修改同一 Markdown 文档，再运行 `appsdk goal update --goal-id '<目标ID>' --goal '<目标文档路径>' --json` | 同次更新 `## Action Items` 与受影响验收标准；回读目标及原批次计数 |
+| Board 目标内容或验收变化 | 按当前任务回执运行 `collab board describe <任务ID> --expected-revision <revision> --title <标题> --description <描述> --delivery-condition <交付条件> --test-condition <验收方式> --long-horizon-content <完整目标正文>` | 任务字段取当前 Board 和获授权变更；正文含 `## Action Items`；版本冲突时重读再编辑 |
+| 周期批次耗尽，且原职责仍有效并获授权续做 | 目标 owner 用原文档和已授权周期续订；Board 目标按[精确订阅控制](#register-the-long-horizon-goal-before-dispatch)处理 | 新批次回执须有实际周期、armed 状态和订阅 ID |
+| 目标完成或获授权结束，或巡检无可执行项 | 先核对验收，独立目标用 `appsdk goal cancel --goal-id '<目标ID>' --json`；Board 任务沿其生命周期收口；单独的巡检按[取消条件](references/board-idle-patrol.md)操作 | 回读对应终态。遇真实外部依赖，先记 owner、剩余行动项和恢复条件；保留基本收件 |
+
+### 空闲唤醒与状态核实
+
+这些分支适用于有内容的 tmux/Rex 周期目标。daemon 使用当前绑定的状态和订阅记录，
+评估目标含义、验收和下一项工作由 agent 执行。
+
+| 状态或事件 | 下一步 |
+| --- | --- |
+| 当前绑定同时确认在线和 idle，目标有当前有效周期 | daemon 可提前投递；同一空闲阶段按批次去重。收到 `GOAL_READY_ON_IDLE` 后用 `collab recv --timeout 0` 消费，目标 owner 核对原目标、Action Items 和当前缺口，然后继续、更新或结束 |
+| 在线但 busy、waiting_user 或 error | daemon 等待新的可用状态；有明确错误时，目标 owner 只处理受影响工作 |
+| 确认 offline | daemon 不向宿主提交，保留待办 |
+| presence 或 activity 仍 unknown | daemon 保留目标待办，对当前项目 Jenny 发 `goal-status-unknown:` 通知。Jenny 在原项目消费，按下方流程核实 |
+| 批次结束、取消或已耗尽 | 无自动唤醒。仅在原职责有效且获授权时办理续订 |
+
+Jenny 从通知正文取 worker ID、binding、generation、session 与缺失字段，运行
+`collab worker snapshot <worker-id> --capture`。仅在回执仍属该绑定且确有可见证据时，
+把原 `judgment_capture` JSON 对象完整传给
+`collab worker judge --capture '<judgment_capture JSON>' --basis '<本次快照证据>'`，
+只增加有证据的 `--presence` 或 `--activity`。快照已换绑时重新核实当前绑定；
+证据不足时保留 unknown。普通消息、一次性 deadline 和独立巡检按各自订阅生命周期处理。
 
 ### Registered patrol duties
 
@@ -821,9 +796,7 @@ verified pair. A path that cannot prove that identity is a collision: preserve
 it and report the exact path. Never delete `~/.local/bin/collab*` or
 `~/.local/lib/collab/*` merely because the pathname matches.
 
-Installing a binary does not replace the running user-managed daemon. Agents
-never perform its lifecycle actions or request maintenance credentials. After
-user-managed activation, verify the available service:
+Installing a binary does not replace the running daemon automatically. Run `collab up` (or `collab up --restart` when forcing replacement of a healthy same-version detached daemon) from the project root (or a registered worktree) to start or restart the daemon onto the newly installed binary, then verify the live service:
 
 ```sh
 collab context
@@ -1214,35 +1187,17 @@ Read the board without consuming messages or changing lifecycle:
 collab board show
 ```
 
-Any registered execution role publishes a pending task with its contract.
-Publishing queues work; it does not start it. Publish several task IDs to queue
-later work without consuming execution capacity:
+Jenny publishes schedulable work and assigns eligible peers through dispatch or
+invite. A registered peer may publish and claim their own task. To claim
+assigned work, use the current revision and slot from `collab board show`.
 
 ```sh
-collab board publish <task-id> --title <t> --description <d> \
-  --delivery-condition <d> --test-condition <t> [--priority p0|p1|p2|p3|p4]
-collab board claim <task-id> --expected-revision <observed>
+collab board publish <id> --title <t> --description <d> --delivery-condition <d> --test-condition <t>
+collab board claim <id> --expected-revision <revision>
 ```
 
-Claim assigns one pending task to the caller and reserves its Execute attempt.
-Start that attempt separately using the [delivery lifecycle](#任务交付生命周期). A peer may claim
-its own publication or another authorized task. Read the current revision from
-`board show`. Claim atomically checks that the task is still pending and that
-the caller can start execution; it records the actual executor as owner. A
-stale or competing claim fails without taking the task. Do not update a
-pending task to `working` to bypass claim. Never claim outside the user's
-authorized goal or take another owner's working or blocked task.
-
-Architect 可在原目标授权内直接发布执行子任务并把合同路径交指定 peer。Peer 使用
-board 最新 revision 自行认领。任务交付及返工在 architect 和 peer 之间完成：
-
-```sh
-collab board publish "$child_id" --parent-task "$parent_id" --title "$title" --description "$contract" --delivery-condition "$delivery" --test-condition "$verification" --executor "$peer_name" --reviewer "$architect_name"
-collab sendmessage --to "$peer_name" --subject "$child_id" "$contract_path"
-# 下面两条由指定 peer 在自己的会话执行，revision 取自当前 board 回执。
-collab board show
-collab board claim "$child_id" --expected-revision "$revision"
-```
+An admitted Execute attempt starts separately. A peer publication without an
+Execute attempt follows the owner-local lifecycle.
 
 直接认领时，若原任务没有有效执行唤醒，执行者用任务关联的同一 Markdown 文档登记
 本人的有限目标并在同一任务记录关联回执。默认间隔 10 分钟，合同约定优先。任务完成或
@@ -1283,7 +1238,7 @@ owner updates progress on its own task with a current revision:
 collab board update <task-id> --expected-revision <observed> --status <s> [--next <step>]
 ```
 
-The master, or an architect within its entrusted task scope, withdraws an
+The current project master withdraws an
 unaccepted invitation with its observed revision and a reason; withdrawal never
 reclaims peer-owned execution:
 
@@ -1335,11 +1290,9 @@ They do not receive new public assignments. Preserve their historical privacy
 and visibility semantics; do not create or bind another child from current
 work. New bounded execution or observation uses an independent GCM worker.
 
-The current task owner, project manager, or entrusted architect edits the
-descriptive part of an existing non-terminal task without changing history.
-Every flag is required and the revision is checked. The daemon commits one
-automatic unread notice for the other current participant; the caller does not
-send a duplicate manual message:
+The task owner or current project master may edit an existing non-terminal
+task with its observed revision. A master change may notify the affected owner.
+An owner's own update stays in the board.
 
 ```sh
 collab board describe <task-id> --expected-revision <observed> --title <t> \
@@ -1357,11 +1310,37 @@ When any board command fails, the CLI preserves the server's full typed
 response, including durable IDs and `repair_required`. Read the `collab
 response:` line before retrying: a durable outcome is not a retryable failure.
 
-### Continue the queue and recheck blockers
+### Table A: Busy slots and queued admission
+
+Apply the first matching row. The queued and stale-binding recovery rows take
+precedence over generic admission, busy-slot, and rejected-start rows. Other
+specific typed errors take precedence over generic admission rows.
+`<id>` comes from the current Board or task receipt,
+`<revision>` comes from the same current task, and `<attempt>` comes from the
+successful claim receipt.
+
+| IF observed condition | actor | THEN exact CLI action | parameter source | required result / next branch |
+|---|---|---|---|---|
+| Admission returned a durable task or phase ID, but execution is queued | Task owner or peer | `collab task status '<id>'` | `<id>` from the admission receipt; queued phase from the status receipt | Preserve the admitted record. Do not republish, duplicate the task, or call start without a claimed attempt. Apply the first later row that matches the current facts. |
+| Another task is executing in the current slot | Current caller | `collab task status '<running-id>'` | `<running-id>` from `collab board show` or the current slot receipt | Continue the running task's authorized next action. Leave queued work queued. |
+| Board shows an eligible pending task for the caller's slot, dependencies are satisfied, and execution capacity is available | Peer for that slot | `collab board claim '<id>' --expected-revision <revision>` | `<id>`, `<revision>`, eligibility, and capacity from `collab board show` and `collab task status '<id>'` | Read task status and Execute phase separately. An owner-local claim can succeed without an Execute phase; in that case follow its task lifecycle, not task start. Start only under the claimed-attempt row below. Preserve a rejection and apply the typed-error row. |
+| Board shows a working task assigned to the current stable-name owner and current binding, with `execute.status == queued` and `attempt_generation == null` | Current stable-name owner | `collab board claim '<id>' --expected-revision <revision>` | `<id>`, `<revision>`, assignment and Execute projection from the current `collab board show`; owner/session from `collab task status '<id>'` | This is the queued recovery case. Reclaim through the existing gate and preserve any typed refusal. Do not inspect old-attempt or binding history. |
+| Board shows a working or rework task assigned to the current stable-name owner and current binding, with `execute.status` equal to `claimed` or `running` and `attempt_generation == null`, or a start attempt for that owner returns `TICKET_STALE_BINDING` | Current stable-name owner | `collab board claim '<id>' --expected-revision <revision>` | `<id>`, `<revision>`, assignment and Execute projection from the current `collab board show`; owner/session from `collab task status '<id>'`; stale error from the start receipt | This is the stale-binding recovery case. Reclaim through the existing gate. Require a fresh claimed attempt before `collab task start`. Preserve any other typed error. Do not inspect old-attempt or binding history. |
+| The claim receipt exposes `execute.status == claimed` and a numeric `attempt_generation` for the current binding | Task owner | `collab task start '<id>' --expected-revision <revision> --attempt <attempt>` | `<revision>` and `<attempt>` from the successful claim receipt | Direct task start only after the claim receipt exposes a claimed Execute attempt for the current binding. Implement the attempt only after a successful start. A rejected start preserves its typed error; if it is `TICKET_STALE_BINDING`, apply the stale-binding recovery row. |
+| Task is queued on another slot, or claim/start is rejected without matching a recovery row above | Claiming peer | `collab board show`, then `collab task status '<id>'` | `<id>` from the rejected receipt; current facts from both read receipts | Preserve the typed error. Do not steal another slot, force-start, or retry the same input. |
+| Jenny finds eligible ready long-horizon work with its complete declaration already stored | Jenny | `collab board invite '<id>' --to '<worker-id>' --expected-revision <revision>` | Current Board ID, revision, stored long-horizon declaration and eligibility; worker from `collab who` | After the durable invitation, the invitee reads its current revision and runs `collab board respond '<id>' --accept --expected-revision <revision>`. Acceptance transfers ownership; then read Execute before start. |
+| Ready long-horizon work lacks a stored declaration | Jenny | `collab board describe '<id>' --expected-revision <revision> --title '<title>' --description '<description>' --delivery-condition '<delivery>' --test-condition '<test>' --long-horizon-content '<goal-content>' --long-horizon-every-ms <interval-ms>`, then invite with the new revision | Preserve title, description, delivery and test fields from the current Board; use authorized goal content and cadence | Bare invite returns `BOARD_LONG_HORIZON_CONTENT_REQUIRED` without the declaration. Do not pass inline schedule flags to invite. After invite, the invitee uses revision-checked `collab board respond '<id>' --accept --expected-revision <revision>`. |
+| Explicitly authorized one-shot work is pending, publisher-owned, unassigned and has no long-horizon declaration or linked goal subscription | Jenny | `collab board invite '<id>' --to '<worker-id>' --expected-revision <revision> --one-shot` | Current Board and membership; one-shot authorization from the task contract | Preserve any mode or eligibility rejection. On success the invitee runs `collab board respond '<id>' --accept --expected-revision <revision>` using the invitation's current revision, then reads Execute before start. Never select one-shot merely to bypass a missing declaration. |
+| A task has no eligible slot or assignment for the current caller | Peer | `collab board show` | Current Board and caller assignment | Continue other authorized work. Do not bypass assignment or execution admission. |
+| Current task completes | Task owner | Follow the existing delivery, review, integration, cleanup, and close lifecycle; then run `collab board show` | Receipts and evidence from those existing lifecycle steps | Select the next eligible item and restart Table A. A delivery report alone does not end cleanup ownership. |
+
+An invitation, queued admission, or transport acceptance is not execution. Do
+not add a `--queue`, force-start command, or busy-slot bypass.
+
+### Admission and completion sequence
 
 Use this sequence for master and peer work. Master also checks the public queue
-and its coordination tasks. Legacy managed records are inspection
-inputs only.
+and its coordination tasks. Legacy managed records are inspection inputs only.
 
 1. Before peer/master board work starts, publish its goal, delivery condition,
    and test condition, then claim it or accept its invitation. When no suitable
@@ -1376,34 +1355,51 @@ inputs only.
 2. On completion, finish the applicable delivery, review, integration, cleanup,
    and close steps. A delivery report alone does not end a cleanup obligation.
    Read `collab board show` and check for unfinished work before stopping.
-3. On a blocker, keep ownership and record the cause, release condition, and
-   next action with `board update --status blocked --next "<facts>"`. Report it
-   to master. For an actual resource conflict use
-   `collab task wait <task-id> --for <holder-task-id>`; it is not a
-   general dependency queue.
-4. Check owned blocked/waiting tasks against current evidence. If a blocker
-   has cleared, recheck resources and execution capacity, then resume through
-   `board update --status working` using the current revision. A release notice
-   requires a recheck; it does not prove the task can resume. Keep it blocked
-   while another task occupies the execution slot.
-5. If current work cannot proceed, select another authorized, nonconflicting
-   pending task and claim it. Prefer priority p0 through p4, then task ID for
-   equal priority. Pending queue entries do not occupy execution capacity.
-   Blocked/waiting tasks keep their resources and unfinished responsibility;
-   starting another task does not release or cancel them.
-6. Before entering idle, check remaining work, pending close/cleanup duties,
-   each blocker, owned worktrees and stale resources, open P0/P1 work, and any
-   new production issue requiring canonical intake. If any action is possible,
-   continue it. Otherwise record what is blocked and the event or responsible
-   actor needed to resume. Preserve dirty, active, shared, or unknown resources
-   as PROTECTED_HOLD. Reuse a valid periodic patrol batch while it has remaining
-   deliveries; do not re-register or reset it. Explicitly re-arm only a consumed
-   ordinary one-shot goal or deadline wake when continued scheduling is required.
-   If a patrol batch is exhausted and the standing duty remains authorized, renew
-   it as a whole batch. Repeat this check on the next message or supported
-   notification. Consume applicable messages with `collab recv` on non-DSH
-   transports. DSH receives full messages natively through its gateway and acts
-   directly on them.
+
+### Table B: Resource waits, block approval, and queue continuation
+
+Apply the first matching row. A pending approval or specific error takes
+precedence over a generic continuation row. `<holder-id>` is the actual
+resource-holder task from the conflict receipt; it is not a guessed task.
+
+| IF observed condition | actor | THEN exact CLI action | parameter source | required result / next branch |
+|---|---|---|---|---|
+| An actual resource conflict names its holder task | Task owner | `collab task wait '<id>' --for '<holder-id>'` | `<id>` from the current task; `<holder-id>` from the conflict receipt | Read the returned wait state. Do not use this command for a general dependency or a business-block approval. |
+| Business work cannot proceed and needs a supervisor decision | Task owner | `collab task block '<id>' --next '<cause; evidence; attempted remedies; affected scope; resume condition>'` | Current failure evidence and the observable condition that would permit resumption | Preserve the returned pending request. The requester does not self-approve it. |
+| Block request is pending | Task owner or peer | `collab task status '<id>'` | Current task receipt | Do not call the task approved `blocked` and do not assume capacity was released. Continue independent actions. |
+| Current authorized supervisor has verified the pending request | Current supervisor; current CEO only for a master-owned task | `collab task update '<id>' --blocker-action approve --decision-reason '<evidence and resume condition>'` | Pending request, current task revision, current authority receipt, and verified evidence | The exact approval receipt is the approved-block result. Any other caller branches to escalation or rejection. |
+| Current authorized supervisor rejects the request | Current supervisor; current CEO only for a master-owned task | `collab task update '<id>' --blocker-action reject --decision-reason '<missing evidence or available action>'` | Pending request and the specific evidence or action gap | Preserve the rejection. The owner applies the returned available action. |
+| A current wait or approved block remains active and no release or recovery evidence matches | Task owner | `collab board show` | Current wait/approval receipt and current Board | Apply Table A to select eligible authorized work by the existing priority and queue rules. Claim and start only when admission permits them. |
+| A queued candidate conflicts with resources retained by the waiting task | Task owner or peer | `collab board show` | Current wait state and the candidate's resource claim | Leave the conflicting candidate queued and select another nonconflicting candidate through Table A. Do not release the waiting task's resources implicitly. |
+| A release or recovery notice arrives | Task owner | `collab task status '<id>'`, then `collab board show`; if decision evidence is missing, `collab context --query` for block_requests | Original persisted wait/block receipt and current task, wait, next_step and block_requests | Match the released holder to the original resource wait. A release sets blocked, clears wait (`wait=null`) and writes `RESOURCE_RELEASED=<holder-id>` in next_step. That marker plus the original wait distinguishes it from a business block, whose approved request and recorded resume condition must be checked separately. A notice or blocked status alone is insufficient. |
+| Resource-release evidence matches, wait is cleared, task is blocked and current resources permit resume; or an approved business block's own resume condition has been met | Current task owner | Public Board task: `collab board update '<id>' --expected-revision <revision> --status working --next '<resume-evidence>'`; legacy non-Board task: `collab task update '<id>' --status working --next '<resume-evidence>'` | Current Board revision for public tasks; original wait or approved block request, observed recovery evidence and current resource ownership | Server must accept the blocked-to-working transition. It gates executor and resource ownership/conflicts. Read the successful task/Execute receipt and use Table A for a current claimed attempt. On refusal preserve the typed error and blocked responsibility, refresh status/Board, resolve the named conflict or escalate to its owner, and continue independent work. Never force resume or self-approve a business block. |
+| All remaining actions require an external event | Task owner | No task mutation; apply Table C | Responsible actor, affected task, and observable recovery signal from the existing task record | Keep the task and resources. Cancel only the patrol entry covered by Table C and preserve direct-message reception. |
+
+Waiting or approved-block state does not make the current execution slot available
+by itself. A continuing task keeps its resources and unfinished responsibility.
+Selecting another item is an explicit Board review. Preserve supervisor and CEO
+authority boundaries and the prohibition on self-approval. If this checkout
+rejects an expected transition, preserve the typed error and report the runtime
+dependency instead of forcing the switch.
+
+Patrol wake subjects, cancellation, and continuation use the authoritative
+Table C in [board-idle-patrol.md](references/board-idle-patrol.md). Context
+recovery and current-action selection use the authoritative Table D in
+[stable-name-recovery.md](references/stable-name-recovery.md).
+
+Before entering idle, check remaining work, pending close/cleanup duties,
+each blocker, owned worktrees and stale resources, open P0/P1 work, and any
+new production issue requiring canonical intake. If any action is possible,
+continue it. Otherwise record what is blocked and the event or responsible
+actor needed to resume. Preserve dirty, active, shared, or unknown resources
+as PROTECTED_HOLD. Reuse a valid periodic patrol batch while it has remaining
+deliveries; do not re-register or reset it. Explicitly re-arm only a consumed
+ordinary one-shot goal or deadline wake when continued scheduling is required.
+If a patrol batch is exhausted and the standing duty remains authorized, renew
+it as a whole batch. Repeat this check on the next message or supported
+notification. Consume applicable messages with `collab recv` on non-DSH
+transports. DSH receives full messages natively through its gateway and acts
+directly on them.
 
 These are agent actions within an activation. Current board mutations commit an
 automatic notice to the other current participant, but the board does not
@@ -1421,8 +1417,8 @@ Legacy managed-subagent records grant no new production execution authority.
 Registered peer status and thread state use the owning AppServer RPC. Offer
 unassigned long-horizon goals to suitable authorized peers first, and use
 independent `codex exec --profile gcm` workers only when no suitable authorized
-peer can take the goal. Apply the same eligible-peer check before delegating
-bounded subwork inside an accepted goal. Legacy records may be inspected
+peer can take the goal. Inside an accepted task, use Codex orchestration for
+bounded subwork. Legacy records may be inspected
 only for diagnosis.
 For registered participants, `collab-mcp` and the `collab` CLI expose the same
 collaboration protocol. Listed `collab_*` tools alone do not prove registration.
@@ -1701,9 +1697,9 @@ DSH 直接处理 gateway 已投递的正文，不再 Poll/ACK。回信仍在自�
 原消息 ID 只用于关联回信。持久入队、宿主投递、接收消费和实际回信分别核实，
 发送成功不能证明对方已经执行。
 
-可直接给 agent 的下一步提示词：
+仅当用户或原任务合同已明确授权目标项目与接收人时，使用下一步提示词：
 
-> 在自己的项目使用当前真实身份，从 collab list 取得目标精确地址。
+> 在自己的项目使用当前真实身份，以 `collab list` 核实已授权的项目和接收人。
 > 用 `collab send --to '<project.name>' --subject '<主题>' --content '<具体action、范围、验收和回信要求>'` 发送。
 > 角色级别不限制发送。保存 msg_id，分别报告已入队、已消费和
 > 已收到实际回信的证据；只获得哪一步就报告哪一步。拒绝或未知状态保留原错。
@@ -1794,20 +1790,9 @@ worker's blocker. Concretely:
 
 ## Master splits and assigns
 
-The human remains the final authority for goals, money, irreversible risk and
-version promotion. Master owns project priorities, cross-task dependencies
-and final delivery. Use the [file handoff contract](#设计规划与审查角色的文件交接合同)
-for architect assignments.
-
-- Where a suitable architect is assigned, route buglist items and project tasks
-  to the architect first. The architect plans, hands the implementation to
-  authorized peers, and accepts their results. Reuse the original board task
-  and its scope. If no suitable architect can take necessary new planning,
-  follow [the independent planning and dispatch route](#无可用执行-peer-时的派单).
-- For work without an applicable architect assignment, use the existing
-  peer and independent-worker routing. Apply explicit user instructions about
-  who plans, executes and accepts the task. Record decisions, evidence and
-  needed next actions on the existing task.
+Jenny owns project priorities, dispatch and cross-task resource coordination.
+Assign a complete goal to one task owner. Specialties inform capacity matching.
+When dispatch itself needs a plan, use [independent planning](#无可用执行-peer-时的派单).
 
 **Sovereignty and Backlog Priority**:
 - **No autonomous technical debt refactoring**: When assigned tasks complete
@@ -1819,7 +1804,7 @@ for architect assignments.
 - **Autonomous Bug Tracking Backlog Resolution**: If pre-existing issues or
   requirements are logged in the bug system (`appsdk bug list --status open`),
   master pulls authorized open bugs in priority order (P0 > P1 > P2) and
-  routes them under the same architect intake rule as project tasks.
+  assigns each authorized issue to an eligible task owner.
 
 **Worker->Master idle fact and master long-horizon wake**:
 When a worker transitions from `working` to `idle`, it emits one idempotent
@@ -1879,15 +1864,9 @@ A tmux screen cannot establish task completion,
 peer consumption, or Codex turn state. Do not infer those facts or restart a
 shared runtime from a pane probe.
 
-Master keeps project dispatch, integration and final delivery accountability.
-Architect owns planning, contract updates, peer dispatch, and task acceptance
-for its entrusted scope. Use a board invitation for a long-horizon peer goal. Use an
-independent `codex exec --profile gcm` worker for bounded execution or
-observation. Legacy managed-subagent records grant no new execution authority
-and fail closed for unsupported thread creation. Give each peer and GCM worker
-its own worktree and file scope. Independent peers may decline an invite to
-protect their current task. Wait for evidence summaries, verify them, then
-integrate. Chat tone is not completion.
+Jenny owns project dispatch. The task owner handles planning, execution,
+independent review, integration and cleanup through Codex orchestration.
+Use a board invitation to assign a long-horizon goal.
 
 ### 任务交付生命周期
 
@@ -1897,14 +1876,13 @@ Git 集成和上线依产品合同进行。下表记录同一任务在 Collab �
 
 | 当前状态 | 执行者与命令 | 成功回执与下一步 |
 |---|---|---|
-| 已授权，有目标、行动项和验收 | 派单 owner 复用已有任务或按[完整派单与交回](#完整派单与交回)发布，填写交付、测试和必要 reviewer；按权限定向邀请或允许合适执行者认领 | `pending` 或邀请待答。邀请保留原 owner，长程派单从目标文档填写实际内容和周期 |
-| 本人可认领或是被邀请者 | 执行 peer 用 `collab board claim <id> --expected-revision <revision>`，或 `collab board respond <id> --accept --expected-revision <revision>`；revision 来自当前 Board 对应行 | `task.owner_name` 是本人；公开 ticket 的 `task.execute.status=claimed`。保存回执中的新 `task.revision` 和 `task.execute.attempt_generation` |
-| 本人 Execute 为 `claimed`，实际准备执行 | `collab task start <id> --expected-revision <当前 task.revision> --attempt <task.execute.attempt_generation>` | `task.execute.status=running`。Board 业务状态 `working` 本身不表示已 start |
-| 本人 Execute 为 `running`，产物和验收证据就绪 | 代码：`collab task deliver <id> --attempt <当前 attempt> --worktree '<已登记的绝对路径>' --evidence '<候选、验收及证据路径>'`。无代码候选的只读交付：`collab task deliver <id> --attempt <当前 attempt> --no-candidate --evidence '<结果、核对方法和证据路径>'` | `status=delivered`。查看 `collab task status <id>` 的 `delivery.kind`（`code` / `read_only`），接下去由 reviewer 验收 |
-| `delivered` | 指定 reviewer 的当前持有者读原合同和候选，执行审查后用 `collab task review <id> --accept --evidence '<实际验收结果>'` 或 `collab task review <id> --rework --evidence '<finding、证据和复验条件>'`。独立 reviewer 无注册权限时，由按合同有权限的记账人记录真实独立结论；已有必需 reviewer 时先走经授权的改派 | `accepted` 或 `rework`。返工时读取 Board 的新 Execute 状态，按可认领阶段及同一 start/deliver 路径推进；旧尝试不能再次提交 |
-| `accepted`，`read_only` | 当前 owner 或 Jenny 核对交付、消费（合同要求时）和自有资源，进入正常 close | `disposition=no_merge_required`。直接清理并关闭 |
-| `accepted`，`code` | 集成人完成 Git 合并、推送并核对远端 main 后，Jenny 对其 pending merge 执行 `collab task integrated <id> --commit <Git 合入回执中的实际提交> --evidence '<远端合入和验收证据>'`；无 master 待集成义务时，按合同获授权的 owner 可登记 | `status=merged`。以本地 main 可达性和已登记分支的祖先或净内容证明登记已发生的集成；远端、发布和上线证据由产品交付 owner 提供 |
-| `merged` 或已验收的 `no_merge_required` | 当前 owner 或 Jenny 核对任务资源归属，释放自有临时资源，执行 `collab task close <id>`；保全仍需使用的成果和证据 | `status=closed`，清理回执为 `verified`，并由 `collab task status <id>` 确认 `delivery_complete=true`、`completion_missing=[]`。`close` 作为关闭前的待办是正常的 |
+| 已授权，有目标、行动项和验收 | Jenny 发布并分配，或 peer 发布自有任务。填写交付物和可观察验证 | Board 返回 pending 或邀请 |
+| 自有任务、已分配或收到邀请 | `collab board claim <id> --expected-revision <revision>` 或 `collab board respond <id> --accept --expected-revision <revision>` | 核对本人为 owner。已准入任务保留新 revision 和 attempt |
+| 本人 Execute 为 `claimed` | `collab task start <id> --expected-revision <revision> --attempt <attempt>` | Execute 为 running |
+| 产物及证据就绪 | `collab task deliver <id> --evidence '<证据和路径>'`，按 Execute 状态加 `--attempt <attempt>`。代码提供 `--worktree '<已登记路径>'`，无候选交付加 `--no-candidate` | delivered，核对 delivery.kind |
+| delivered | Owner 用 `collab task review <id> --accept --expected-subject-revision <交付代际> --evidence '<独立审查人、结论和证据路径>'` 或将 `--accept` 改为 `--rework`，并登记 finding 和复验条件。代际取 Reviewer 开始时的 `review.subject_revision`。无候选任务按原合同核对产物和证据 | accepted 或 rework。代际冲突时保持原状态。新交付需独立复核后再登记。 |
+| accepted，code | Owner 合并并核对远端 main 后，执行 `collab task integrated <id> --commit <实际 Git 合入提交> --evidence '<合入和验收证据>'` | merged |
+| merged 或无须合并且验收通过 | Owner 清理自有资源，执行 `collab task close <id>` | closed；从 task status 核对 delivery_complete 和清理回执 |
 
 当前执行者用 `collab board show` 的 `tasks[]` 对应 ID 行恢复 `revision` 和 `execute`。
 代码工作树从 `collab task status <id>` 的 `worktree` 复制，必须与已登记值一致。
@@ -1927,48 +1905,15 @@ Git 集成和上线依产品合同进行。下表记录同一任务在 Collab �
 | `TICKET_STALE_BINDING` 或实名绑定不一致 | 从原会话恢复 `collab context`；重读 Board，按同名持有者的合法重新认领路径取得新 attempt。归属冲突交 Jenny |
 | 当前 `execute.status` 为 `claimed` / `running` 但 `attempt_generation=null` | 先核对自己仍是当前同名 owner。若符合旧绑定重新认领条件，用 `collab board claim <id> --expected-revision <当前 revision>`，从新回执取得 attempt。认领被拒或归属不符时保留状态并交派单 owner 处理 |
 | `TICKET_PHASE_MISSING` | 交 Jenny 检查已准入、本人已接的 `working` 任务。满足现有修复门禁时由 Jenny 用 `collab board backfill-execute <id> --expected-revision <revision>`。`--admit-legacy` 是另有授权的显式旧任务准入，仅用于有稳定 owner 的公开旧 `working` / `rework` 记录 |
-| `review`、`integration`、`TASK_MERGE_PENDING` | 分别交当前 reviewer 或集成人，依据上表处理。同一任务继续等待对应回执，独立任务照常推进 |
-| `TASK_INTEGRATION_COMMIT_MISMATCH` | 保留 `accepted` 和 pending merge。集成人用回执中的 `branch` / `detail` 核对实际 Git 合并、当地 main 和任务分支，修正后提交真实集成回执 |
-| 正常 close 拒绝或清理尚未验证 | 查看 `collab task status <id>`、实际工作树和原错；由资源 owner 解除冲突。已关闭的兼容记录欠清理时才用 `collab task finalize-cleanup <id> [--commit <已记录的集成提交>]`。人工终止保留 `manual_termination`，不能计作完整交付 |
-
-For code delivery, review acceptance creates the applicable daemon-owned
-pending merge and notifies the current master. The obligation is durable and
-appears in `collab context`, `collab status --all` (`pending_merges`),
-`appsdk longhorizon show` (待合并), and master idle wake text. A declared
-Git branch must be reachable from `refs/heads/main` or its net changes must
-be present in the supplied main-reachable squash/rebase receipt. `task close`
-fails with `TASK_MERGE_PENDING` while the applicable master obligation remains.
-Never infer read-only work from a missing candidate. Never rely on remembering
-a merge from a message.
-
-After delivery, either the peer merges and pushes the verified code candidate
-under the next section's conditions, or the current master drives review,
-applicable integration, cleanup, task close, and then the next ready
-assignment. A reviewed read-only delivery proceeds directly through cleanup
-and normal close. Do not leave a peer idle merely because its last task
-returned `delivered`, `merged`, or a review verdict. Route the next
-non-overlapping P0/P1 work peer-first. Reuse an autonomous peer for another
-long-horizon goal. Check idle, suitable authorized peers and available capacity
-first; use peer capacity that can take the ready work. Direct-dispatch
-independent GCM workers only when no suitable authorized peer can take the
-work. Closing or force-closing a stale task is a scheduling
-decision that must preserve evidence, not a reason to stop dispatching.
+| review 或 integration | Owner 按原合同登记独立 Review、集成及证据 |
+| TASK_INTEGRATION_COMMIT_MISMATCH | Owner 核对实际 Git 合并、main 和任务分支后登记真实回执 |
+| 正常 close 拒绝或清理未验证 | 按 task status 核对归属与实际资源。历史已关闭任务待清理时，执行 `collab task finalize-cleanup <id>` |
 
 ### Verified merge and resource cleanup DAG（单源单汇）
 
-一个交付/resource 回收任务必须以唯一入口进入、唯一终点收口；节点内部可以是状态机，但独立功能之间不得跨节点回边改真源。
-
-多 peer 批次内，当前项目 master 是共享构建、完整组合构建、远端 CI 触发及批次集成提交/PR 的唯一调度 owner。peer 完成自身必要局部验证后，交本地候选提交和证据，不独立 push/开 PR；预计时间只作协调提示。当前批 CI 与下一批合流验证并行；下一批已合流、适用验证和 review 完成后，前批通过则保留结果并完成适用集成义务，前批失败则保留原错、落实修复或诊断 owner、隔离未修复失败项及其下游，并以有效 main 和已验证依赖建立下一批。失败 PR 不得合入，不沿用失败基础，不削弱 CI；独立候选继续准备。完整规则见全局 `codex-orchestrator` Skill 的 `references/delivery-contract.md`。
-
-非批次路径或 master 明确授权的单候选路径中，**peer 可直接 merge + push，当且仅当：**
-
-1. merge 前 fetch 最新 `origin/main`，确认远端 main 没有比自己主链更新的提交；
-2. 候选已 rebase/组合到该最新 main，并重跑过受影响验证 + 独立 review PASS；
-3. 当前项目没有 pending merge/release 锁（简单 queue 文件或 daemon 状态）；
-4. merge 后立即核对本地 main 与已验候选等价，并确认 `origin/main` 回执；
-5. 任何失败（合并冲突、push 拒绝、CI 未跑通）都必须停下并上报 master，不允许强行推进。
-
-否则 merge 的 owner 仍是 current master；review PASS 不授予流程外发布或生产变更。
+任务 owner 在组合最新 main 的候选上完成必要验证和独立 Review，按 Codex 交付合同
+完成 Git 集成并核对远端。登记合入回执，保全证据，清理自有资源并关闭。
+共享 CI 或其他资源发生实际占用冲突时，相关 owner 协调占用与释放。
 
 ### Collab runtime delivery DAG（单源单汇）
 
@@ -2262,38 +2207,60 @@ DSH 即使运行于 Rex 或 tmux 内，也优先使用 DSH 的身份来源。
 
 ### Rex 中的 Codex
 
-Codex 宿主注入 `CODEX_SESSION_ID`。Rex 注入 `REX_SESSION` 和 `REX_BLOCK`，官方
-Rex CLI 的 JSON `endpoint` 给出当前 server。三个 Rex 字段共同定位投递 block。
-在当前 block 内执行：
+Codex 宿主注入 `CODEX_SESSION_ID`。Collab 从 `REX_SESSION`、`REX_BLOCK` 和
+官方 Rex CLI 的 JSON `endpoint` 确定当前投递位置。先执行 `collab context`。
+如果原 Rex block 返回 `missing_facts`，且 `REX_SESSION` 或 `REX_BLOCK` 缺值，
+从当前 block 的 `whoami` 补齐实际位置后重试。仅有 `REX_BLOCK` 的 Rex 版本
+可能把缺项写成 AppServer `endpoint`，仍按此 Rex 流程处理：
 
 ```sh
-printf 'CODEX_SESSION_ID=%s\nREX_SESSION=%s\nREX_BLOCK=%s\n' \
-  "${CODEX_SESSION_ID:-}" "${REX_SESSION:-}" "${REX_BLOCK:-}"
-if [ -n "${REX_SESSION:-}" ] && [ -n "${REX_BLOCK:-}" ]; then
-  if command -v rex >/dev/null 2>&1; then
-    rex whoami --json --autostart=false
-  else
-    rex_bundle='Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex'
-    rex_cli="/Applications/$rex_bundle"
-    if [ ! -x "$rex_cli" ]; then
-      rex_cli="$HOME/Applications/$rex_bundle"
-    fi
-    if [ -x "$rex_cli" ]; then
-      "$rex_cli" whoami --json --autostart=false
-    else
-      printf '%s\n' 'Rex CLI unavailable in this shell' >&2
-    fi
+collab_recover_rex() {
+  local rex_cli app helper placement rex_session rex_block
+  [ -n "${CODEX_SESSION_ID:-}" ] || {
+    printf '%s\n' 'Current Codex host must supply CODEX_SESSION_ID.' >&2
+    return 1
+  }
+  rex_cli=''
+  case "$(uname -s)" in
+    Darwin)
+      for app in "/Applications/Rex.app" "$HOME/Applications/Rex.app" \
+                 "/Applications/Rex Beta.app" "$HOME/Applications/Rex Beta.app"; do
+        helper="$app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+        if [ -f "$helper" ]; then
+          rex_cli="$helper"
+          break
+        fi
+      done
+      ;;
+    Linux) rex_cli='/usr/local/bin/rex' ;;
+  esac
+  if [ ! -f "$rex_cli" ]; then
+    printf '%s\n' 'Official Rex CLI unavailable in this shell' >&2
+    return 1
   fi
-fi
+  placement=$("$rex_cli" whoami --json --autostart=false) || return
+  rex_session=$(printf '%s\n' "$placement" | jq -er '.session_id | strings | select(length > 0)') || return
+  rex_block=$(printf '%s\n' "$placement" | jq -er '.block_id | strings | select(length > 0)') || return
+  if [ "${REX_SESSION:-$rex_session}" != "$rex_session" ] ||
+     [ "${REX_BLOCK:-$rex_block}" != "$rex_block" ]; then
+    printf '%s\n' 'Rex whoami placement conflicts with this shell.' >&2
+    return 1
+  fi
+  export REX_SESSION="$rex_session" REX_BLOCK="$rex_block"
+  collab context
+}
+collab_recover_rex
 ```
 
-`collab context` 从同一环境自动读取这些值，daemon 核实 Rex server、session 和
-terminal block。Rex session/block 只用于投递。缺 `CODEX_SESSION_ID` 时由当前 Codex
-宿主补传。此路径无需 AppServer thread、endpoint 或 namespace。
+`whoami` 不返回完整位置、现有值冲突或重试失败时，保留原错交当前宿主处理。
+daemon 核实 Rex server、session 和 terminal block。保留同一 shell 和 cwd 执行后续
+`collab recv`。Rex session/block 只用于投递。
+缺 `CODEX_SESSION_ID` 时由当前 Codex 宿主补传。原环境中的 `TMUX_PANE` 保持原样；
+无需 `tmux` 命令、`rex session inspect`、AppServer thread、endpoint 或 namespace。
 
 ### iTerm2 中的 tmux / Codex TUI
 
-Codex 注入 `CODEX_SESSION_ID`。tmux 注入 `TMUX_PANE`。在现有 pane 中执行：
+已确认当前宿主为 tmux 且 Context 明确缺当前 pane 时，才在原 pane 执行：
 
 ```sh
 printf 'CODEX_SESSION_ID=%s\nTMUX_PANE=%s\n' "${CODEX_SESSION_ID:-}" "${TMUX_PANE:-}"
@@ -2380,10 +2347,10 @@ thread, even if it is reachable. If ownership of the exact endpoint and tuple
 cannot be established, fail registration rather than borrowing another
 runtime's identity.
 
-Registration derives the host namespace from the active runtime. The exact
+For an already verified direct AppServer runtime only, registration derives its
+namespace from that runtime. This is not a Rex troubleshooting path. The exact
 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` marker selects `codex_app`;
-`Codex CLI` or `Codex TUI` selects `codex_tui`, and `TMUX_PANE` selects
-`codex_tui` when no originator marker is present. An explicit
+`Codex CLI` or `Codex TUI` selects `codex_tui`. An explicit
 `COLLAB_APPSERVER_NAMESPACE` is reserved for nonstandard hosts and must be one
 of those two values. Unknown host markers never select an AppServer namespace.
 With an explicit AppServer socket they fail registration; without one, the
@@ -2496,10 +2463,9 @@ claim an independent goal or infer master authority.
   decline a master collaboration invite. Master splits by dependency then
   unique write scope, offers long-horizon work to a consenting peer through the
   public board with unambiguous delivery and test conditions. Use the
-  [architect handoff](#设计规划与审查角色的文件交接合同) when applicable.
-  Peers request help promptly with available failure evidence and attempts;
-  root cause and solution need not be proven first. Apply Registered patrol
-  duties for master verification and continued ownership. Legacy managed records grant no new task
+  [independent task contract](#完整派单与交回). Request decisions from Jenny
+  when project authority or a change in ownership is needed. Legacy managed
+  records grant no new task
   authority. Last owned
   task close keeps that owner's auto-notify armed. No command closes the base
   `direct-message` lease; per-task `board-idle` cancellation and re-arming use

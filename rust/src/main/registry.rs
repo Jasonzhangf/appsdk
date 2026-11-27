@@ -484,11 +484,26 @@ fn goal_revision(goal: &Value) -> u64 {
         .unwrap_or(0)
 }
 
-pub(super) fn assert_governance_maps(root: &Path) {
-    try_assert_governance_maps(root).unwrap_or_else(|error| fail(error))
+#[cfg(test)]
+pub(super) static GOVERNANCE_MAPS_LOAD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub(super) fn assert_governance_maps(
+    root: &Path,
+) -> std::collections::HashMap<&'static str, Value> {
+    try_load_governance_maps(root).unwrap_or_else(|error| fail(error))
 }
 
 pub(super) fn try_assert_governance_maps(root: &Path) -> Result<(), String> {
+    try_load_governance_maps(root).map(|_| ())
+}
+
+pub(super) fn try_load_governance_maps(
+    root: &Path,
+) -> Result<std::collections::HashMap<&'static str, Value>, String> {
+    #[cfg(test)]
+    GOVERNANCE_MAPS_LOAD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut maps = std::collections::HashMap::with_capacity(5);
     for (name, key) in [
         ("resource-map.json", "resources"),
         ("module-registry.json", "modules"),
@@ -532,8 +547,9 @@ pub(super) fn try_assert_governance_maps(root: &Path) -> Result<(), String> {
                 }
             }
         }
+        maps.insert(name, value);
     }
-    Ok(())
+    Ok(maps)
 }
 
 pub(super) fn assert_registry_binding_contract<'a>(
@@ -629,37 +645,11 @@ pub(super) fn assert_lifecycle_producer_map_binding(
         &root.join(".appsdk/maps/module-registry.json"),
         "lifecycle_producer_module_registry",
     );
-    assert_governance_maps(root);
     // Governance maps are project-owned projections. A project may omit the
     // SDK producer projection when it does not publish that control-plane
     // entry; if a producer-owned identity is present, its declaration must
     // remain canonical and unique.
-    let mut maps = std::collections::HashMap::new();
-    for name in GOVERNANCE_MAP_NAMES {
-        let path = root.join(".appsdk/maps").join(name);
-        assert_no_symlink_components(root, &path, "lifecycle_producer_map");
-        let value: Value = serde_json::from_str(
-            &fs::read_to_string(&path)
-                .unwrap_or_else(|_| fail(format!("LIFECYCLE_PRODUCER_MAP_MISSING:{}", name))),
-        )
-        .unwrap_or_else(|_| fail(format!("LIFECYCLE_PRODUCER_MAP_INVALID:{}", name)));
-        let key = match name {
-            "resource-map.json" => "resources",
-            "function-map.json" => "functions",
-            "mainline-call-map.json" => "edges",
-            "verification-map.json" => "gates",
-            _ => unreachable!(),
-        };
-        if value.get("schema_version").and_then(Value::as_u64) != Some(1)
-            || value
-                .get(key)
-                .and_then(Value::as_array)
-                .is_none_or(|items| items.is_empty())
-        {
-            fail(format!("LIFECYCLE_PRODUCER_MAP_INVALID:{}", name));
-        }
-        maps.insert(name, value);
-    }
+    let maps = assert_governance_maps(root);
     for (name, key) in [
         ("resource-map.json", "resources"),
         ("function-map.json", "functions"),
@@ -1111,41 +1101,21 @@ pub(super) fn try_assert_identifier(value: &str, error: &str) -> Result<(), Stri
 }
 
 pub(super) fn canonical(value: &Value) -> String {
-    match value {
-        Value::Null => "null".into(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).unwrap(),
-        Value::Array(values) => format!(
-            "[{}]",
-            values.iter().map(canonical).collect::<Vec<_>>().join(",")
-        ),
-        Value::Object(values) => {
-            let mut keys = values.keys().collect::<Vec<_>>();
-            keys.sort();
-            format!(
-                "{{{}}}",
-                keys.iter()
-                    .map(|key| format!(
-                        "{}:{}",
-                        serde_json::to_string(key).unwrap(),
-                        canonical(&values[*key])
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        }
-    }
+    crate::primitives::canonical_json(value)
 }
 
 pub(super) fn sha256(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    crate::primitives::sha256_str(value)
 }
 
 pub(super) fn assert_goal_confirmed(root: &Path) {
     assert_goal_contract(root, true);
+}
+
+pub(super) fn read_confirmed_goal(root: &Path) -> Value {
+    let goal = read_goal(root);
+    validate_goal_contract(&goal, true);
+    goal
 }
 
 pub(super) fn read_goal_if_present(root: &Path) -> Option<Value> {

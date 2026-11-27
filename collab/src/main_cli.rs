@@ -189,6 +189,9 @@ pub(crate) enum TaskCmd {
     /// Accept a delivered task or return it for rework
     Review {
         id: String,
+        /// Subject revision from task status at the start of independent review.
+        #[arg(long)]
+        expected_subject_revision: Option<u64>,
         #[arg(long, conflicts_with = "rework", required_unless_present = "rework")]
         accept: bool,
         #[arg(long, conflicts_with = "accept", required_unless_present = "accept")]
@@ -577,9 +580,12 @@ pub(crate) enum Cmd {
         #[arg(long)]
         service: bool,
     },
-    /// User maintenance entrypoint
-    #[command(hide = true)]
-    Up,
+    /// Start or restart the local Collab daemon and bind LaunchAgent autostart
+    Up {
+        /// Force restarting even a healthy same-version detached daemon
+        #[arg(long)]
+        restart: bool,
+    },
     /// User maintenance entrypoint
     #[command(hide = true)]
     Down,

@@ -5,7 +5,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,110 @@ struct Fixture {
     root: PathBuf,
     state: PathBuf,
     project: PathBuf,
+}
+
+struct OwnedChild {
+    child: Option<std::process::Child>,
+    process_group: bool,
+}
+
+impl OwnedChild {
+    fn new(child: std::process::Child, process_group: bool) -> Self {
+        Self {
+            child: Some(child),
+            process_group,
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.as_ref().expect("owned child is active").id()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child
+            .as_mut()
+            .expect("owned child is active")
+            .try_wait()
+    }
+
+    fn wait_with_output(
+        mut self,
+        deadline: Instant,
+        stdout_path: &std::path::Path,
+        stderr_path: &std::path::Path,
+    ) -> std::io::Result<Output> {
+        let mut child = self.child.take().expect("owned child is active");
+        let pid = child.id();
+        loop {
+            if let Some(status) = child.try_wait()? {
+                self.reap_group(pid, Instant::now() + Duration::from_secs(5))?;
+                return Ok(Output {
+                    status,
+                    stdout: fs::read(stdout_path)?,
+                    stderr: fs::read(stderr_path)?,
+                });
+            }
+            if Instant::now() >= deadline {
+                if self.process_group {
+                    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+                }
+                let _ = child.kill();
+                let status = child.wait()?;
+                self.reap_group(pid, Instant::now() + Duration::from_secs(5))?;
+                return Ok(Output {
+                    status,
+                    stdout: fs::read(stdout_path)?,
+                    stderr: fs::read(stderr_path)?,
+                });
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn reap_group(&self, pid: u32, deadline: Instant) -> std::io::Result<()> {
+        if !self.process_group {
+            return Ok(());
+        }
+        let group = -(pid as libc::pid_t);
+        if unsafe { libc::kill(group, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return Ok(());
+        }
+        unsafe { libc::kill(group, libc::SIGKILL) };
+        loop {
+            if unsafe { libc::kill(group, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "owned process group cleanup unconfirmed",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_none() {
+            if self.process_group {
+                unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+            } else {
+                let _ = child.kill();
+            }
+        }
+        let pid = child.id();
+        let _ = child.wait();
+        let _ = self.reap_group(pid, Instant::now() + Duration::from_secs(5));
+    }
 }
 
 impl Fixture {
@@ -94,7 +198,21 @@ impl Fixture {
         if approve {
             command.arg("--approve");
         }
-        let output = command.output().unwrap();
+        let stdout_path = self.root.join("restore.stdout");
+        let stderr_path = self.root.join("restore.stderr");
+        command
+            .stdout(fs::File::create(&stdout_path).unwrap())
+            .stderr(fs::File::create(&stderr_path).unwrap())
+            .process_group(0);
+        let child = command.spawn().unwrap();
+        let owned = OwnedChild::new(child, true);
+        let output = owned
+            .wait_with_output(
+                Instant::now() + Duration::from_secs(60),
+                &stdout_path,
+                &stderr_path,
+            )
+            .unwrap();
         let result: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
             panic!("{error}: {}", String::from_utf8_lossy(&output.stderr));
         });
@@ -114,7 +232,7 @@ impl Fixture {
         self.state.join("active-session").exists()
     }
 
-    fn interrupt_during_create(&self, mode: &str, signal_group: bool) -> (i32, Value, Vec<Value>) {
+    fn spawn_interrupt_restore(&self, mode: &str) -> (OwnedChild, PathBuf, PathBuf) {
         let map = self.map();
         let map_path = self.state.join("identity-map.json");
         fs::write(&map_path, serde_json::to_vec(&map).unwrap()).unwrap();
@@ -143,14 +261,20 @@ impl Fixture {
                 "--operation-id",
                 "fixture-operation",
                 "--approve",
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        if signal_group {
-            command.process_group(0);
-        }
-        let mut child = command.spawn().unwrap();
-        let preflight = mode.starts_with("cancel_preflight_");
+            ]);
+        let stdout_path = self.root.join("interrupt.stdout");
+        let stderr_path = self.root.join("interrupt.stderr");
+        command
+            .stdout(fs::File::create(&stdout_path).unwrap())
+            .stderr(fs::File::create(&stderr_path).unwrap())
+            .process_group(0);
+        let child = command.spawn().unwrap();
+        (OwnedChild::new(child, true), stdout_path, stderr_path)
+    }
+
+    fn interrupt_during_create(&self, mode: &str, signal_group: bool) -> (i32, Value, Vec<Value>) {
+        let (mut child, stdout_path, stderr_path) = self.spawn_interrupt_restore(mode);
+        let preflight = mode == "cancel_preflight" || mode.starts_with("cancel_preflight_");
         let in_flight = self.state.join(if preflight {
             "preflight-inflight"
         } else {
@@ -162,7 +286,13 @@ impl Fixture {
                 break;
             }
             if let Some(status) = child.try_wait().unwrap() {
-                let output = child.wait_with_output().unwrap();
+                let output = child
+                    .wait_with_output(
+                        Instant::now() + Duration::from_secs(5),
+                        &stdout_path,
+                        &stderr_path,
+                    )
+                    .unwrap();
                 panic!(
                     "restore exited before the in-flight marker ({status}): {}",
                     String::from_utf8_lossy(&output.stderr)
@@ -172,8 +302,13 @@ impl Fixture {
                 if signal_group {
                     unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
                 }
-                child.kill().ok();
-                let output = child.wait_with_output().unwrap();
+                let output = child
+                    .wait_with_output(
+                        Instant::now() + Duration::from_secs(5),
+                        &stdout_path,
+                        &stderr_path,
+                    )
+                    .unwrap();
                 panic!(
                     "fixture {mode} did not reach its in-flight marker: stdout={} stderr={}",
                     String::from_utf8_lossy(&output.stdout),
@@ -193,7 +328,13 @@ impl Fixture {
             fs::write(self.state.join("release-create"), b"signal-delivered")
                 .expect("failed to release fixture create response");
         }
-        let output = child.wait_with_output().unwrap();
+        let output = child
+            .wait_with_output(
+                Instant::now() + Duration::from_secs(15),
+                &stdout_path,
+                &stderr_path,
+            )
+            .unwrap();
         let result: Value = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)));
         let receipts = fs::read_to_string(self.state.join("receipts.jsonl"))
@@ -204,12 +345,58 @@ impl Fixture {
         eprintln!("{mode}: result={result} receipts={}", json!(receipts));
         (output.status.code().unwrap(), result, receipts)
     }
+
+    fn reclaim_fixture_create_child(&self) -> bool {
+        let marker = self.state.join("create-child-pid");
+        let Ok(text) = fs::read_to_string(marker) else {
+            return true;
+        };
+        let Ok(pid) = text.trim().parse::<u32>() else {
+            return false;
+        };
+        if pid <= 1 || !process_is_alive(pid) {
+            return true;
+        }
+        let _ = fs::write(self.state.join("release-create"), b"fixture-unwind-cleanup");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_is_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if process_is_alive(pid) && process_belongs_to_fixture(pid, &self.root) {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            let kill_deadline = Instant::now() + Duration::from_secs(2);
+            while process_is_alive(pid) && Instant::now() < kill_deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        !process_is_alive(pid)
+    }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.root).unwrap();
+        if !self.reclaim_fixture_create_child() {
+            eprintln!("fixture cleanup unconfirmed; preserving {}", self.root.display());
+            return;
+        }
+        let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+fn process_belongs_to_fixture(pid: u32, root: &std::path::Path) -> bool {
+    Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()
+        .is_some_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains(root.to_string_lossy().as_ref())
+        })
 }
 
 fn methods(receipts: &[Value]) -> Vec<&str> {
@@ -604,6 +791,7 @@ fn restore_public_cancellation_is_typed_and_routes_through_exact_id_cleanup() {
 #[test]
 fn restore_public_foreground_sigint_during_preflight_is_typed_without_mutation() {
     for (mode, completed_reads) in [
+        ("cancel_preflight", vec![]),
         ("cancel_preflight_status", vec![]),
         ("cancel_preflight_list", vec!["server.status"]),
     ] {
@@ -612,7 +800,10 @@ fn restore_public_foreground_sigint_during_preflight_is_typed_without_mutation()
         let (code, result, receipts) = f.interrupt_during_create(mode, true);
         assert_eq!(code, 2, "{mode}: {result}");
         assert_eq!(result["error"]["stage"], "cancelled", "{mode}: {result}");
-        assert!(result.to_string().contains("RESTORE_CANCELLED"), "{mode}: {result}");
+        assert!(
+            result.to_string().contains("RESTORE_CANCELLED"),
+            "{mode}: {result}"
+        );
         assert!(result.get("result").is_none(), "{mode}: {result}");
         assert_eq!(methods(&receipts), completed_reads, "{mode}: {receipts:?}");
         assert!(!f.has_carrier(), "{mode}");
@@ -624,14 +815,21 @@ fn restore_public_foreground_sigint_during_preflight_is_typed_without_mutation()
 fn restore_public_preflight_native_errors_without_cancellation_are_preserved() {
     for (mode, stage, expected_calls) in [
         ("status_failure", "server.status", vec!["server.status"]),
-        ("list_failure", "session.list", vec!["server.status", "session.list"]),
+        (
+            "list_failure",
+            "session.list",
+            vec!["server.status", "session.list"],
+        ),
     ] {
         let f = Fixture::new();
         let (code, result, receipts) =
             f.run(f.map(), mode, WORKER, "appserver-cli", BINDING, "1", true);
         assert_eq!(code, 2, "{mode}: {result}");
         assert_eq!(result["error"]["stage"], stage, "{mode}: {result}");
-        assert!(!result.to_string().contains("RESTORE_CANCELLED"), "{mode}: {result}");
+        assert!(
+            !result.to_string().contains("RESTORE_CANCELLED"),
+            "{mode}: {result}"
+        );
         assert!(result.get("result").is_none(), "{mode}: {result}");
         assert_eq!(methods(&receipts), expected_calls, "{mode}: {receipts:?}");
         assert!(!f.has_carrier(), "{mode}");
@@ -667,4 +865,83 @@ fn restore_public_foreground_sigint_retains_create_receipt_for_exact_cleanup() {
         "{result}"
     );
     assert!(!f.has_carrier(), "{result}");
+}
+
+#[test]
+fn restore_public_pending_cancel_preserves_unusable_create_reply_without_kill() {
+    let f = Fixture::new();
+    let (code, result, receipts) = f.interrupt_during_create("cancel_unusable_reply", true);
+    assert_eq!(code, 2, "{result}");
+    assert_eq!(result["error"]["stage"], "cancelled", "{result}");
+    assert_eq!(result["error"]["create_outcome"]["outcome"], "unknown", "{result}");
+    assert_eq!(result["error"]["create_receipt"], receipts[2]["response"], "{result}");
+    assert_eq!(result["error"]["create_context"]["operation_id"], "fixture-operation", "{result}");
+    assert!(result["error"]["cleanup"].is_null(), "{result}");
+    assert_eq!(methods(&receipts), ["server.status", "session.list", "session.create"]);
+    assert!(f.has_carrier(), "unknown ownership must prevent kill");
+}
+
+#[test]
+fn restore_public_fixture_timeout_reclaims_held_create_child_before_root_removal() {
+    let fixture = Fixture::new();
+    let root = fixture.root.clone();
+    let (mut child, stdout, stderr) = fixture.spawn_interrupt_restore("held_cleanup");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let marker = fixture.state.join("create-inflight");
+    while !marker.exists() && Instant::now() < deadline {
+        assert!(child.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(marker.exists(), "create did not reach its held marker");
+    let pid: u32 = fs::read_to_string(fixture.state.join("create-child-pid"))
+        .unwrap().trim().parse().unwrap();
+    let output = child.wait_with_output(Instant::now(), &stdout, &stderr).unwrap();
+    assert!(!output.status.success(), "timeout must stop the outer child");
+    drop(fixture);
+    assert!(!process_is_alive(pid), "exact create child survived timeout cleanup");
+    assert!(!root.exists(), "root must be removed only after child exit");
+}
+
+#[test]
+fn restore_public_fixture_unwind_reclaims_held_create_child_before_root_removal() {
+    let receipt = std::env::temp_dir().join(format!(
+        "restore-held-cleanup-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+        let receipt = receipt.clone();
+        move || {
+            let fixture = Fixture::new();
+            let (mut child, _, _) = fixture.spawn_interrupt_restore("held_cleanup");
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let pid_path = fixture.state.join("create-child-pid");
+            while !pid_path.exists() && Instant::now() < deadline {
+                assert!(child.try_wait().unwrap().is_none(), "restore exited before held marker");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let pid = fs::read_to_string(&pid_path)
+                .expect("create child publishes its exact PID")
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            fs::write(&receipt, format!("{} {pid}", fixture.root.display())).unwrap();
+            panic!("exercise fixture unwind while create is held");
+        }
+    }));
+    assert!(panic.is_err());
+    let evidence = fs::read_to_string(&receipt).unwrap();
+    let (root, pid) = evidence.rsplit_once(' ').unwrap();
+    let pid = pid.parse::<u32>().unwrap();
+    let leaked = process_is_alive(pid);
+    if leaked && process_belongs_to_fixture(pid, std::path::Path::new(root)) {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_is_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let _ = fs::remove_file(receipt);
+    assert!(!leaked, "fixture left its exact create child alive after unwind");
+    assert!(!std::path::Path::new(root).exists(), "fixture root remained after confirmed child cleanup");
 }

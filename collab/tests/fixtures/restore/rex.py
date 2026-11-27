@@ -28,6 +28,8 @@ preflight_method = {
     "cancel_preflight_status": "server.status",
     "cancel_preflight_list": "session.list",
 }.get(mode)
+if mode == "cancel_preflight" and method == "server.status":
+    preflight_method = method
 if method == preflight_method:
     (root / "preflight-inflight").write_text(method)
     release = root / "release-create"
@@ -52,6 +54,7 @@ elif method == "session.list":
     elif mode == "existing":
         response["sessions"].append({"label": label, "session_id": sid})
 elif method == "session.create":
+    (root / "create-child-pid").write_text(str(os.getpid()))
     assert body == {
         "label": label,
         "initial_windows": [{
@@ -69,7 +72,7 @@ elif method == "session.create":
         response = {"message": "server created a session but failed before the call could be classified"}
         status = 1
     else:
-        if mode in {"cancel_after_create", "cancel_after_create_kill_failure"}:
+        if mode in {"cancel_after_create", "cancel_after_create_kill_failure", "cancel_unusable_reply", "held_cleanup"}:
             (root / "create-inflight").write_text(sid)
             release = root / "release-create"
             deadline = time.monotonic() + 10
@@ -83,6 +86,8 @@ elif method == "session.create":
         ]}
         if mode == "bad_receipt":
             response["initial_windows"] = []
+        if mode == "cancel_unusable_reply":
+            response = {"message": "create receipt lost its owned session ID"}
 elif method == "session.view":
     assert active.read_text() == sid
     assert args == ["api", "call", "-s", sid, "session.view", "-"]

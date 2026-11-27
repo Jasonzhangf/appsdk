@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-board-assignment-lifecycle",
   "version": "0.3.0",
-  "description": "一次 board assignment mutation 的 SESE。同名自动 session 换绑保留状态。显式 invite/respond 让 pending 任务经 invited 接受后进入 working，不以 owner 等于 publisher 为条件；pending/invited 均先检查没有执行资源和生命周期证据。manager、当前 peer 和受托 architect 可按 revision 修改当前 board，closed/cancelled 历史拒绝。已经开始的任务交接保留状态、证据、资源及 merge/cleanup 义务。拒绝或撤回首次邀请保持原 owner 并回到 pending；过期 revision、错误回应者和旧 binding 明确拒绝，不部分转移。当前 board mutation 与必要的未读通知及当前订阅绑定同事务提交，并向另一位当前参与者自动投递。名字无可用工作者时保留工作归属并投影空执行者，由原 owner 回流原因，不自动选择 Jenny。",
+  "description": "一次 Board assignment 请求的 SESE。Jenny 发出或撤回邀请并调度，peer 按当前 revision 接受或拒绝。Owner 更新本人工作的合同与状态。同名换绑保留任务和证据。拒绝、撤回、错误回应者或旧绑定均不部分转移。需要对 owner 生效的通知与状态同次提交。",
   "inputs": [{"id": "assignment_mutation_request", "schema": "Object"}],
   "nodes": [
     {

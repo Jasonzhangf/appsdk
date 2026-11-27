@@ -34,24 +34,35 @@ fn public_master_commands_discover_send_consume_and_reply_across_projects() {
         false,
     );
     assert_eq!(status["master"]["worker_id"], target_id, "{status}");
+    let listed = run_ok_at(&fixture, &source_root, &source_pane, &["list"], false);
+    let target_address = address_for(&listed, &target_id);
     let sent = run_ok_at(
         &fixture,
         &source_root,
         &source_pane,
         &[
-            "master",
             "send",
-            "--project",
-            target_root.to_str().unwrap(),
             "--to",
-            &target_id,
+            &target_address,
             "--subject",
             "action",
+            "--content",
             "return the result",
         ],
         false,
     );
     assert_eq!(sent["durable"], true, "{sent}");
+    let context = run_ok_at(
+        &fixture,
+        &target_root,
+        &target_pane,
+        &["context", "--query"],
+        false,
+    );
+    let inbox = &context["result"]["snapshot"]["inbox"];
+    assert!(inbox["unread"].as_u64().unwrap() > 0, "{context}");
+    assert!(inbox.get("messages").is_none(), "{context}");
+    assert!(!context.to_string().contains("return the result"), "{context}");
     let received = run_ok_at(
         &fixture,
         &target_root,
@@ -535,6 +546,16 @@ fn register_context(
     context
 }
 
+fn wait_for_dispatch_target(fixture: &Fixture, root: &Path, peer_id: &str) {
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            let state = fixture.current_state_for(root, "appserver-cli");
+            state["agent_presence"][root.to_str().unwrap()][peer_id]["presence"] == "online"
+        }),
+        "tmux monitor did not observe dispatch target {peer_id} online"
+    );
+}
+
 #[test]
 fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
@@ -557,6 +578,7 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
     fixture.start_codex_pane_runner(&peer_pane);
     let peer = register_context(&fixture, &root, &peer_pane, "goal-peer", false);
     let (peer_id, _) = identity(&peer);
+    wait_for_dispatch_target(&fixture, &root, &peer_id);
     let peer_name = peer["result"]["snapshot"]["name"].as_str().unwrap();
     let published = run_ok_at(
         &fixture,
@@ -655,7 +677,9 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
                 .unwrap()
                 .values()
                 .find(|message| {
-                    message["to"] == peer_id && message["subject"] == "deadline:goal:task:goal-task"
+                    message["to"] == peer_id
+                        && message["subject"] == "deadline:goal:task:goal-task"
+                        && matches!(message["state"].as_str(), Some("pending" | "delivered"))
                 })
                 .cloned();
             reminder.is_some()
@@ -665,10 +689,16 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
     let reminder = reminder.unwrap();
     let message_id = reminder["id"].as_str().unwrap();
     assert!(
-        wait_until(Duration::from_secs(10), || pane_contains_message_id(
+        !pane_contains_message_id(&fixture, &peer_pane, message_id),
+        "an online target without confirmed idle keeps its goal in the mailbox"
+    );
+    fixture.show_codex_idle_prompt(&peer_pane);
+    assert!(
+        wait_until(Duration::from_secs(30), || pane_contains_message_id(
             &fixture, &peer_pane, message_id
         )),
-        "exact reminder was not observed in the real target pane"
+        "exact reminder {message_id} was not observed in the real target pane: activity={}",
+        fixture.current_state_for(&root, "appserver-cli")["agent_activity"][root.to_str().unwrap()][&peer_id],
     );
     let received = run_ok_at(
         &fixture,
@@ -925,7 +955,9 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
         false,
     );
     let peer_pane = create_session(&fixture, "capacity-peer");
+    fixture.start_codex_pane_runner(&peer_pane);
     let peer = register_context(&fixture, &root, &peer_pane, "capacity-peer", false);
+    wait_for_dispatch_target(&fixture, &root, &identity(&peer).0);
     let peer_name = peer["result"]["snapshot"]["name"].as_str().unwrap();
     let intruder_pane = create_session(&fixture, "capacity-other");
     register_context(&fixture, &root, &intruder_pane, "capacity-other", false);

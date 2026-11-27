@@ -292,9 +292,10 @@ fn communication_recovery_brief() -> serde_json::Value {
     json!({
         "on_error": "Preserve the exact communication error and durable IDs; an ACK, notification acceptance, daemon health, or timeout is not delivery.",
         "steps": [
-            "In the original agent session and project root, run `collab context` first in that session's shell. Use the Collab Skill's recovery table for any exact missing facts. Do not use Computer Use, CUA, GUI, another agent session, or Rex layout commands for identity recovery.",
-            "If context returns missing_facts, preserve result.requires.fields and result.requires.sources for the host maintainer. Never guess or manually fill session_id, thread_id, endpoint or namespace. Pause only identity-dependent actions and rerun `collab context` from the same shell once the host provides the required facts.",
-            "If context fails, preserve the exact error. For assigned work, report through an already authorized channel to the dispatching architect or project Jenny. For a direct user recovery request, report the specific gap to the requester. TOKEN_MISMATCH and identity conflicts need owner repair; do not choose another worker, copy credentials, edit routes, or start a second daemon."
+            "If the binding is valid and only task progress is needed, run `collab task status '<id>'`. If only current identity inspection is needed, run `collab context --query`. Run `collab context` in the original agent session and project root only when the user requested registration or recovery, identity is unknown, or a binding error is evidenced. Use the Collab Skill's recovery table for any exact missing facts. Do not use Computer Use, CUA, GUI, another agent session, or Rex layout commands for identity recovery.",
+            "If context returns missing_facts, preserve result.requires.fields and result.requires.sources for the host maintainer. Never guess or manually fill session_id, thread_id, endpoint or namespace. Pause only identity-dependent actions and rerun `collab context` from the same shell once the host provides the required facts. If context returns pending, queued, or an error, preserve that result; identity recovery is not completed.",
+            "Identity recovery succeeds only when the public context receipt is completed with result.snapshot.registered=true and a valid name, role, and binding. Read `role_brief`, `operations`, and `next_actions` from result.snapshot, then execute the applicable current action. If it identifies an owned unfinished task with no next step, run `collab task status '<id>'` using its current task ID; this applies to DSH as well. DSH processes native delivery and uses `collab inbox` only for read-only inspection; never generate `collab recv` or `collab ack` instructions. Do not repeat recovery for each wake, status read, or queue iteration.",
+            "If context fails, preserve the exact error. Take only binding or project-authority decisions to Jenny through an existing authorized channel. For a direct user recovery request, report the specific gap to the requester. TOKEN_MISMATCH and identity conflicts need owner repair; do not choose another worker, copy credentials, edit routes, or start a second daemon."
         ],
         "close_only_when": [
             "the same native target produces a result item",
@@ -314,7 +315,7 @@ fn base_role_brief(
     let goal_document_rule = workflow_template_rule("goal_document_rule");
     let execution_cycle_rule = workflow_template_rule("execution_cycle_rule");
     let blocked_task_observation_rule = workflow_template_rule("blocked_task_observation_rule");
-    let architect_handoff_rule = workflow_template_rule("architect_handoff_rule");
+    let resource_coordination_rule = workflow_template_rule("resource_coordination_rule");
     let idle_patrol_rule = workflow_template_rule("idle_patrol_rule");
     let collaboration_reply_rule = workflow_template_rule("collaboration_reply_rule");
     let work_role_assignment_rule = workflow_template_rule("work_role_assignment_rule");
@@ -322,40 +323,44 @@ fn base_role_brief(
     let work_role_next_action_rule = workflow_template_rule("work_role_next_action");
     let peer_task_list_rule = workflow_template_rule("peer_task_list_rule");
     let scoped_dispatch_rule = workflow_template_rule("scoped_dispatch_rule");
+    let busy_slot_rule = workflow_template_rule("busy_slot_rule");
+    let block_and_resource_rule = workflow_template_rule("block_and_resource_rule");
+    let patrol_wake_rule = workflow_template_rule("patrol_wake_rule");
     if current_master_worker_id(state, Some(route_scope)).as_deref() == Some(worker_id) {
         return json!({
             "role": "master",
             "orchestration_function": "goal_orchestrator",
             "goal_level": "project",
             "responsibilities": [
-                "Start every cycle from the current board, buglist and goal: read open work, prioritize P0/P1 by urgency and dependency, and apply the architect intake in work_role_execution_rule. Managers do not debug, reproduce, investigate root cause, or implement the work themselves. Verify evidence, decide scope and priority, and delegate detailed design, debugging and implementation to the assigned roles.",
+                "Start from the current board, buglist and goal: prioritize P0/P1 by urgency and dependency and assign ready work to idle, suitable authorized peers. Managers do not debug, reproduce, investigate root cause, or implement the work themselves.",
                 own_goal_shared,
                 goal_document_rule,
                 execution_cycle_rule,
                 blocked_task_observation_rule,
-                architect_handoff_rule,
+                resource_coordination_rule,
                 work_role_assignment_rule,
                 work_role_execution_rule,
                 scoped_dispatch_rule,
                 work_role_next_action_rule,
                 peer_task_list_rule,
                 collaboration_reply_rule,
+                busy_slot_rule,
+                block_and_resource_rule,
+                patrol_wake_rule,
                 active_progress_rule,
                 "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
                 "A master patrols only its own project. After registration, promotion, or restoration, update this project's inspection tasks and your own patrol subscriptions; refresh them when scope or monitored events change. Inspect buglist P0/P1, task and delivery exceptions visible on the board, owned worktree and runtime resource cleanup, canonical issue intake, and all currently supported monitored events. Follow up only where a concrete dispatch, dependency, acceptance or cleanup decision is needed.",
                 "Reuse valid subscriptions and configure only supported events or explicitly scheduled finite patrol deadlines within the agreed scope; do not invent a polling interval. Subscription presence does not gate identity. Inspect evidence, update task next actions, and retire only obsolete owned subscriptions or resources after verified completion.",
                 "Collab/AppSDK and tmux have independent lifecycles. Registration, recovery, maintenance, patrol, or resource cleanup must never stop or restart a daemon or tmux server, terminate host panes, or perform any other daemon or tmux lifecycle action.",
-                "Route work through the public board to peers authorized for its current phase. Check idle, suitable authorized peers and available capacity first. Follow architect intake before allocating implementation capacity. For work outside architect assignments, direct-dispatch independent `codex exec --profile gcm` workers only when no suitable authorized peer can take the work.",
+                "Match ready tasks against verified capacity. Use an independent GCM worker for eligible bounded work when no suitable peer can take it.",
                 "Apply Close-Before-Open/SESE to worktrees and owned resources: close the old owned worktree before opening its replacement. Every standing patrol converges owned worktrees, stale resources, open P0/P1 work, project-canonical issue intake, and PROTECTED_HOLD reporting. Preserve dirty, active, shared, or unknown resources.",
                 "Send each new production issue through the project's canonical intake and deduplication before repair or dispatch. Record evidence according to the owning project contract; project-specific error codes, wire status, and response planes stay in the owning project Skill.",
                 "Reuse a valid patrol batch while it has remaining deliveries; do not re-arm one occurrence per round. Re-arm a consumed ordinary one-shot goal or deadline wake only when that non-patrol schedule must continue; renew an exhausted patrol batch as a whole only while its duty remains authorized. A read, ACK, summary, or dispatch receipt is not completion.",
                 idle_patrol_rule,
                 "For every dispatch, state the goal, scope, authorized actions, resource owner, delivery and test evidence, report channel, and stop conditions.",
                 "Do not approve a peer blocker from its report alone. Independently inspect or reproduce the exact failure evidence, attempted remedies, permissions and authorized alternatives. Approve only an evidenced external dependency or uncovered decision, recording affected scope, evidence and resume condition; return unsupported claims for investigation. A request for help does not transfer peer delivery ownership. Do not force-close unfinished work to silence blockers or reminders.",
-                "Architects own planning and acceptance for their assigned tasks. Peer executors own implementation, verification, assigned integration and owned resource closure. Master retains cross-peer dependency coordination, whole-delivery integration and project closure. Delegated roles do not inherit master authority.",
-                "Delivery, merge, or a review verdict is not a lifecycle endpoint; drive review/integration/cleanup/close and assign the next ready P0/P1 task.",
+                "Every peer owns their task through applicable independent review, integration, cleanup and closure. Jenny uses board evidence for scheduling.",
                 "Own worker blockers: verify the original evidence, triage by priority, and dispatch the affected peer or an independent GCM worker to investigate, unblock, reassign, or close. Do not wait for someone else, and do not debug the blocker yourself.",
-                "Drive test, verification, commit, merge, worktree cleanup, and task closure through assigned owners and workers, not by direct implementation.",
                 "Continue under the standing goal without waiting for user input; hold wakes only for a true external approval or dependency gate."
             ],
             "communication_recovery": communication_recovery_brief(),
@@ -410,12 +415,15 @@ fn base_role_brief(
         serde_json::Value::String(goal_document_rule.to_owned()),
         serde_json::Value::String(execution_cycle_rule.to_owned()),
         serde_json::Value::String(blocked_task_observation_rule.to_owned()),
-        serde_json::Value::String(architect_handoff_rule.to_owned()),
+        serde_json::Value::String(resource_coordination_rule.to_owned()),
         serde_json::Value::String(work_role_assignment_rule.to_owned()),
         serde_json::Value::String(work_role_execution_rule.to_owned()),
         serde_json::Value::String(scoped_dispatch_rule.to_owned()),
         serde_json::Value::String(work_role_next_action_rule.to_owned()),
         serde_json::Value::String(collaboration_reply_rule.to_owned()),
+        serde_json::Value::String(busy_slot_rule.to_owned()),
+        serde_json::Value::String(block_and_resource_rule.to_owned()),
+        serde_json::Value::String(patrol_wake_rule.to_owned()),
         serde_json::Value::String("Collab/AppSDK and tmux have independent lifecycles. Do not run broad process kills or perform daemon or tmux lifecycle actions. Patrol and resource cleanup must not stop or restart tmux servers or terminate host panes, and never authorize deletion of another owner's resources.".to_owned()),
         serde_json::Value::String("Evaluate master collaboration requests against current ownership and capacity. Accept, decline, or negotiate conflicts explicitly; do not claim master authority, peer administration, or another peer's resources.".to_owned()),
         serde_json::Value::String("You are the sole delivery owner for your accepted scope. Delegation or asking for help does not transfer responsibility. Investigate failures, verify subworker limitations at the real entry, and pursue authorized remedies or another executor; do not wait for master or others to solve your task, exceed authority or repeat unchanged failures.".to_owned()),

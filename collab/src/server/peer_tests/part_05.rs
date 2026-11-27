@@ -81,8 +81,10 @@ fn role_contract_is_identical_across_context_workers_and_status() {
             assert!(!responsibilities.is_empty());
             assert!(responsibilities.contains("observable evaluation criteria"));
             assert!(responsibilities.contains("at least one linked action item"));
+            assert!(responsibilities.contains("nonempty action items field"));
+            assert!(responsibilities.contains("update action items in the same revision"));
             let workflow = &context.data["role_brief"]["workflow_template"];
-            assert_eq!(workflow["base_version"], serde_json::json!(1), "{workflow}");
+            assert_eq!(workflow["base_version"], serde_json::json!(2), "{workflow}");
             assert_eq!(
                 workflow["identity"]["target"],
                 if expected_role == "master" {
@@ -93,7 +95,7 @@ fn role_contract_is_identical_across_context_workers_and_status() {
                 "{workflow}"
             );
             assert_eq!(workflow["identity"]["source"], "base", "{workflow}");
-            assert_eq!(workflow["identity"]["base_version"], 1, "{workflow}");
+            assert_eq!(workflow["identity"]["base_version"], 2, "{workflow}");
             assert_eq!(workflow["identity"]["revision"], 0, "{workflow}");
             assert_eq!(workflow["specialties"], serde_json::json!([]), "{workflow}");
             assert!(
@@ -119,23 +121,20 @@ fn role_contract_is_identical_across_context_workers_and_status() {
         }
         match expected_role {
             "master" => {
-                assert!(role_task.contains("accountable manager"));
-                assert!(role_task.contains("authorized peer capacity"));
-                assert!(role_task.contains("temporary files"));
+                assert!(role_task.contains("sole collab dispatcher"));
+                assert!(role_task.contains("verified worker state"));
                 let next_action = context.data["role_brief"]["next_action"]
                     .as_str()
                     .expect("role next action is explicit")
                     .to_lowercase();
-                assert!(next_action.contains(
-                    "invite suitable, available and authorized peers first"
-                ));
-                assert!(next_action.contains("no suitable authorized peer can take the work"));
-                assert!(responsibilities.contains("codex exec --profile gcm"));
+                assert!(next_action.contains("dispatch ready authorized work"));
+                assert!(responsibilities.contains("when there is no suitable peer"));
+                assert!(responsibilities.contains("unknown availability is not idle"));
             }
             "worker" => {
-                assert!(role_task.contains("execute your accepted task"));
-                assert!(responsibilities.contains("allowed and prohibited scope"));
-                assert!(responsibilities.contains("when no eligible peer is available"));
+                assert!(role_task.contains("own and complete your assigned independent collab task"));
+                assert!(responsibilities.contains("only jenny dispatches collab tasks"));
+                assert!(responsibilities.contains("independent review within your own task"));
                 assert_eq!(
                     context.data["role_brief"]["authority"],
                     serde_json::json!({
@@ -1596,10 +1595,10 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
             .expect("worker stable name")
     };
     for (specialty, duty) in [
-        ("architect", "Lead overall debug design"),
+        ("architect", "Own architectural goals and complex technical work"),
         ("memory", "Accept only memory summaries and memory patrol"),
-        ("patrol", "Collect live runtime bugs"),
-        ("reviewer", "Independently review assigned work"),
+        ("patrol", "Verify runtime behavior within your assigned patrol objective"),
+        ("reviewer", "Own independent audit or verification goals"),
     ] {
         server.commit(&[Event::NameWorkRolesUpdated {
             project_scope: project_scope.clone(),
@@ -1630,7 +1629,7 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
             project_scope: project_scope.clone(),
             target: target.into(),
             entry: Some(crate::board::WorkflowTemplateOverride {
-                base_version: 1,
+                base_version: 2,
                 revision: 1,
                 spec,
                 updated_by: "master".into(),
@@ -1760,7 +1759,7 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
         "{next_action}"
     );
     assert!(
-        responsibilities.iter().any(|line| line.as_str().is_some_and(|text| text.contains("when no eligible peer is available"))),
+        responsibilities.iter().any(|line| line.as_str().is_some_and(|text| text.contains("Jenny alone assigns Collab tasks"))),
         "common execution constraints remain independent of editable next_action"
     );
     let completion = brief["completion_action"]
@@ -1777,8 +1776,8 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
     );
     assert!(
         responsibilities.iter().any(|line| line.as_str().is_some_and(|text|
-            text.contains("hand back the result, acceptance evidence and any remaining obligations once"))),
-        "the common handoff duty remains in responsibilities: {brief}"
+            text.contains("Keep the goal and acceptance criteria"))),
+        "the common task record duties remain in responsibilities: {brief}"
     );
     let operations = peer.data["operations"].as_array().expect("operations");
     assert!(
@@ -1809,8 +1808,8 @@ fn role_brief_projects_identity_and_sorted_specialty_workflow_templates() {
         .as_str()
         .expect("master completion");
     assert!(
-        master_completion.contains("to the user or an explicitly assigned upstream owner"),
-        "master completion identifies its upstream recipient: {master_completion}"
+        master_completion.contains("Reconcile board state"),
+        "master completion reconciles the schedule: {master_completion}"
     );
     std::fs::remove_dir_all(root).unwrap();
 }

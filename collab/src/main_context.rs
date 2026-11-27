@@ -116,7 +116,7 @@ pub(crate) fn context_bootstrap(
     let baseline_created = if scope.root.join(".agent-collab").is_dir() {
         false
     } else {
-        scope::init(&scope.root)?;
+        scope::init_collab_baseline(&scope.root)?;
         true
     };
     Ok(ContextBootstrap {

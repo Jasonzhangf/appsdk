@@ -254,8 +254,25 @@ pub struct NotificationSubscription {
 pub struct NotificationOccurrence {
     pub subscription_id: String,
     pub trigger_ms: i64,
+    #[serde(default)]
+    pub idle_triggered: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumed_ms: Option<i64>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalIdleWakeState {
+    pub binding_id: String,
+    pub generation: u64,
+    pub issued: std::collections::BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_notice: Option<GoalStatusNotice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalStatusNotice {
+    pub message_id: String,
+    pub missing: Vec<crate::proto::WorkerStatusField>,
 }
 
 pub fn default_repeat_count() -> u32 {
@@ -623,8 +640,8 @@ fn consume_marked_periodic_goal(
     // An expired schedule can still own one unread occurrence issued while it
     // was armed. The message timestamp at or after the trigger identifies that
     // live occurrence; an older retained marker cannot reactivate history.
-    let issued_occurrence =
-        message_created_ms.is_some_and(|created_ms| created_ms >= occurrence.trigger_ms);
+    let issued_occurrence = occurrence.idle_triggered
+        || message_created_ms.is_some_and(|created_ms| created_ms >= occurrence.trigger_ms);
     if (subscription.status != "armed" && !(subscription.status == "expired" && issued_occurrence))
         || !message_was_unread
         || occurrence.subscription_id != subscription.id
@@ -844,7 +861,9 @@ fn responsibility_effect<'a>(state: &'a State, event: &'a Event) -> Responsibili
             }
             Some(_) | None => ResponsibilityEffect::Safe,
         },
-        Event::NotificationOccurrenceIssued { .. } => ResponsibilityEffect::Safe,
+        Event::NotificationOccurrenceIssued { .. } | Event::GoalIdleWakeUpdated { .. } => {
+            ResponsibilityEffect::Safe
+        }
         Event::Acked { .. } => ResponsibilityEffect::Safe,
         // CEO coordination records are control-plane state; they never add or
         // change business task responsibility.
@@ -980,12 +999,14 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                 message_id,
                 subscription_id,
                 trigger_ms,
+                idle_triggered,
             } => {
                 simulated_occurrences.insert(
                     message_id.clone(),
                     NotificationOccurrence {
                         subscription_id: subscription_id.clone(),
                         trigger_ms: *trigger_ms,
+                        idle_triggered: *idle_triggered,
                         consumed_ms: None,
                     },
                 );
@@ -1010,7 +1031,11 @@ pub fn responsibility_preflight(st: &State, evs: &[Event]) -> Result<(), String>
                     if let Some(message) = simulated_msgs.get_mut(id) {
                         message.state = "read".into();
                     }
-                    let Some(subscription_id) = simulated_wake_bindings.get(id).cloned() else {
+                    let Some(subscription_id) = simulated_occurrences.get(id)
+                        .map(|occurrence| &occurrence.subscription_id)
+                        .or_else(|| simulated_wake_bindings.get(id))
+                        .cloned()
+                    else {
                         continue;
                     };
                     let Some(subscription) = simulated_subscriptions.get(&subscription_id).cloned()
@@ -1301,6 +1326,8 @@ pub struct TaskLifecycleRecord {
     pub review_evidence: Option<String>,
     #[serde(default)]
     pub reviewer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_recorded_by: Option<String>,
     #[serde(default)]
     pub reviewed_ms: Option<i64>,
     #[serde(default)]
@@ -1655,6 +1682,12 @@ pub enum Event {
         message_id: String,
         subscription_id: String,
         trigger_ms: i64,
+        #[serde(default)]
+        idle_triggered: bool,
+    },
+    GoalIdleWakeUpdated {
+        worker_id: String,
+        value: GoalIdleWakeState,
     },
     WakeBound {
         message_id: String,

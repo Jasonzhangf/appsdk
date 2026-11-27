@@ -38,13 +38,15 @@ master派发前在原任务单填写完整长程任务内容和明确周期。�
 
 ## 身份与通信入口
 
-身份明确且已有有效回执时直接复用。仅身份不确定、缺失或公开入口明确返回身份/绑定异常时，才在实际项目运行 `collab context`。首次注册由用户明确要求触发。压缩、续接、唤醒、派发、巡检及普通收发本身均沿用有效身份。缺任务、消息或订阅事实时查询对应公开入口。
+身份明确且已有有效回执时直接复用。仅身份不确定、缺失或公开入口明确返回身份/绑定异常时，才在实际项目运行 `collab context`。首次注册由用户明确要求触发。压缩、续接、唤醒、派发、巡检及普通收发本身均沿用有效身份。仅需任务进展时运行 `collab task status '<id>'`；仅需查看身份时运行 `collab context --query`。身份恢复条件和成功后的当前动作沿[恢复决策表](stable-name-recovery.md#table-d-context-recovery-and-current-actions)。
 
 Collab 日常注册、恢复和通信使用 Collab Skill。tm-iterm 仅在用户明确指定，或正常 Collab 通信方式已有真实失败证据且确需紧急排障时使用。按对应授权处理紧急排障所需证据与动作。
 
 ## 每轮触发与 board 对齐
 
 每次唤醒、处理变化或选择下一动作时进入本轮。先复用本层目标文档、当前 board、变化证据和容量，识别影响当前调度的差异。
+
+巡检唤醒按[巡检决策表](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation)处理。通知 subject 决定具体检查动作；取消使用对应 event 与任务范围。`master-dispatch-gap` 只提示重新核实派发缺口，不是可取消的 event。
 
 | 触发 | 必查差异 | 实际动作 |
 | --- | --- | --- |
@@ -62,8 +64,8 @@ Collab 日常注册、恢复和通信使用 Collab Skill。tm-iterm 仅在用户
 动作顺序为并发派发 > 阻塞任务解决 > 推进当前任务 > 资源回收 > scope 内巡视。派发所需的 idle、owner、权限和容量核对属于第一级。先选最高优先级 ready 工作，完成本次派发所需的最小同步后实际派出。必要 Plan/Review 容量一并保留。
 
 CEO 按授权管理项目 master。Master 按 [Collab 派单顺序](../SKILL.md#派单顺序与一-peer-一任务)
-处理 buglist 和项目任务。有合适 architect 时先交其计划、交接 peer 实现并验收。其他任务按
-已有 peer 和独立 worker 路由推进。巡检或记忆 peer 从所有任务派发候选和可承接容量中排除。
+处理 buglist 和项目任务。Jenny 分配独立目标，peer 在本人任务内使用 Codex 编排。
+巡检或记忆专长只承接本职责的任务。
 
 每轮派发先列出全部 live idle peer，包括没有当前任务的成员。遇到 `unknown` 等异常，
 按 [主动核实流程](board-idle-patrol.md#非-live-peer-的主动核实流程) 当轮查看状态。Rex
@@ -72,8 +74,8 @@ CEO 按授权管理项目 master。Master 按 [Collab 派单顺序](../SKILL.md#
 master 选择承接任务的 peer 时，按 Collab Skill
 [派单顺序与一 peer 一任务](../SKILL.md#派单顺序与一-peer-一任务) 维护的当前提示词优先级和容量边界执行；本文件不复制该排序细节。
 
-master 是项目唯一负责人，peer 缺位不转移这项责任。reviewer、planner、裁判等角色缺位时的承接、独立 reviewer 后备、极端条件下的 master 临时代审、实际审查者与独立性缺口记录，统一由
-[负责人承接规则](../../codex-orchestrator/SKILL.md#角色缺位时由负责人继续推进) 及其引用的 Review 合同维护；本文件不复制该角色政策。
+Jenny 处理调度和项目授权。任务 owner 负责 Plan、执行、独立 Codex Review、
+合并和清理。各 peer 只在实际资源冲突时直接协调。
 
 每轮产生实际派发、解阻、推进/验收、资源收口或有依据的等待。邀请入队、接收、执行和完成分别记录。完成动作、解阻或释放容量后，对新变化重新检查并发机会。board 维护和文档更新服务本轮实际推进。
 

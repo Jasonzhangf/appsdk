@@ -1,6 +1,6 @@
 {
   "id": "appsdk-rex-codex-snapshot-restore",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "One saved Codex Rex association may enter one isolated restore attempt. Save readback is mandatory before target selection. Collab owns terminal cancellation while the Rex create child has an isolated process group, so an in-flight create receipt remains available for classification. A verified create and its resume plan terminate through the single result with the carrier retained for the caller. Every pre-create rejection terminates without cleanup and every post-create failure or cancellation enters exact-ID cleanup with closed or unconfirmed disposition. Post-terminal live verification and test teardown are observer-owned; the candidate does not claim live resume or a fresh binding without independent owner evidence.",
   "inputs": [
     {"id": "restore_request", "schema": "Object"}
@@ -32,7 +32,7 @@
       "id": "persist_panel_association",
       "operator": "appsdk.rex_restore.persist_association",
       "operator_version": "1",
-      "description": "The save owner writes profile, Codex session, project, binding and Rex carrier metadata atomically. A failed or incomplete Save returns through its typed failure result and leaves the previous association unchanged.",
+      "description": "The save owner writes profile, Codex session, project, binding and Rex carrier metadata atomically. The saved_association result distinguishes committed, write_rejected and durability_unknown. Only committed proceeds to independent readback. Write rejection and unknown durability terminate as typed failures; unknown durability must not claim rollback or authorize restore.",
       "inputs": ["admitted_context"],
       "output": {"id": "saved_association", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -43,7 +43,7 @@
       "id": "readback_saved_association",
       "operator": "appsdk.rex_restore.readback_association",
       "operator_version": "1",
-      "description": "Read the authoritative identity map and prove every restore field matches. Save-before-restore is a hard dependency in this graph.",
+      "description": "Accept only the committed saved_association variant. Independently read the authoritative identity map and prove every restore field matches. Save-before-restore is a hard dependency in this graph.",
       "inputs": ["saved_association"],
       "output": {"id": "save_proof", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
@@ -110,7 +110,7 @@
       "operator": "appsdk.rex_restore.pre_create_failure",
       "operator_version": "1",
       "description": "Return one typed binding, save, target, pre-create cancellation or confirmed-create-rejection result. First-registration explicit Save rejects before Register publication; ordinary registration followed by Save remains legal. These paths own no newly created Rex resource. Behavior receipts include collab/tests/restore_public.rs::restore_public_rejects_bad_inputs_before_mutation, collab/tests/restore_public.rs::restore_public_foreground_sigint_during_preflight_is_typed_without_mutation, collab/tests/context_operation_public_contract/part_b.rs::b08_rex_registration_keeps_restore_metadata_optional_and_save_requires_complete_layout, and collab/tests/context_operation_public_contract/part_b.rs::b08_rex_first_registration_save_rejects_without_publication.",
-      "inputs": ["verified_context", "admitted_context", "save_proof", "restore_target", "carrier_outcome", "cancellation_request"],
+      "inputs": ["verified_context", "admitted_context", "saved_association", "save_proof", "restore_target", "carrier_outcome", "cancellation_request"],
       "output": {"id": "pre_create_failure", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
@@ -145,6 +145,7 @@
     {"from": "validate_context_ownership", "to": "persist_panel_association", "arc_id": "admitted_context"},
     {"from": "validate_context_ownership", "to": "return_pre_create_failure", "arc_id": "admitted_context"},
     {"from": "persist_panel_association", "to": "readback_saved_association", "arc_id": "saved_association"},
+    {"from": "persist_panel_association", "to": "return_pre_create_failure", "arc_id": "saved_association"},
     {"from": "readback_saved_association", "to": "select_isolated_restore_target", "arc_id": "save_proof"},
     {"from": "readback_saved_association", "to": "return_pre_create_failure", "arc_id": "save_proof"},
     {"from": "select_isolated_restore_target", "to": "create_restore_carrier", "arc_id": "restore_target"},

@@ -186,19 +186,9 @@ fn context_hides_terminal_history_and_keeps_obligations() {
         .iter()
         .filter(|operation| operation["kind"] == "merge_pending")
         .collect();
-    assert_eq!(
-        master_merge_operations.len(),
-        1,
-        "{}",
-        master_context["operations"]
-    );
-    assert_eq!(
-        master_merge_operations[0]["pending_merges_ref"],
-        "pending_merges"
-    );
     assert!(
-        master_merge_operations[0].get("pending_merges").is_none(),
-        "merge operation copied the pending array"
+        master_merge_operations.is_empty(),
+        "historical records must not assign a merge to Jenny"
     );
     let history = fixture.command_public(&["notify", "status"], THREAD_B);
     assert!(history.status.success());

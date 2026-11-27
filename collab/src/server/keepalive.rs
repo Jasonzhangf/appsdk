@@ -497,6 +497,12 @@ fn board_patrol_worker_checked(
             .filter(|gate| gate.last_poll_idle)
             .and_then(|gate| gate.idle_episode_start_ms)
             .filter(|start| *start > 0 && *start <= now)
+            .or_else(|| {
+                super::worker_agent_facts(server, &state, worker)
+                    .1
+                    .and_then(|fact| fact.idle_since_ms)
+                    .filter(|start| *start > 0 && *start <= now)
+            })
             .unwrap_or(now)
     } else {
         0
@@ -685,7 +691,7 @@ fn board_patrol_subscription(
 
 fn board_patrol_body(tasks: &[String]) -> String {
     format!(
-        "You are idle while still owning open board work. Tasks: {}.\nRe-read the current tasks and blockers with `collab board show`, then continue the most useful next action. This notice is not a consumption receipt and does not close or complete any task.\nCancel patrol for a task only while waiting on the user, an external dependency, or an intentional pause: `collab notify cancel --task-id <task-id> --reason '<reason>'`.\nRearm a task after you resume or its blocker clears: `collab notify subscribe --event board-idle --task-id <task-id>`.",
+        "You are idle while still owning open board work. Tasks: {}.\nRe-read the current tasks and blockers with `collab board show`. Verify a nonempty Action Items field for each goal and update it in the same revision when the goal changes. Continue the most useful next action. This notice is not a consumption receipt and does not close or complete any task.\nCancel patrol for a task only while waiting on the user, an external dependency, or an intentional pause: `collab notify cancel --task-id <task-id> --reason '<reason>'`.\nRearm a task after you resume or its blocker clears: `collab notify subscribe --event board-idle --task-id <task-id>`.",
         tasks.join(", ")
     )
 }
@@ -752,8 +758,6 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         return;
     }
     let blocked = state.master_wake.blocked_or_timed_out_tasks.clone();
-    let mut pending_merges: Vec<_> = state.pending_merges.keys().cloned().collect();
-    pending_merges.sort();
     let subject = if newly_idle.len() == 1 && newly_idle[0].starts_with("subagent:") {
         "subagent-status".to_string()
     } else if newly_idle.len() == 1 {
@@ -762,11 +766,10 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         "master-wake-batch".to_string()
     };
     let body = format!(
-        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Long-horizon orchestration: route buglist items and project tasks to the architect first when applicable. The architect plans, hands implementation to peers and accepts their results. For the current phase, check idle, suitable, authorized peers and available capacity first. Only when no suitable authorized peer can take the work outside architect assignments, use bounded independent `codex exec --profile gcm` worker assignments. For every assignment, state goal, scope, authorized actions, resource owner, delivery/test evidence, report and stop conditions. Master finite patrol: inspect open P0/P1 work, task and delivery exceptions, owned worktrees and runtime resources, project-canonical issue intake, and required rearm. {} Subscription presence does not gate identity. Remove unneeded owned worktrees after recoverable extraction; reclaim owned stale resources; close each open P0/P1 with evidence or explicitly park it with owner, cause, and unblock condition; preserve and report protected holds (dirty, active, shared, or unknown resources). Verify evidence and integrate accepted pending candidates. AppSDK/Collab and tmux lifecycles remain independent; never stop or restart a tmux server or terminate host panes during patrol or cleanup. Before ending the patrol, re-arm a consumed one-shot goal or deadline wake with `appsdk goal subscribe` when continued scheduling is required; a read, ACK, summary, or dispatch receipt is not completion. Managed subagent records and `collab subagent dispatch` are legacy compatibility for diagnosis or migration only. When no actionable task, dependency, resolvable blocker, or authorized open issue remains, finish the patrol and keep the reusable direct-message subscription for new assignments; cancel only finite timed patrol or deadline subscriptions. If the goal is complete, report the evidence to the user.",
+        "newly_idle={} live_idle={} blocked={} goal_due={}. Long-horizon orchestration: Jenny assigns ready authorized work using current Board and verified idle capacity. Provide one complete independent contract per task. Each owner handles their own Codex planning, execution, independent review, merge and cleanup. {} Keep the reusable direct-message subscription. Cancel finite timed patrol when no actionable work remains. AppSDK/Collab and tmux lifecycles are independent.",
         newly_idle.join(","),
         live_idle.join(","),
         blocked.join(","),
-        pending_merges.join(","),
         state.master_wake.goal_due,
         NON_LIVE_PEER_DISPATCH_RULE
     );
@@ -1157,22 +1160,7 @@ pub(super) fn current_board_patrol_activity(
             })
         }
         crate::proto::TransportKind::Rex => {
-            // Rex self-report does not carry a trusted idle interval. Report
-            // the current non-idle projection, and never synthesize Idle.
-            let Ok(scope) = super::GlobalState::canonical_project_scope(&server.root) else {
-                return Ok(AgentActivity::Unknown);
-            };
-            let state = server.state.lock().unwrap();
-            let activity = state
-                .agent_activity
-                .get(scope.as_str())
-                .and_then(|workers| workers.get(&worker.id))
-                .map(|record| record.activity)
-                .unwrap_or(AgentActivity::Unknown);
-            Ok(match activity {
-                AgentActivity::Idle => AgentActivity::Unknown,
-                other => other,
-            })
+            super::rex_monitor::observe_current_patrol_activity(server, worker)
         }
     }
 }
@@ -2636,15 +2624,10 @@ mod tests {
         assert!(body.contains("newly_idle=subagent:managed"), "{body}");
         assert!(body.contains("live_idle=subagent:managed"), "{body}");
         assert!(
-            body.contains("route buglist items and project tasks to the architect first")
-                && body.contains("hands implementation to peers and accepts their results"),
+            body.contains("Jenny assigns ready authorized work")
+                && body.contains("Each owner handles their own Codex planning"),
             "{body}"
         );
-        assert!(
-            body.contains("check idle, suitable, authorized peers and available capacity first"),
-            "{body}"
-        );
-        assert!(body.contains("codex exec --profile gcm"), "{body}");
         assert!(
             body.contains("collab worker snapshot <id> --capture --lines 80"),
             "{body}"
@@ -2666,8 +2649,7 @@ mod tests {
             !body.contains("regardless of whether other peers are busy"),
             "{body}"
         );
-        assert!(body.contains("protected holds"), "{body}");
-        assert!(body.contains("one-shot goal or deadline wake"), "{body}");
+        assert!(body.contains("Cancel finite timed patrol when no actionable work remains"), "{body}");
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2686,7 +2668,7 @@ mod tests {
     }
 
     #[test]
-    fn master_idle_batch_surfaces_pending_merges() {
+    fn master_idle_batch_does_not_assign_historical_merges() {
         let (server, root) = test_server();
         register(&server, "master", "thread-master");
         register(&server, "child", "thread-child");
@@ -2740,14 +2722,14 @@ mod tests {
             })
             .expect("master idle batch");
         assert!(
-            batch.body.contains("pending_merges=task-merge"),
+            !batch.body.contains("task-merge"),
             "{}",
             batch.body
         );
         assert!(
             batch
                 .body
-                .contains("keep the reusable direct-message subscription"),
+                .contains("Keep the reusable direct-message subscription"),
             "{}",
             batch.body
         );
@@ -3786,8 +3768,10 @@ mod tests {
             Some(crate::board::BoardInvitation {
                 peer_id: "peer".into(),
                 binding_id: "binding-peer".into(),
+                binding_generation: 0,
                 message_id: "invite-message".into(),
                 created_ms: 1,
+                one_shot: false,
                 original_status: None,
                 original_owner: None,
                 inviter_name: None,
@@ -4061,5 +4045,135 @@ mod tests {
             Some("key")
         );
         assert_eq!(accumulator.dispatch_gap_delivery_state, "delivered");
+    }
+
+    #[test]
+    fn board_idle_patrol_seeds_first_poll_from_fresh_activity_idle_since() {
+        use super::super::name_state::{AgentActivity, AgentActivityRecord};
+        let (mut server, root) = test_server();
+        let worker = seed_board_patrol_owner(&server, "alice", "thread-alice-seeded");
+        occupy_board_patrol_name(&server, &worker, "Alice");
+        let session_id = worker
+            .transport
+            .as_ref()
+            .unwrap()
+            .session_id
+            .clone()
+            .unwrap();
+        add_board_patrol_task(&server, "T1", "alice", "Alice", &session_id, 1);
+        install_appserver_statuses(
+            &mut server,
+            vec![("thread-alice-seeded".into(), "idle".into())],
+        );
+        let scope = super::super::global_state::GlobalState::canonical_project_scope(&server.root)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        let now = super::super::state::now_ms();
+        let observed_idle_since = now - 1_900_000;
+        server
+            .commit(&[super::super::state::Event::AgentActivityObserved {
+                activity: AgentActivityRecord {
+                    project_scope: scope,
+                    worker_id: "alice".into(),
+                    session_id,
+                    activity: AgentActivity::Idle,
+                    background: false,
+                    reason: "fresh live idle observation".into(),
+                    observed_ms: now,
+                    idle_since_ms: Some(observed_idle_since),
+                },
+            }]);
+        tick_at(&server, now);
+        assert_eq!(
+            server.state.lock().unwrap().board_patrol_notice_ids.len(),
+            1,
+            "first patrol poll must seed idle episode from fresh activity.idle_since_ms"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn waiting_and_blocked_tasks_free_slot_for_queued_ticket_continuation() {
+        use super::super::name_state::{AgentActivity, AgentPresence};
+        use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+
+        for paused_status in ["waiting", "blocked"] {
+            let (server, root) = test_server();
+            seed_master(&server);
+            seed_idle_peer(&server, "peer", AgentPresence::Online, AgentActivity::Idle);
+            seed_undispatched_public_ticket(&server, "T1", "master", true);
+            seed_undispatched_public_ticket(&server, "T2", "master", true);
+            let slot = peer_stable_name(&server, "peer");
+            {
+                let mut state = server.state.lock().unwrap();
+                let t1 = state.tasks.get_mut("T1").unwrap();
+                t1.owner = "peer".into();
+                t1.status = paused_status.into();
+                let t2 = state.tasks.get_mut("T2").unwrap();
+                t2.status = "pending".into();
+                state.ticket_phases.retain(|p| p.task_id != "T1" && p.task_id != "T2");
+                if let Some(workers) = state
+                    .agent_activity
+                    .values_mut()
+                    .find(|workers| workers.contains_key("peer"))
+                {
+                    if let Some(act) = workers.get_mut("peer") {
+                        act.idle_since_ms = Some(act.observed_ms);
+                    }
+                }
+                state.ticket_phases.push(TicketPhaseRecord {
+                    task_id: "T1".into(),
+                    phase: TicketPhaseKind::Execute,
+                    batch: 1,
+                    priority: "p0".into(),
+                    status: TicketPhaseStatus::Running,
+                    slot_name: Some(slot.clone()),
+                    binding_generation: 1,
+                    enqueue_seq: 1,
+                    attempt_generation: 1,
+                    depends_on: Vec::new(),
+                    route_group: None,
+                    wait_reason: None,
+                    result: None,
+                });
+                state.ticket_phases.push(TicketPhaseRecord {
+                    task_id: "T2".into(),
+                    phase: TicketPhaseKind::Execute,
+                    batch: 1,
+                    priority: "p2".into(),
+                    status: TicketPhaseStatus::Queued,
+                    slot_name: Some(slot.clone()),
+                    binding_generation: 0,
+                    enqueue_seq: 2,
+                    attempt_generation: 0,
+                    depends_on: Vec::new(),
+                    route_group: None,
+                    wait_reason: Some("queued while T1 runs".into()),
+                    result: None,
+                });
+                let control =
+                    super::super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+                        .load()
+                        .unwrap();
+                let route = super::super::server_route_scope(&server, &state)
+                    .unwrap()
+                    .unwrap();
+                let events = super::super::ticket_continuation_events(
+                    &state, &control, &route, "peer", &[], false,
+                );
+                assert!(
+                    !events.is_empty(),
+                    "paused_status={paused_status} must allow claiming queued T2"
+                );
+                server
+                    .commit_locked_checked_with_control(&mut state, &events, &control)
+                    .unwrap();
+                assert_eq!(state.tasks["T2"].owner, "peer");
+                assert_eq!(state.tasks["T2"].status, "working");
+                assert_eq!(state.tasks["T1"].status, paused_status);
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

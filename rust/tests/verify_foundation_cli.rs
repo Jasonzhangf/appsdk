@@ -649,3 +649,145 @@ fn invocation_log_failure_is_isolated_warning() {
 
     fs::remove_dir_all(&root).ok();
 }
+
+/// Real-artifact end-to-end test: runs real `appsdk new`, `appsdk compile`,
+/// and `appsdk verify` (without all-zero placeholder digests) and validates
+/// the emitted `.appsdk/project.json` against `contracts/project.schema.json`.
+#[test]
+fn real_new_compile_verify_produces_non_zero_digests_and_valid_schema() {
+    let base = temp_root("real-new-compile-verify");
+    let project_root = base.join("sample-app");
+    let registry_home = base.join("appsdk-home");
+    fs::create_dir_all(&registry_home).unwrap();
+
+    let new_out = Command::new(env!("CARGO_BIN_EXE_appsdk"))
+        .args(["new", project_root.to_str().unwrap()])
+        .env("APPSDK_HOME", &registry_home)
+        .output()
+        .unwrap();
+    assert!(
+        new_out.status.success(),
+        "appsdk new failed: stderr={}",
+        String::from_utf8_lossy(&new_out.stderr)
+    );
+
+    // Initialize git on a non-main worktree branch so compile/verify run against a real repo.
+    for args in [
+        &["init", "-b", "codex/real-e2e"][..],
+        &["config", "user.email", "test@example.com"][..],
+        &["config", "user.name", "AppSDK Test"][..],
+        &["add", "."][..],
+        &["commit", "-m", "initial"][..],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&project_root)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    let lock = read_json(&project_root.join(".appsdk/sdk.lock"));
+    let zero_digest = format!("sha256:{}", "0".repeat(64));
+    let assert_real_sha256 = |value: &Value, field: &str| {
+        let s = value
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} must be a string, got {value}"));
+        assert_eq!(s.len(), 71, "{field} must be a 71-char sha256 digest");
+        assert!(s.starts_with("sha256:"), "{field} must start with sha256:");
+        assert!(
+            s[7..].chars().all(|c| c.is_ascii_hexdigit()),
+            "{field} must be hex"
+        );
+        assert_ne!(
+            s, zero_digest,
+            "{field} must not be an all-zero placeholder"
+        );
+    };
+    assert_real_sha256(&lock["bundle_digest"], "sdk.lock.bundle_digest");
+    assert_real_sha256(
+        &lock["bundle_manifest_digest"],
+        "sdk.lock.bundle_manifest_digest",
+    );
+
+    let project_json = read_json(&project_root.join(".appsdk/project.json"));
+    let schema_path = repo_root().join("contracts/project.schema.json");
+    let schema = read_json(&schema_path);
+    let validator = jsonschema::validator_for(&schema).expect("project.schema.json must compile");
+    let errors: Vec<String> = validator
+        .iter_errors(&project_json)
+        .map(|err| err.to_string())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "real emitted .appsdk/project.json must satisfy contracts/project.schema.json: {:?}",
+        errors
+    );
+
+    let goal_path = project_root.join(".appsdk/goal.json");
+    let mut goal_json = read_json(&goal_path);
+    goal_json["status"] = json!("confirmed");
+    goal_json["confirmed_by"] = json!("test");
+    goal_json["confirmed_at"] = json!("2026-01-01T00:00:00Z");
+    write_json(&goal_path, &goal_json);
+
+    for stage in ["source_implemented", "contract_bound"] {
+        let promote_out = Command::new(env!("CARGO_BIN_EXE_appsdk"))
+            .args(["promote", project_root.to_str().unwrap(), "--to", stage])
+            .env("APPSDK_HOME", &registry_home)
+            .output()
+            .unwrap();
+        assert!(
+            promote_out.status.success(),
+            "appsdk promote --to {} failed: stderr={}",
+            stage,
+            String::from_utf8_lossy(&promote_out.stderr)
+        );
+    }
+
+    let compile_out = Command::new(env!("CARGO_BIN_EXE_appsdk"))
+        .args(["compile", project_root.to_str().unwrap()])
+        .env("APPSDK_HOME", &registry_home)
+        .output()
+        .unwrap();
+    assert!(
+        compile_out.status.success(),
+        "appsdk compile failed: stderr={}",
+        String::from_utf8_lossy(&compile_out.stderr)
+    );
+    let compiled_artifact = read_json(&project_root.join("generated/project.compiled.json"));
+    assert_real_sha256(
+        &compiled_artifact["artifact_hash"],
+        "project.compiled.json.artifact_hash",
+    );
+
+    let verify_default = Command::new(env!("CARGO_BIN_EXE_appsdk"))
+        .args(["verify", project_root.to_str().unwrap()])
+        .env("APPSDK_HOME", &registry_home)
+        .output()
+        .unwrap();
+    assert!(
+        verify_default.status.success(),
+        "appsdk verify failed: stderr={}",
+        String::from_utf8_lossy(&verify_default.stderr)
+    );
+    let default_json: Value = serde_json::from_slice(&verify_default.stdout).unwrap();
+    assert_eq!(default_json["command_ok"], json!(true));
+
+    let verify_admission = Command::new(env!("CARGO_BIN_EXE_appsdk"))
+        .args(["verify", "--admission", project_root.to_str().unwrap()])
+        .env("APPSDK_HOME", &registry_home)
+        .output()
+        .unwrap();
+    assert!(
+        verify_admission.status.success(),
+        "appsdk verify --admission failed: stderr={}",
+        String::from_utf8_lossy(&verify_admission.stderr)
+    );
+    let admission_json: Value = serde_json::from_slice(&verify_admission.stdout).unwrap();
+    assert_eq!(admission_json["ok"], json!(true));
+    assert_eq!(admission_json["delivery_verified"], json!(true));
+
+    fs::remove_dir_all(&base).ok();
+}

@@ -14,6 +14,7 @@ use crate::client::adapters::rex::{
 use crate::proto::{RexEndpoint, TransportKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -44,6 +45,15 @@ struct RexMonitorInner {
 struct MonitorTarget {
     endpoint: RexEndpoint,
     agent_session_id: String,
+    agent_kind: Option<crate::host_runtime::AgentKind>,
+}
+
+impl MonitorTarget {
+    /// `current_target(&state, worker_id)` omits `agent_kind` because host agent kind lives in
+    /// `BindingControlStore`; matching endpoint and session keeps state-only checks aligned.
+    fn matches_state_target(&self, other: &Self) -> bool {
+        self.endpoint == other.endpoint && self.agent_session_id == other.agent_session_id
+    }
 }
 
 struct RexProjection {
@@ -63,6 +73,7 @@ pub(crate) struct ObservedRexExecution {
 
 struct RexTask {
     target: MonitorTarget,
+    sampled: Arc<AtomicBool>,
     cancel: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -76,6 +87,22 @@ impl RexMonitor {
 
     pub(crate) fn runtime_handle(&self) -> Option<tokio::runtime::Handle> {
         self.inner.lock().unwrap().handle.clone()
+    }
+
+    pub(super) fn has_current_sample(&self, state: &super::State, worker_id: &str) -> bool {
+        let Some(target) = current_target(state, worker_id) else {
+            return false;
+        };
+        self.inner
+            .lock()
+            .unwrap()
+            .tasks
+            .get(worker_id)
+            .is_some_and(|task| {
+                task.target.matches_state_target(&target)
+                    && !task.task.is_finished()
+                    && task.sampled.load(Ordering::Acquire)
+            })
     }
 
     /// Stop each owned stream. Cancellation is sent to the adapter watch;
@@ -105,11 +132,30 @@ impl RexMonitor {
 pub(crate) fn reconcile(server: &Arc<Server>, _now: i64) {
     let desired: HashMap<String, MonitorTarget> = {
         let state = server.state.lock().unwrap();
+        let route = super::server_route_scope(server, &state).ok().flatten();
+        let control =
+            super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+                .load()
+                .ok();
         state
             .workers
             .values()
             .filter_map(|worker| {
-                current_target(&state, &worker.id).map(|target| (worker.id.clone(), target))
+                let mut target = current_target(&state, &worker.id)?;
+                if let (Some(route), Some(control)) = (route.as_ref(), control.as_ref()) {
+                    target.agent_kind = control
+                        .current_for_worker(
+                            &route.project_scope_id,
+                            &route.app_scope_id,
+                            &worker.id,
+                        )
+                        .ok()
+                        .flatten()
+                        .and_then(|slot| slot.active_binding())
+                        .and_then(|value| value.host.agent_kind.as_deref())
+                        .and_then(crate::host_runtime::AgentKind::from_str);
+                }
+                Some((worker.id.clone(), target))
             })
             .collect()
     };
@@ -164,11 +210,22 @@ fn spawn_task(
     let stream = handle.block_on(async move { spawn_events(endpoint, events_tx) });
     let task_target = target.clone();
     let server = Arc::clone(server);
+    let sampled = Arc::new(AtomicBool::new(false));
+    let stream_sampled = Arc::clone(&sampled);
     let task = handle.spawn(async move {
-        run_stream(server, worker_id, task_target, events_rx, stream.task).await;
+        run_stream(
+            server,
+            worker_id,
+            task_target,
+            events_rx,
+            stream.task,
+            stream_sampled,
+        )
+        .await;
     });
     RexTask {
         target,
+        sampled,
         cancel: stream.cancel,
         task,
     }
@@ -180,30 +237,48 @@ async fn run_stream(
     target: MonitorTarget,
     mut events: mpsc::Receiver<RexEvent>,
     mut stream: JoinHandle<RexEventBatch>,
+    sampled: Arc<AtomicBool>,
 ) {
-    let mut execution = server
-        .state
-        .lock()
-        .unwrap()
-        .rex_executions
-        .get(&worker_id)
-        .filter(|record| {
-            record.endpoint == target.endpoint && record.agent_session_id == target.agent_session_id
+    let mut execution = {
+        let server = Arc::clone(&server);
+        let worker_id = worker_id.clone();
+        let target = target.clone();
+        let Ok(previous) = tokio::task::spawn_blocking(move || {
+            server
+                .state
+                .lock()
+                .unwrap()
+                .rex_executions
+                .get(&worker_id)
+                .filter(|record| {
+                    record.endpoint == target.endpoint
+                        && record.agent_session_id == target.agent_session_id
+                })
+                .map(|record| record.owner.clone())
         })
-        .map(|record| record.owner.clone());
-    refresh_snapshot(&server, &worker_id, &target, &mut execution).await;
+        .await
+        else {
+            return;
+        };
+        previous
+    };
+    if refresh_snapshot(&server, &worker_id, &target, &mut execution).await {
+        sampled.store(true, Ordering::Release);
+    }
     loop {
         tokio::select! {
             event = events.recv() => match event {
                 Some(event) if event_matches_target(&event, &target) => {
-                    refresh_snapshot(&server, &worker_id, &target, &mut execution).await;
+                    if refresh_snapshot(&server, &worker_id, &target, &mut execution).await {
+                        sampled.store(true, Ordering::Release);
+                    }
                 }
                 Some(_) => {}
                 None => break,
             },
             finished = &mut stream => {
                 if let Some(projection) = project_stream_join(finished) {
-                    submit_activity(&server, &worker_id, &target, projection);
+                    publish_projection(&server, &worker_id, &target, projection, None).await;
                 }
                 return;
             }
@@ -211,7 +286,7 @@ async fn run_stream(
     }
     if let Ok(batch) = stream.await {
         if let Some(projection) = project_stream_end(&batch) {
-            submit_activity(&server, &worker_id, &target, projection);
+            publish_projection(&server, &worker_id, &target, projection, None).await;
         }
     }
 }
@@ -221,18 +296,126 @@ async fn refresh_snapshot(
     worker_id: &str,
     target: &MonitorTarget,
     execution: &mut Option<RexProgramStatusOwner>,
-) {
+) -> bool {
     let projection = match observe_current(&target.endpoint).await {
-        Ok(observation) => project_observation_with_execution(&observation, execution, &|pid| {
-            current_process_exists(&target.endpoint, pid)
-        }),
+        Ok(observation) => project_observation_with_execution_for(
+            &observation,
+            target.agent_kind,
+            execution,
+            &|pid| current_process_exists(&target.endpoint, pid),
+        ),
         Err(error) => RexProjection {
             presence: AgentPresence::Unknown,
             activity: AgentActivity::Unknown,
             reason: format!("rex.osc7501 observe failed: {error}"),
         },
     };
-    submit_activity_with_execution(server, worker_id, target, projection, execution.as_ref());
+    publish_projection(server, worker_id, target, projection, execution.clone()).await
+}
+
+async fn publish_projection(
+    server: &Arc<Server>,
+    worker_id: &str,
+    target: &MonitorTarget,
+    projection: RexProjection,
+    execution: Option<RexProgramStatusOwner>,
+) -> bool {
+    // Native submission may hold the state lock while Rex I/O needs the
+    // runtime's workers. A contending monitor must stay off those workers.
+    let server = Arc::clone(server);
+    let worker_id = worker_id.to_owned();
+    let target = target.clone();
+    tokio::task::spawn_blocking(move || {
+        let (submitted, claim_notifications) = submit_activity_with_execution_and_claims(
+            &server,
+            &worker_id,
+            &target,
+            projection,
+            execution.as_ref(),
+        );
+        for (message_id, subscription_id) in claim_notifications {
+            super::attempt_notification_detailed_with_rex_recovery(
+                &server,
+                &message_id,
+                &subscription_id,
+                now_ms(),
+            );
+        }
+        submitted
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Live-query one Rex endpoint for idle/busy patrol when cached state is missing
+/// or stale, using the same foreground + OSC 7501 owner projection as `rex_monitor`.
+pub(super) fn observe_current_patrol_activity(
+    server: &Server,
+    worker: &super::state::WorkerRec,
+) -> Result<AgentActivity, String> {
+    let Some(endpoint) = worker
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.rex_endpoint.as_ref())
+        .cloned()
+    else {
+        return Ok(AgentActivity::Unknown);
+    };
+    let control = super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+        .load()
+        .ok();
+    let (expected_kind, mut execution) = {
+        let state = server.state.lock().unwrap();
+        let route = super::server_route_scope(server, &state).ok().flatten();
+        let expected_kind = route
+            .as_ref()
+            .zip(control.as_ref())
+            .and_then(|(route, control)| {
+                control
+                    .current_for_worker(&route.project_scope_id, &route.app_scope_id, &worker.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|slot| slot.active_binding())
+                    .and_then(|value| value.host.agent_kind.as_deref())
+                    .and_then(crate::host_runtime::AgentKind::from_str)
+            });
+        let execution = state
+            .rex_executions
+            .get(&worker.id)
+            .filter(|record| record.endpoint == endpoint)
+            .map(|record| record.owner.clone());
+        (expected_kind, execution)
+    };
+    let future_endpoint = endpoint.clone();
+    let observation = if tokio::runtime::Handle::try_current().is_ok() {
+        let handle = server
+            .rex_monitor
+            .runtime_handle()
+            .unwrap_or_else(tokio::runtime::Handle::current);
+        std::thread::spawn(move || handle.block_on(observe_current(&future_endpoint)))
+            .join()
+            .map_err(|_| "REX_PATROL_OBSERVE_JOIN_FAILED: worker thread panicked".to_string())?
+    } else if let Some(handle) = server.rex_monitor.runtime_handle() {
+        handle.block_on(observe_current(&future_endpoint))
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?
+            .block_on(observe_current(&future_endpoint))
+    }
+    .map_err(|error| error.to_string())?;
+    let projection = project_observation_with_execution_for(
+        &observation,
+        expected_kind,
+        &mut execution,
+        &|pid| current_process_exists(&endpoint, pid),
+    );
+    Ok(if projection.presence == AgentPresence::Online {
+        projection.activity
+    } else {
+        AgentActivity::Unknown
+    })
 }
 
 /// A local PID probe belongs only to the Rex server that owns that PID.
@@ -266,12 +449,22 @@ fn current_process_exists(endpoint: &RexEndpoint, pid: u64) -> Result<bool, Stri
     }
 }
 
+#[cfg(test)]
 fn project_observation_with_execution(
     observation: &RexObservation,
     execution: &mut Option<RexProgramStatusOwner>,
     process_exists: &dyn Fn(u64) -> Result<bool, String>,
 ) -> RexProjection {
-    let mut projection = project_observation(observation);
+    project_observation_with_execution_for(observation, None, execution, process_exists)
+}
+
+fn project_observation_with_execution_for(
+    observation: &RexObservation,
+    expected_kind: Option<crate::host_runtime::AgentKind>,
+    execution: &mut Option<RexProgramStatusOwner>,
+    process_exists: &dyn Fn(u64) -> Result<bool, String>,
+) -> RexProjection {
+    let mut projection = project_observation_for(observation, expected_kind);
     if projection.presence == AgentPresence::Online {
         if let Some(process) = observation.process.as_ref() {
             *execution =
@@ -311,7 +504,7 @@ fn project_observation_with_execution(
         Ok(false) => {
             projection.presence = AgentPresence::Offline;
             projection.activity = AgentActivity::Unknown;
-            projection.reason = format!("rex current Codex process exited pid={} name={}; refreshed block foreground pid={} name={}",
+            projection.reason = format!("rex current agent process exited pid={} name={}; refreshed block foreground pid={} name={}",
                 previous.pid, previous.name, process.pid.unwrap(), process.name.as_deref().unwrap());
         }
         Ok(true) => {}
@@ -322,7 +515,15 @@ fn project_observation_with_execution(
     projection
 }
 
+#[cfg(test)]
 fn project_observation(observation: &RexObservation) -> RexProjection {
+    project_observation_for(observation, None)
+}
+
+fn project_observation_for(
+    observation: &RexObservation,
+    expected_kind: Option<crate::host_runtime::AgentKind>,
+) -> RexProjection {
     let missing_sources = [PROCESS_SOURCE, PROGRAM_STATUS_SOURCE]
         .into_iter()
         .filter(|source| !observation.sources.iter().any(|present| present == source))
@@ -339,14 +540,14 @@ fn project_observation(observation: &RexObservation) -> RexProjection {
             ),
         };
     }
-    let Some((foreground_pid, foreground_name)) =
+    let Some((process, foreground_pid, foreground_name)) =
         observation.process.as_ref().and_then(|process| {
             let pid = process.pid.filter(|pid| *pid > 0)?;
             let name = process
                 .name
                 .as_deref()
                 .filter(|name| !name.trim().is_empty())?;
-            Some((pid, name))
+            Some((process, pid, name))
         })
     else {
         return RexProjection {
@@ -361,10 +562,15 @@ fn project_observation(observation: &RexObservation) -> RexProjection {
         .program_status
         .iter()
         .filter(|record| {
-            record.app.as_deref() == Some("codex")
-                && record.owner.as_ref().is_some_and(|owner| {
-                    owner.pid == foreground_pid && owner.name == foreground_name
-                })
+            let app_matches = match expected_kind {
+                Some(kind) => record.app.as_deref() == Some(kind.rex_program_app()),
+                None => matches!(record.app.as_deref(), Some("codex" | "antigravity")),
+            };
+            app_matches
+                && record
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| process.matches_owner(owner))
         })
         .collect();
     if current.is_empty() {
@@ -384,8 +590,8 @@ fn project_observation(observation: &RexObservation) -> RexProjection {
             Some("working") => Some(AgentActivity::Busy),
             Some("blocked") => Some(AgentActivity::WaitingUser),
             Some("idle" | "done") => Some(AgentActivity::Idle),
-            Some("error") => Some(AgentActivity::Idle),
-            _ => Some(AgentActivity::Idle),
+            Some("error") => Some(AgentActivity::Error),
+            _ => None,
         };
         match (activity, next) {
             (None, Some(next)) => activity = Some(next),
@@ -488,9 +694,11 @@ fn current_target(state: &super::state::State, worker_id: &str) -> Option<Monito
     Some(MonitorTarget {
         endpoint,
         agent_session_id,
+        agent_kind: None,
     })
 }
 
+#[cfg(test)]
 fn submit_activity(
     server: &Server,
     worker_id: &str,
@@ -506,7 +714,17 @@ fn submit_activity_with_execution(
     target: &MonitorTarget,
     projection: RexProjection,
     execution: Option<&RexProgramStatusOwner>,
-) {
+) -> bool {
+    submit_activity_with_execution_and_claims(server, worker_id, target, projection, execution).0
+}
+
+fn submit_activity_with_execution_and_claims(
+    server: &Server,
+    worker_id: &str,
+    target: &MonitorTarget,
+    projection: RexProjection,
+    execution: Option<&RexProgramStatusOwner>,
+) -> (bool, Vec<(String, String)>) {
     let RexProjection {
         presence,
         activity,
@@ -517,14 +735,25 @@ fn submit_activity_with_execution(
             &server.log_path(),
             &format!("REX_MONITOR_SCOPE_UNKNOWN: {worker_id}"),
         );
-        return;
+        return (false, Vec::new());
+    };
+    let positive_online_idle =
+        presence == AgentPresence::Online && activity == AgentActivity::Idle;
+    let control = if positive_online_idle {
+        super::binding_store::BindingControlStore::new(server.host_paths.state_root())
+            .load()
+            .ok()
+    } else {
+        None
     };
     let observed_ms = now_ms();
     let mut state = server.state.lock().unwrap();
-    if current_target(&state, worker_id).as_ref() != Some(target) {
-        return;
+    if !current_target(&state, worker_id)
+        .is_some_and(|current| current.matches_state_target(target))
+    {
+        return (false, Vec::new());
     }
-    let presence = AgentPresenceRecord {
+    let presence_record = AgentPresenceRecord {
         project_scope: scope.as_str().into(),
         worker_id: worker_id.to_owned(),
         session_id: target.agent_session_id.clone(),
@@ -535,7 +764,44 @@ fn submit_activity_with_execution(
         ),
         observed_ms,
     };
-    let activity = AgentActivityRecord {
+    let same_execution = match execution {
+        Some(owner) => state.rex_executions.get(worker_id).is_some_and(|old| {
+            old.endpoint == target.endpoint
+                && old.agent_session_id == target.agent_session_id
+                && old.owner == *owner
+        }),
+        None => state.rex_executions.get(worker_id).is_none_or(|old| {
+            old.endpoint == target.endpoint && old.agent_session_id == target.agent_session_id
+        }),
+    };
+    let old_activity = state
+        .agent_activity
+        .get(scope.as_str())
+        .and_then(|workers| workers.get(worker_id))
+        .cloned();
+    let idle_since_ms = if positive_online_idle {
+        // Never extend a pre-restart idle episode across daemon restarts.
+        let is_first = super::observation_epoch::first_observation_since_start(
+            &server.root,
+            &format!("rex-activity:{worker_id}"),
+        );
+        match old_activity.as_ref() {
+            Some(old)
+                if !is_first
+                    && same_execution
+                    && old.session_id == target.agent_session_id
+                    && old.activity == AgentActivity::Idle
+                    && old.observed_ms <= observed_ms
+                    && old.idle_since_ms.is_some_and(|start| observed_ms >= start) =>
+            {
+                old.idle_since_ms
+            }
+            _ => Some(observed_ms),
+        }
+    } else {
+        None
+    };
+    let activity_record = AgentActivityRecord {
         project_scope: scope.as_str().into(),
         worker_id: worker_id.to_owned(),
         session_id: target.agent_session_id.clone(),
@@ -543,7 +809,7 @@ fn submit_activity_with_execution(
         background: false,
         reason,
         observed_ms,
-        idle_since_ms: None,
+        idle_since_ms,
     };
     let mut events = Vec::new();
     if let Some(owner) = execution {
@@ -564,28 +830,68 @@ fn submit_activity_with_execution(
         .get(scope.as_str())
         .and_then(|workers| workers.get(worker_id));
     if old_presence.is_none_or(|old| {
-        old.session_id != presence.session_id
-            || old.presence != presence.presence
-            || old.reason != presence.reason
+        old.session_id != presence_record.session_id
+            || old.presence != presence_record.presence
+            || old.reason != presence_record.reason
     }) {
-        events.push(Event::AgentPresenceObserved { presence });
+        events.push(Event::AgentPresenceObserved {
+            presence: presence_record,
+        });
     }
-    let old_activity = state
-        .agent_activity
-        .get(scope.as_str())
-        .and_then(|workers| workers.get(worker_id));
-    if old_activity.is_none_or(|old| {
-        old.session_id != activity.session_id
-            || old.activity != activity.activity
-            || old.background != activity.background
-            || old.reason != activity.reason
-            || old.idle_since_ms.is_some()
+    if old_activity.as_ref().is_none_or(|old| {
+        old.session_id != activity_record.session_id
+            || old.activity != activity_record.activity
+            || old.background != activity_record.background
+            || old.reason != activity_record.reason
+            || old.idle_since_ms != activity_record.idle_since_ms
     }) {
-        events.push(Event::AgentActivityObserved { activity });
+        events.push(Event::AgentActivityObserved {
+            activity: activity_record,
+        });
+    }
+    let mut claim_notifications = Vec::new();
+    let mut has_continuation = false;
+    if positive_online_idle {
+        if let (Ok(Some(route)), Some(control)) = (super::server_route_scope(server, &state), control.as_ref()) {
+            let continuation = super::ticket_continuation_events(
+                &state,
+                control,
+                &route,
+                worker_id,
+                &[],
+                true,
+            );
+            if !continuation.is_empty() {
+                has_continuation = true;
+                for event in &continuation {
+                    if let Event::WakeBound {
+                        message_id,
+                        subscription_id,
+                    } = event
+                    {
+                        claim_notifications.push((message_id.clone(), subscription_id.clone()));
+                    }
+                }
+                events.extend(continuation);
+            }
+        }
     }
     if !events.is_empty() {
-        server.commit_locked_reporting(&mut state, &events);
+        let commit = if has_continuation {
+            if let Some(control) = control.as_ref() {
+                server.commit_locked_checked_with_control(&mut state, &events, control)
+            } else {
+                server.commit_locked_checked(&mut state, &events)
+            }
+        } else {
+            server.commit_locked_checked(&mut state, &events)
+        };
+        if let Err(error) = commit {
+            server.report_state_error(&error);
+            return (false, Vec::new());
+        }
     }
+    (true, claim_notifications)
 }
 
 fn retire(handle: &tokio::runtime::Handle, task: RexTask) {

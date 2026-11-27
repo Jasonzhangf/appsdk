@@ -478,6 +478,7 @@ impl State {
             }
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
+                self.goal_idle_wake.remove(worker_id);
                 self.master_wake.idle_workers.retain(|id| id != worker_id);
                 self.master_wake
                     .newly_idle_workers
@@ -918,15 +919,20 @@ impl State {
                 message_id,
                 subscription_id,
                 trigger_ms,
+                idle_triggered,
             } => {
                 self.notification_occurrences.insert(
                     message_id.clone(),
                     NotificationOccurrence {
                         subscription_id: subscription_id.clone(),
                         trigger_ms: *trigger_ms,
+                        idle_triggered: *idle_triggered,
                         consumed_ms: None,
                     },
                 );
+            }
+            Event::GoalIdleWakeUpdated { worker_id, value } => {
+                self.goal_idle_wake.insert(worker_id.clone(), value.clone());
             }
             Event::WakeBound {
                 message_id,
@@ -972,7 +978,11 @@ impl State {
                         m.state = "read".into();
                     }
                     'subscription: {
-                        let Some(subscription_id) = self.wake_bindings.get(id).cloned() else {
+                        let Some(subscription_id) = self.notification_occurrences.get(id)
+                            .map(|occurrence| &occurrence.subscription_id)
+                            .or_else(|| self.wake_bindings.get(id))
+                            .cloned()
+                        else {
                             break 'subscription;
                         };
                         let Some(subscription) =
@@ -1041,6 +1051,11 @@ impl State {
                 for id in ids {
                     if let Some(m) = self.msgs.get_mut(id) {
                         m.state = "superseded".into();
+                        if let Some(occurrence) = self.notification_occurrences.get(id) {
+                            if let Some(gate) = self.goal_idle_wake.get_mut(&m.to) {
+                                gate.issued.remove(&occurrence.subscription_id);
+                            }
+                        }
                     }
                 }
             }
@@ -1548,50 +1563,27 @@ impl State {
     pub fn materialize_work_policy(
         &self,
         work_kind: Option<&str>,
-        parent_task_id: Option<&str>,
         explicit: &crate::board::WorkPolicy,
     ) -> crate::board::WorkPolicy {
-        let work_kind = work_kind.or_else(|| {
-            parent_task_id
-                .and_then(|parent| self.board_details.get(parent))
-                .and_then(|details| details.work_policy.work_kind.as_deref())
-        });
-        let mut layers = Vec::new();
-        if let Some(kind) = work_kind {
-            if let Some(policy) = self.project_work_policy.get(kind) {
-                layers.push(policy.clone());
-            }
-        }
-        if let Some(parent) = parent_task_id {
-            if let Some(details) = self.board_details.get(parent) {
-                if details.work_policy.work_kind.as_deref() == work_kind {
-                    layers.push(details.work_policy.clone());
-                }
-                if let Some(policy) =
-                    work_kind.and_then(|kind| details.child_work_policies.get(kind))
-                {
-                    layers.push(policy.clone());
-                }
-            }
-        }
-        layers.push(explicit.clone());
-        let mut effective = crate::board::WorkPolicy::default();
-        for layer in layers {
-            crate::server::overlay_work_policy(&mut effective, &layer);
-        }
-        if effective.work_kind.is_none() {
-            effective.work_kind = work_kind.map(str::to_owned);
-        }
+        let mut effective = work_kind
+            .and_then(|kind| self.project_work_policy.get(kind))
+            .cloned()
+            .unwrap_or_default();
+        crate::server::overlay_work_policy(&mut effective, explicit);
+        effective.work_kind = effective.work_kind.or_else(|| work_kind.map(str::to_owned));
+        effective.reviewer_name = None;
         effective
     }
 
     /// Task contract has already been materialized; read it without resolving
     /// broader defaults again.
     pub fn effective_work_policy(&self, task_id: &str) -> crate::board::WorkPolicy {
-        self.board_details
+        let mut policy = self.board_details
             .get(task_id)
             .map(|details| details.work_policy.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        policy.reviewer_name = None;
+        policy
     }
 
     /// One completion projection shared by read-only views and lifecycle write

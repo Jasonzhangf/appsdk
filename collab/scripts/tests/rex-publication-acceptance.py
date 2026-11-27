@@ -134,7 +134,11 @@ trust_level = "trusted"
             output = receipt.with_suffix(".tmp")
             error = project / (stem + ".err")
             script = project / (stem + ".sh")
-            script.write_text(f"{shlex.join(args)} > {shlex.quote(str(output))} "
+            # Codex shell mode may omit the parent Rex environment. Use the
+            # exact isolated placement returned by the session creation.
+            command = ["/usr/bin/env", f"REX_SERVER={endpoint}",
+                       f"REX_SESSION={session}", f"REX_BLOCK={block}", *args]
+            script.write_text(f"{shlex.join(command)} > {shlex.quote(str(output))} "
                               f"2> {shlex.quote(str(error))} && "
                               f"mv {shlex.quote(str(output))} {shlex.quote(str(receipt))}\n")
             write("!")
@@ -146,6 +150,8 @@ trust_level = "trusted"
                                   if receipt.exists() else None, stem)
             except RuntimeError:
                 detail = error.read_text()[-1000:] if error.exists() else ""
+                if not detail and output.exists():
+                    detail = output.read_text()[-1000:]
                 raise RuntimeError(f"{stem} did not return JSON: {detail}") from None
 
         wait_until(lambda: "fixture" in capture(), "Codex did not reach its composer")
@@ -166,10 +172,10 @@ trust_level = "trusted"
             "--delivery", "immediate", "--subject", "Rex real publication retry", body,
         ]))
         message_id = deferred["msg_id"]
-        print(json.dumps({key: deferred.get(key) for key in
-                          ("msg_id", "notification", "notification_error", "durable", "consumed")}), flush=True)
+        print(json.dumps(deferred), flush=True)
         assert deferred["notification"] == "queued", deferred
-        assert "REX_BINDING_PUBLICATION_BUSY" in deferred["notification_error"], deferred
+        assert not ({"notification_error", "failure", "repair_required", "escalation"} &
+                    deferred.keys()), deferred
         assert deferred["durable"] and not deferred["consumed"], deferred
 
         def native_turns():
@@ -196,6 +202,29 @@ trust_level = "trusted"
         print(json.dumps({"status_after_native_receive": facts}), flush=True)
         print(json.dumps({"message_id": message_id, "exact_body": True, "native_turns": 1,
                           "consumed": True, "recv_replay": 0}), flush=True)
+
+        # A genuine native failure must still be visible. Pause only this
+        # fixture's Rex server so status cannot complete before the write.
+        server.send_signal(signal.SIGSTOP)
+        try:
+            rejected = subprocess.run([
+                collab, "send", "--unknown-sender", "--to", f"{project.name}.{snapshot['name']}",
+                "--delivery", "immediate", "--subject", "Rex status rejection",
+                "Rex status must respond before native input",
+            ], env=env, cwd=project, text=True, capture_output=True, timeout=20)
+        finally:
+            server.send_signal(signal.SIGCONT)
+        assert rejected.returncode == 1, (rejected.returncode, rejected.stdout, rejected.stderr)
+        rejected_receipt = next(
+            json.loads(line.removeprefix("collab response: "))
+            for line in rejected.stderr.splitlines() if line.startswith("collab response: ")
+        )
+        assert rejected_receipt["durable"] and rejected_receipt["msg_id"], rejected_receipt
+        assert rejected_receipt["notification"] == "subscribed-not-sent", rejected_receipt
+        assert rejected_receipt["notification_error"].startswith(
+            "REX_NOT_DELIVERED: operation=server.status stage=BeforeWrite"
+        ), rejected_receipt
+        print(json.dumps({"send_exit": rejected.returncode, "rejection": rejected_receipt}), flush=True)
     finally:
         gate.with_suffix(".release").touch()
         try:

@@ -936,16 +936,22 @@ fn dsh_wake_enqueue_maps_the_mode_and_returns_a_queue_receipt() {
 
 #[test]
 fn dsh_delivery_sink_uses_current_liveness_before_enqueue() {
-    for (status, live) in [("inactive", Some(true)), ("running", Some(false)), ("running", None)] {
+    for (status, live) in [
+        ("inactive", Some(true)),
+        ("running", Some(false)),
+        ("running", None),
+    ] {
         let enqueues = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls = enqueues.clone();
         let gateway = Gateway::start("wake-liveness", move |request| {
             match request["method"].as_str() {
-                Some("agent-get") => live.map(|live| serde_json::json!({
+                Some("agent-get") => live.map(|live| {
+                    serde_json::json!({
                     "ok": true,
                     "result": {"ok": true, "runtimeId": "rt-1",
                         "result": {"agent": {"agentId": "ses-1", "status": status, "live": live}}}
-                }).to_string()),
+                }).to_string()
+                }),
                 Some("enqueue") => {
                     calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     wake_reply(&request)
@@ -955,11 +961,24 @@ fn dsh_delivery_sink_uses_current_liveness_before_enqueue() {
         });
         let sink = default_appserver_notification_sink();
         let result = sink(
-            &dsh_transport(&gateway.socket), None, "hello", "m1759420000000-1", false, "immediate",
+            &dsh_transport(&gateway.socket),
+            None,
+            "hello",
+            "m1759420000000-1",
+            NotificationDispatchContext {
+                explicit: false,
+                guarded_one_shot: false,
+                guarded_goal: false,
+                expected_agent_kind: None,
+            },
+            "immediate",
         );
         let expected = usize::from(live == Some(true));
         assert_eq!(result.is_ok(), expected == 1, "{result:?}");
-        assert_eq!(enqueues.load(std::sync::atomic::Ordering::Relaxed), expected);
+        assert_eq!(
+            enqueues.load(std::sync::atomic::Ordering::Relaxed),
+            expected
+        );
     }
 }
 
@@ -1133,7 +1152,12 @@ fn a_dsh_wake_never_reaches_the_tmux_sink() {
         Some("codex-%1"),
         "hello",
         "msg-9",
-        true,
+        NotificationDispatchContext {
+            explicit: true,
+            guarded_one_shot: false,
+            guarded_goal: false,
+            expected_agent_kind: None,
+        },
         "immediate",
     )
     .expect("a dsh wake must be routed to the gateway, not to tmux");
@@ -1169,7 +1193,12 @@ fn a_dsh_wake_forwards_the_sink_mode_it_was_given() {
         None,
         "hello",
         "msg-1",
-        false,
+        NotificationDispatchContext {
+            explicit: false,
+            guarded_one_shot: false,
+            guarded_goal: false,
+            expected_agent_kind: None,
+        },
         "explicit-notification",
     )
     .expect("explicit-notification must map, not fall through");

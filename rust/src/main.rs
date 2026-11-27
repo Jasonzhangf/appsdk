@@ -19,6 +19,7 @@ mod long_horizon_policy;
 mod long_horizon_role;
 mod memory;
 mod platform;
+mod primitives;
 
 use long_horizon_policy::{generate_long_horizon_goal_prompt, ExecutionRole, POLICY};
 use long_horizon_role::execution_role;

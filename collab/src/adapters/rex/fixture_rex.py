@@ -361,6 +361,10 @@ def pwd() -> None:
 def configured_owner() -> tuple[int, str] | None:
     pid = os.environ.get("COLLAB_TEST_REX_OWNER_PID")
     name = os.environ.get("COLLAB_TEST_REX_OWNER_NAME")
+    path = os.path.join(log_dir(), "rex-owner-pid")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            pid, name = handle.read().strip(), "codex"
     try:
         if pid and name:
             value = int(pid)
@@ -377,6 +381,10 @@ def process() -> None:
         owner = (4243, "zsh")
     if owner:
         pid, name = owner
+        foreground = {"pid": pid, "user_id": 501, "name": name}
+        argv0 = os.environ.get("COLLAB_TEST_REX_OWNER_ARGV0")
+        if argv0:
+            foreground["argv0"] = argv0
         emit(
             {
                 "last_exit": None,
@@ -387,7 +395,7 @@ def process() -> None:
                     "path": f"/tmp/{name}",
                     "cwd": "/tmp/rex-fixture-cwd",
                 },
-                "foreground": {"pid": pid, "user_id": 501, "name": name},
+                "foreground": foreground,
                 "home": "/Users/fixture",
             }
         )
@@ -417,15 +425,21 @@ def program_status() -> None:
     owner = configured_owner()
     if owner:
         pid, name = owner
+        argv0 = os.environ.get("COLLAB_TEST_REX_OWNER_ARGV0")
+        owner_name = argv0 if argv0 else name
+        app = os.environ.get("COLLAB_TEST_REX_OWNER_APP") or (
+            "antigravity" if owner_name in ("agy", "antigravity") else "codex"
+        )
+        state = os.environ.get("COLLAB_TEST_REX_OWNER_STATE") or "working"
         emit(
             {
                 "records": [
                     {
                         "id": "agent",
-                        "state": "working",
-                        "app": "codex",
-                        "msg": "busy",
-                        "owner": {"pid": pid, "name": name},
+                        "state": state,
+                        "app": app,
+                        "msg": state,
+                        "owner": {"pid": pid, "name": owner_name},
                         "updated_at": "2026-11-12T00:00:00Z",
                     }
                 ]

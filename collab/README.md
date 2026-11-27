@@ -129,18 +129,21 @@ roles and task constraints on each request. Explicit user decisions are reused.
 Role changes apply to later selection; they do not rewrite existing task
 assignments or reviews.
 
-The master saves category defaults through `collab board policy --scope project
---work-kind frontend --executor Alice --reviewer Bob`. Publish a task with
-`--work-kind frontend`, then use `collab board dispatch <id> --expected-revision <n>`
-to create the existing invitation. The recipient must still accept it.
+Jenny saves category defaults through `collab board policy --scope project
+--work-kind frontend --executor Alice`. Publish a task with
+`--work-kind frontend`. For a long-horizon task, declare its content and cadence
+with `--long-horizon-content` and `--long-horizon-every-ms`, then use
+`collab board dispatch <id> --expected-revision <n>`. For one-shot assignment,
+use `collab board invite <id> --to <peer> --expected-revision <n> --one-shot`.
+The recipient accepts the invitation before taking ownership.
 Use `--prefer-role designer` for a preference that permits a documented fallback;
 an explicit executor stays pinned when unavailable.
 
-Goal defaults use an existing board task and `--scope goal --id <goal>`; child
-tasks use `--parent-task <goal>`. Explicit task fields override goal and project
-defaults. Materialized task constraints survive changes to broader defaults.
-A named reviewer must accept the delivered work before completion. Code work
-retains its integration requirements; read-only work needs no merge.
+Each board task is independent. Explicit task fields override project defaults.
+The owner obtains an independent Codex review for the delivery and records
+its evidence on that task. Read-only work closes after acceptance and cleanup.
+Code work also records main integration. Historical author and reviewer fields
+remain available for reading previous deliveries.
 
 See [the three operation DAGs and verification boundaries](docs/design/work-roles-and-assignment.md).
 
@@ -166,14 +169,10 @@ a wake does not prove execution. The [Collab operations](skills/collab/operation
 defines each role's steps. Managed private queues are visible only to the child
 and its parent; the public board shows parent responsibility for public work.
 
-Long-horizon goals belong to the invited or claiming peer. That peer
-orchestrates bounded execution and observation through independent
-`codex exec --profile gcm` workers. Master and peer have the same orchestration
-function at different goal levels: master coordinates the larger project goal,
-and peer coordinates a delegated subgoal. Check idle, suitable authorized peers
-and available capacity first; use peer capacity that can take the ready work.
-Direct-dispatch independent GCM workers only when no suitable authorized peer
-can take the work. `collab subagent dispatch`,
+Jenny assigns independent tasks. Each task owner uses Codex orchestration to
+plan, execute, obtain independent review, integrate, and clean up their own
+task. Jenny checks eligible capacity before using an independent GCM worker
+when no suitable authorized peer can take the work. `collab subagent dispatch`,
 `collab subagent send`, and managed-subagent records are legacy compatibility
 for diagnosis or migration, not a production assignment path.
 
@@ -342,7 +341,8 @@ collab task update <id> --status verifying --next "run gates"
 collab task update <id> --status reviewed --next "record delivery"
 collab task deliver <id> --evidence "commit=<sha>; gates=pass" \
   --worktree ./playground/<short-slug>
-collab task review <id> --accept --evidence "review gates=pass"
+collab task review <id> --accept --expected-subject-revision <reviewed-revision> \
+  --evidence "<independent Codex review receipt>"
 collab task integrated <id> --commit <main-sha> --evidence "main gates=pass"
 collab task close <id>
 ```

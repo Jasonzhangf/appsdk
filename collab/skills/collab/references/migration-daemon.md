@@ -1,8 +1,25 @@
 # Current Identity and User-Managed Daemon Boundary
 
+## Choose the migration owner
+
+| Trigger | Operator, command and working directory | Completion evidence |
+| --- | --- | --- |
+| Current Collab session or transport changed, or the name has an explicit recovery request | Affected agent runs `collab context` from its actual project in the original host session. Read the [recovery decision table](stable-name-recovery.md#table-d-context-recovery-and-current-actions) before supplying fields | Same stable name and applicable role, current verified binding, existing work and unread messages still owned by that name |
+| Current Collab binary or daemon is behind the delivered version | Authorized installer operator uses the reviewed AppSDK checkout; the user activates from the actual project as described below | Installed CLI and running daemon both report the intended version; verify affected behavior separately |
+| Current AppSDK project needs its managed governance resources refreshed | Project owner runs `appsdk init` from an existing governed root with `.appsdk/project.json`, then `appsdk verify`. For first adoption or relocation use the confirmed `appsdk prepare` path in the AppSDK governance Skill | Existing project and business records stay in place; verify the affected entry in the consumer |
+| User explicitly requests discarding one project's Collab state | Current project master runs `collab reset --project` from that exact project after confirming the discard scope | Read the reset receipt for that project. Use the identity recovery path separately if the current session needs to bind |
+
+For a healthy registered session with an active goal, continue the existing
+schedule across an ordinary version upgrade. Use goal and notification status
+if a concrete fact is missing. Archived project-local Collab data has no
+manual import path. When a request depends on data found only in retired
+storage, report the specific missing current record and preserve the source.
+
 ## Context uses the current identity map
 
-Use `collab context` in the current project. Identity selection reads only
+Use `collab context` in the current project only for registration or evidenced
+identity recovery. Ordinary task progress uses `collab task status '<id>'`, and
+identity inspection uses `collab context --query`. Identity selection reads only
 `identity-map.json`. Exact credentials and current grants serve that selected
 principal. Registration, name/session updates and communication bindings use
 the same map owner. Agents do not choose an archive, copy tokens or edit state.
@@ -16,7 +33,7 @@ stop an old process or change another session's identity.
 An explicit authorized recovery target is applied through the current map.
 Old bindings and names cannot veto that authorization. Missing map rows permit
 first registration with current facts; a corrupt map returns its real error.
-For current intent commands, see [stable-name recovery](stable-name-recovery.md).
+For all current-action branches, see the [recovery decision table](stable-name-recovery.md#table-d-context-recovery-and-current-actions).
 
 Context preserves name-owned open tasks, resources and unread messages while
 updating their carrier. Consumed messages and closed-task records stay intact.
@@ -26,7 +43,7 @@ Recovery does not change accepted goal ownership or require another human
 approval for authorized work. Reconcile finite goal/task schedules under
 [notifications](notifications.md#patrol-duties-and-finite-schedules). Standing
 project patrol and task-scoped cancellations remain owned by
-[board-idle patrol](board-idle-patrol.md), not by identity restoration.
+[board-idle patrol](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation), not by identity restoration.
 
 First registration requires the selected host's real current facts. Desktop
 uses its scoped bridge capability; it does not require tmux or borrow a managed
@@ -63,13 +80,15 @@ Use the formal installer from the reviewed current source:
 scripts/install-global-collab.sh
 ```
 
-Obtain the user's approval for this installation before writing global runtime
-artifacts. Earlier approvals do not cover another installation. After approval,
-check for and handle the installer's blocking confirmation window. Do not leave
-it waiting unattended or bypass a denied action. Installation approval does not
-authorize an agent to activate or replace the running daemon.
+Use the authorization already granted for the target installation. If the
+installer returns `outcome=pending_user_activation` and `required_action=daemon_version_differs`,
+read `~/.cargo/bin/collab --version` and `~/.cargo/bin/collab status` to confirm
+the installed CLI and current `daemon_version`. Other installer failures use
+the original error, failed phase and rollback receipt.
 
-It builds and installs Collab and refreshes the embedded Skill. It does not
+When activation or restart is needed after installing or upgrading `collab` outside protected TCC folders, the user or an authorized agent runs `~/.cargo/bin/collab up` (or `~/.cargo/bin/collab up --restart` when forcing replacement of a healthy same-version detached daemon) from the project root (or a registered worktree). Run `~/.cargo/bin/collab status` after `collab up` to confirm that `daemon_version` matches `~/.cargo/bin/collab --version`. Run `collab context` when resuming agent work on the restarted daemon. `collab down` and maintenance passwords remain user-only (`USER_MAINTENANCE_REQUIRED`).
+
+The installer builds and installs Collab and refreshes the embedded Skill. It does not
 activate the new global daemon or discard durable state. Verify the installed
 version and affected public behavior. Report installed and live versions
 separately; installation alone does not prove live identity or communication
@@ -164,8 +183,7 @@ needs no follow-up ACK. `collab inbox` and `collab msg <id>` only inspect.
 A reply uses `collab sendmessage` to the original sender when authorized.
 Queue acceptance, actual arrival, consumption and reply are separate evidence.
 
-Collab has one global user-managed daemon. Agents never start, stop, restart or
-kill it, request maintenance credentials, or create a second global runtime.
+Collab has one global daemon shared across projects. Agents may run `collab up` to start or restart the daemon onto the installed binary (preserving durable routes, identities, mailbox, and board state), but never run `collab down`, request maintenance passwords, or create a second global runtime.
 User maintenance commands and credentials are outside the agent interface.
 When the service is unavailable, preserve durable state and report that fact.
 Project state read failure must not disable authenticated user maintenance: its

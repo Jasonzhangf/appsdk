@@ -1,13 +1,12 @@
-fn required_work_reviewer(state: &State, task_id: &str) -> Option<String> {
-    state
-        .effective_work_policy(task_id)
-        .reviewer_name
-        .or_else(|| {
-            state
-                .task_lifecycle
-                .get(task_id)
-                .and_then(|record| record.required_reviewer_name.clone())
-        })
+const RECORD_OWNER_REVIEW: &str =
+    "capture review.subject_revision from collab task status before independent Codex review, then record evidence with collab task review --accept or --rework and --expected-subject-revision set to that value";
+
+fn task_next_step(task: &TaskRec) -> Option<&str> {
+    match task.next_step.as_deref() {
+        Some(step) if task.status == "delivered" &&
+            (step.starts_with("await review by ") || step.starts_with("task owner or live master reviews")) => Some(RECORD_OWNER_REVIEW),
+        step => step,
+    }
 }
 
 fn work_review_valid(state: &State, task_id: &str) -> bool {
@@ -18,7 +17,7 @@ fn work_review_valid(state: &State, task_id: &str) -> bool {
         return false;
     };
     if !matches!(task.status.as_str(), "accepted" | "merged" | "closed")
-        || record.reviewer.is_none()
+        || record.review_recorded_by.as_deref().or(record.reviewer.as_deref()).is_none()
         || record.reviewed_ms.is_none()
         || !record
             .review_evidence
@@ -27,14 +26,7 @@ fn work_review_valid(state: &State, task_id: &str) -> bool {
     {
         return false;
     }
-    let required = required_work_reviewer(state, task_id);
-    if required
-        .as_deref()
-        .is_some_and(|name| record.reviewer_name.as_deref() != Some(name))
-    {
-        return false;
-    }
-    if record.review_subject_revision > 0 || required.is_some() {
+    if record.review_subject_revision > 0 {
         return record.reviewed_subject_revision == Some(record.review_subject_revision);
     }
     true
@@ -51,6 +43,7 @@ fn invalidate_work_review(
     record.reviewed_subject_revision = None;
     record.review_evidence = None;
     record.reviewer = None;
+    record.review_recorded_by = None;
     record.reviewer_name = None;
     record.reviewed_ms = None;
     let mut events = Vec::new();
@@ -80,6 +73,7 @@ fn work_review_notice_ids(state: &State, task_id: &str) -> Vec<String> {
         .values()
         .filter(|message| {
             message.subject.as_deref() == Some(subject.as_str())
+                && state.is_legacy_work_review_notice(message)
                 && matches!(message.state.as_str(), "pending" | "delivered")
         })
         .map(|message| message.id.clone())
@@ -87,12 +81,11 @@ fn work_review_notice_ids(state: &State, task_id: &str) -> Vec<String> {
 }
 
 fn work_review_gate(state: &State, task_id: &str) -> Result<(), Resp> {
-    if required_work_reviewer(state, task_id).is_some() && !work_review_valid(state, task_id) {
+    if state.task_lifecycle.contains_key(task_id) && !work_review_valid(state, task_id) {
         return Err(Resp::err_data(
             "TASK_REQUIRED_REVIEW_MISSING",
             json!({
-                "task_id":task_id,"required_reviewer":required_work_reviewer(state,task_id),
-                "delivery_complete":false,"next_action":"the named reviewer must accept the current delivery",
+                "task_id":task_id,"delivery_complete":false,"next_action":RECORD_OWNER_REVIEW,
             }),
         ));
     }
@@ -151,7 +144,7 @@ mod required_review_state_tests {
         assert!(!work_review_valid(&state, "task"));
         state.tasks.get_mut("task").unwrap().status = "accepted".into();
         state.task_lifecycle.get_mut("task").unwrap().reviewer_name = Some("Alice".into());
-        assert!(!work_review_valid(&state, "task"));
+        assert!(work_review_valid(&state, "task"));
         state.task_lifecycle.get_mut("task").unwrap().reviewer_name = Some("Bob".into());
         state
             .task_lifecycle

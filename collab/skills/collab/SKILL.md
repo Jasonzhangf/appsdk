@@ -5,15 +5,41 @@ description: "Collab peer/Jenny 身份、任务交付和协作。原 agent 会�
 
 # Collab
 
+项目目录只用于解析 canonical project。首次 `collab context` 可建立空
+`.agent-collab` 标记。daemon 的身份、路由、消息、任务和订阅由全局
+`~/.collab/` 管理，运行策略从 `~/.appsdk/config.toml` 读取。
+
 Collab 注册、恢复、收件、状态查询和交付都在原 agent 会话的 shell 中执行。
 收到唤醒或上下文压缩后同样适用。已验证绑定可直接复用。用户要求恢复、当前身份未知
 或明确绑定异常时，在实际项目运行 `collab context`。授权接替时只按恢复表补参数。
 禁止用 Computer Use、CUA 或 GUI 找工具、打开终端、读日志或代跑 CLI。
-原会话缺 shell 或 CLI 时，保留原消息和任务状态，沿已有获授权通道向派单 architect
+`cua_repl` 的 JavaScript/Node 运行时同样属于 CUA；即使它可以调用 `child_process`，
+也不得用来执行 shell、`collab`、`rex`、文件检查、日志读取或其他 CLI 替代动作。
+原会话缺 shell 或 CLI 时，保留原消息和任务状态，沿已有获授权通道向 Jenny
 或 Jenny 报告缺失入口及恢复条件，继续能独立完成的工作。
 
-本入口保留日常协作规则。命令细节按下表读取 [操作手册](operations.md) 的对应章节，
-不整篇加载；手册与本入口属于同一个 Skill。
+压缩、恢复和工具参数解析失败时，继续使用当前宿主的原生 shell。也不要调用
+`cua_repl` 的 `getState`、`reset`、截图或 AX 观察。若宿主提供
+`functions.exec`，给它传原始 JavaScript 源码。以下示例只在当前原项目收到未消费的
+`COLLAB_NOTIFY` 时执行：
+
+```javascript
+const result = await tools.exec_command({cmd: "collab recv --timeout 0", max_output_tokens: 1200});
+text(result.output);
+```
+
+参数解析失败时按该工具的声明修正参数并重试。如果原生入口仍失败，沿任务合同报告
+原错、已试入口、受影响步骤和恢复条件。
+
+本入口保留日常协作规则。按已观察的事实先选择下表中的唯一入口，再只读取对应章节；
+不整篇加载。手册与本入口属于同一个 Skill。
+
+| 已观察条件 | 唯一分支入口 |
+|---|---|
+| 任务已排队、当前 slot busy、认领或启动被拒 | [Table A：Busy slots and queued admission](operations.md#table-a-busy-slots-and-queued-admission) |
+| 资源冲突、业务 blocker 待批、等待后继续队列 | [Table B：Resource waits, block approval, and queue continuation](operations.md#table-b-resource-waits-block-approval-and-queue-continuation) |
+| 收到巡检唤醒、无可执行项需取消或恢复巡检 | [Table C：board idle 巡检与取消](references/board-idle-patrol.md) |
+| 需要恢复身份或从 context 选择当前动作 | [Table D：稳定名字恢复](references/stable-name-recovery.md) |
 
 ## 适用身份
 
@@ -45,12 +71,14 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 当前在线时才可写入 shell、pane、Rex block 或原生 thread。在线只认当前 adapter
 明确返回的 Present。cold、unknown、offline、缺失或只有持久化绑定时，daemon
 保持消息未读并产生零终端输入。入队、订阅接受和唤醒接受都不是投递成功。
-普通未读消息在目标上线后沿当前绑定投递；周期唤醒离线静默且不补发。
+普通未读消息在目标上线后沿当前绑定投递。tmux/Rex 的长程目标提醒在离线时
+保留待办，等当前绑定确认在线且空闲后再判断能否投递。
 board 修改仍先提交，自动通知在目标离线时保持未读。
 
 ### 身份恢复
 
-按[恢复操作表](references/stable-name-recovery.md#正常恢复)根据原始回执选择下一条命令。
+按 [Table D：稳定名字恢复](references/stable-name-recovery.md#正常恢复) 根据原始回执选择
+下一条命令。
 恢复动作留在同一个 agent 会话。先跑 context，再按缺项进入对应宿主的只读诊断。
 禁止先派子 agent、搜索历史身份、调用其他 context 工具碰运气，或使用
 `rex session rename`、新建窗口、切换 block、重启 daemon 来修复身份。
@@ -86,12 +114,12 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 
 | 任务 | 入口与边界 |
 |---|---|
-| 恢复当前已注册身份和状态 | 在本项目实际环境运行 `collab context`；仅给当前宿主的真实 runtime 信息 |
+| 恢复当前已注册身份和状态 | 按 [Table D](references/stable-name-recovery.md) 选择 context 或 context query；仅给当前宿主的真实 runtime 信息 |
 | 查可投递地址 | `collab list`；全局目录，不依赖当前目录，输出 `project.name`、通道和真实可达状态 |
 | 发送已授权消息（本项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址必须来自 `collab list`，显式地址失败不回退默认目标 |
-| 跨项目通信 | 任意两个已注册对象可直接收发，不按 master/peer/CEO 级别限制，也不要求 master 转发。保留真实 sender、精确注册地址与回执。`master send` 只是兼容入口 |
+| 跨项目通信 | 仅在用户或当前任务合同明确指定目标项目与接收人时发送。无跨项目指令时，`Jenny` 指本项目的 Jenny。AppSDK CLI 或 SDK 错误不会自动把消费者项目的任务交给 `appsdk.Jenny`。只用目录核实已有授权目标，保留原发送和接收证据 |
 | 收件与消费 | 非 DSH 用 `collab recv`；DSH gateway 独占 Poll/Ack，直接处理原生完整正文，不运行 recv/ack |
-| 只读查消息 | `collab msg <真实消息ID>` 或 `collab inbox`；只读查询不等于消费 |
+| 只读查消息 | `collab context` 只给未读数量。使用同一项目、同一会话的 `collab msg <真实消息ID>` 或 `collab inbox` 查看消息；只读查询不等于消费 |
 | 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
 | 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
 
@@ -183,32 +211,13 @@ Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显
 peer，也不靠复核为该 peer 加任务；该 peer 交付并关闭当前任务后才接受下一个。候选
 peer 与占用状态由 board 的真实任务视图计算。
 
-项目有适合本任务的 architect 时，Jenny 将 buglist 中已授权的缺陷和项目任务先派给
-architect。Architect 完成详细计划，在受托范围内修订任务并直接向一个或多个 eligible
-peer 派发执行合同。Peer 实现、
-验证并直接将结果交回 architect。执行中只为真实阻塞、必要设计决定或约定交接直接联系。
-Architect 按计划及真实行为证据验收，返工也由其交回
-原执行者。Jenny 负责项目优先级、跨任务依赖和最终交付。用户另有分工要求时按其要求执行。
-只有用户明确要求时，architect 才承担具体执行，并由其他人审查该 architect 的实现。
-
-已注册 peer 在执行派单时先查原合同、证据和现有授权，自行处理范围内的常规决定。
-仍需答复时，技术、设计和验收问题发给派单 architect。Jenny 直接派单、没有派单
-architect，或问题需要项目授权和跨任务协调时，发给本项目 Jenny。接收者取当前任务
-合同与 Board，用 `collab list` 核对项目限定地址。以
-`collab send --to '<project.name>' --subject 'blocker:<task-id>' --content '<原错、影响、尝试、所需决定、恢复条件>'`
-发给该负责人，只暂停依赖答案的步骤。内部任务不调用
-`request_user_input`、`AskUserQuestion` 或同类用户询问工具。必须由用户决定时，
-由派单 architect 转 Jenny，再由获授权的负责人按既有链路向用户汇总。用户明确指定
-peer 直接沟通时按指定范围执行。
-
-任务未由 architect 承担 review 时，reviewer、planner、裁判等按职责分配。
-已有可用的独立 reviewer 优先承接。没有可用 reviewer 时，按 [Review 合同](../codex-orchestrator/references/review.md)
-派独立只读 Codex review worker。提供候选、验收证据和明确范围。
-发布时多个问题统一给 reviewer 做架构 review。master（Jenny）不是默认 review 对象，
-不承担常规评审。角色缺位时按[负责人承接规则](../codex-orchestrator/SKILL.md#角色缺位时由负责人继续推进)
-改派，并更新原 board 与合同。极端条件下的 master 临时代审、实际审查者与独立性
-缺口记录均由该规则和现有 Review 合同统一维护。角色缺位本身不得成为停工理由；
-负责人继续解阻、派发和推进其他可执行工作。
+Jenny 是项目唯一的 Collab 调度者。Architect、executor、reviewer、QA 和其他 peer
+的专长用于匹配任务。每个 owner 独立使用 [Codex 编排](../codex-orchestrator/SKILL.md)
+完成探索、Plan、执行、独立 Review、合并和清理。Codex 子角色只服务于原任务。
+恢复旧任务时保留目标、验收和证据，按当前职责处理旧合同中指定其他 peer 派发、代审或代合并的步骤。
+以原 Board 的状态和证据推进；保留必要权限升级。内部技术判断沿 Codex 编排解决，
+不调用 Ask。涉及实际资源占用冲突时才向另一 peer 发消息，注明资源、当前 owner、
+受影响任务和所需释放条件。Jenny 处理需项目权限的决定。
 
 为用户执行身份注册、恢复或角色确认后，从 `collab context` 回执反馈当前名字、
 身份和工作角色、基础职责、当前任务与下一步。读取 `result.snapshot.role_brief` 的
@@ -217,12 +226,10 @@ peer 直接沟通时按指定范围执行。
 
 | 角色 | 基础工作 |
 | --- | --- |
-| Manager（项目 master 为 Jenny） | 管优先级、依赖、派发、验收和回收。核对每项 ready 工作是否发给有能力、有授权且有容量的人，确认接单和实际推进。核对用过的 worktree、临时文件和运行资源是否已按 owner 回收或有明确保留原因。 |
-| Architect | 优先承接 debug 的总体设计、根因分析及 feature 的方案与计划。写清步骤、边界、依赖、验收和停止条件后派给 peer。审查并验收 peer 的结果。Architect 亲自实现时另派 reviewer。 |
-| 普通 peer | 执行已接受的任务。派单方提供可执行计划、范围、允许与禁止动作、产物、验收及回交人。Peer 可自行分析和编排范围清楚的简单问题。复杂问题有可承接 architect 时，交 architect 设计，再由 peer 实施。设计缺口或证据与计划冲突时交回 architect 或派单方。 |
-| Reviewer | 在达到 Review 准入时独立核验候选和证据。已有合适 reviewer 优先承担，缺位时按上面的 Codex review 路径派发。 |
+| Manager（项目 master 为 Jenny） | 管优先级、派发、可用容量和跨任务资源。用 Board 查接单和收口证据。 |
+| Architect、executor、reviewer、QA 和其他 peer | 按专长承接独立目标。用 Codex 编排完成本任务的规划、实施、独立审查、集成与清理，在原 Board 留存状态和证据。 |
 | 记忆 agent（`memory`） | 总结经核实的知识和决策，巡检记忆的准确性、归属与交接缺口。只接记忆总结和记忆巡检。 |
-| 巡检者（`patrol`） | 主要核查 Jenny 的实际执行、派发和回收。从活跃运行入口收集有原始证据的 live runtime bug，沿项目现有 bug 入口去重移交并跟踪。 |
+| 巡检者（`patrol`） | 验证自己巡检目标内的运行行为。记录可复现的 live runtime bug 和原始证据，沿该项目的既有缺陷入口去重登记。 |
 
 巡检者使用已授权的 30 分钟周期。记忆 agent 使用已授权的记忆巡检周期或记录变更触发，
 当前无统一默认间隔。两者的已授权周期批次默认 100 次，复用有效回执。
@@ -230,16 +237,15 @@ peer 直接沟通时按指定范围执行。
 内容和周期的 Board 派发提交中，按[长程登记](operations.md#register-the-long-horizon-goal-before-dispatch)
 核对派发和订阅的实际回执。
 
-每个目标都在原记录中写明可核对的评估标准，并至少关联一项行动。行动项写清负责人、
+每个目标的正文必须有非空的 `Action Items` 字段，并至少列出一项直接对应此目标的行动。
+更新目标时，在同一次更新中同步更新该字段和受影响的评估标准。行动项写清负责人、
 具体动作、产物、通过条件和完成证据。巡检把每项检查关联到目标标准和上轮证据，
-记下本轮是通过、发现缺口、还是无法核实。缺口和待核实项各自有负责人、下一动作和
+记下本轮是通过、发现缺口、还是无法核实。字段缺失、为空或行动与当前目标不符时，
+记为缺口，由目标 owner 在原记录修正。缺口和待核实项各自有负责人、下一动作和
 复验标准或恢复信号。已有行动项就更新原记录，符合标准的例行检查仅留下必要证据。
 
-各角色都可用编排 Skill 处理职责内、已获授权的可拆分子任务，普通 peer 也可以。
-本轮没有合适、有授权且可承接的 peer 时，按 [Codex 编排](../codex-orchestrator/SKILL.md)
-调用子 agent 承担清楚限定的子任务。派发者明确范围、输入、产物、验收和停止条件，
-保留原任务责任并核验结果。记忆 agent 和巡检者只能拆各自职责内的工作，独立 Review
-仍走 Review 合同的独立只读入口。
+每个 owner 使用 Codex 编排处理本任务内的工作。明确子角色的范围、输入、产物、验收和
+停止条件。记忆与巡检任务保持自身职责范围。代码交付的独立 Review 走独立只读入口。
 
 默认职责正文由源码
 [workflow-templates.json](references/workflow-templates.json) 编译，`collab context`
@@ -318,8 +324,10 @@ board 任务且正态 idle 时应唤醒本人，由本人继续推理并判断�
 不补发漏掉周期。
 
 任务阻塞或执行者没有推进时，直属负责人[当轮先取证](references/board-idle-patrol.md#任务阻塞或停滞先取证)。
-有 Rex/tmux 绑定时运行 `collab worker snapshot <id> --capture --lines 80` 查看原 block/pane，
-即使状态显示 online 或 busy。按实际情况安排解阻、改计划或带恢复条件的等待。
+用 `collab who` 取目标 worker ID 和当前 transport。Rex 绑定只查原 Rex block，
+tmux 绑定只查原 tmux pane。需要实际终端证据时执行
+`collab worker snapshot <id> --capture --lines 80`，由 daemon 按当前绑定选适配器。
+身份恢复走原会话 `collab context`。
 
 没有可执行项时，peer 取消本人对应的 board 巡检，任务与基本收件仍保留。取消按任务和当前稳定 owner
 持久保存；新任务不恢复旧任务取消，同稳定名字换会话保留取消。恢复使用明确入口。
@@ -401,13 +409,16 @@ v2 实验状态。
 
 | 当前动作 | 只读对应内容 |
 |---|---|
+| 首次使用、恢复身份或换宿主 | [功能与入口选择](operations.md#功能与入口选择)、[Table D：身份恢复](references/stable-name-recovery.md) |
+| 投递、查回执或收到通知 | [通信入口与项目目录](operations.md#通信入口与项目目录) |
+| 新建、编辑、续订或结束 Longhorizon | [目标入口与参数](operations.md#目标入口与参数)、[空闲唤醒与状态核实](operations.md#空闲唤醒与状态核实) |
 | 修改角色或工作流程模板 | [角色分工](operations.md#工作角色与用户指定分工)、[流程模板](operations.md#唯一-skill-与当前工作流程) |
-| 任务板发布、认领、交付及队列接续 | [任务板与 dashboard](operations.md#public-task-board-and-read-only-dashboard) |
+| 任务板发布、认领、交付及队列接续 | [Table A](operations.md#table-a-busy-slots-and-queued-admission)、[Table B](operations.md#table-b-resource-waits-block-approval-and-queue-continuation) |
 | 通信失败、身份恢复或显式重置 | [Recovery / Failure / Reset](operations.md#recovery-failure-reset-regression)、[当前身份与用户维护边界](references/migration-daemon.md) |
 | CEO、跨项目 master 操作 | [CEO](operations.md#全局-ceo-与项目-master)、[跨项目通信](operations.md#cross-project-master-communication) |
-| board idle 巡检、取消与 CEO 回报 | [board idle 巡检](references/board-idle-patrol.md) |
+| board idle 巡检、取消与 CEO 回报 | [Table C：board idle 巡检](references/board-idle-patrol.md) |
 | 宿主注册、AppServer 或 thread 路由 | [宿主注册](operations.md#宿主注册所需信息)、[AppServer](operations.md#appserver-runtime-registration) |
-| 安装及受影响 runtime 验收 | [构建安装](operations.md#current-version-baseline)、[验证细节](references/verification.md) |
+| 版本升级、项目迁移或显式 reset | [迁移、安装与激活](references/migration-daemon.md#choose-the-migration-owner)、[验证细节](references/verification.md) |
 | 通知、订阅、路径问题 | [通知](references/notifications.md)、[状态路径](references/state-paths.md) |
 
 源包更新可能重写本机 Skill；本次正文变更不代表 AppSDK 分发源或运行二进制已经更新。

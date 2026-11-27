@@ -18,6 +18,27 @@ daemon 的消息、任务、有效授权和关系保存在各业务 owner 的当
 读取入口。已有业务存储缺少新当前状态时返回迁移错误，不会静默置空。
 agent 不手改身份表、复制 token、reset 项目或替换旧 worker 来绕过错误。
 
+## Table D: Context recovery and current actions
+
+This table is authoritative for choosing between task inspection, identity
+inspection and context recovery. Use the narrowest row that matches current
+evidence. A binding error or explicit registration/recovery request takes
+precedence over the ordinary progress rows.
+
+| IF observed condition | actor | THEN exact CLI action | parameter source | required result / next branch |
+| --- | --- | --- | --- | --- |
+| Current binding is valid and only task progress is needed | task owner | `collab task status '<id>'` | `<id>` from the current Board or task receipt | Read the current task state and execute its authorized next action. |
+| Only current identity inspection is needed | current agent | `collab context --query` | current project and host context | Read the current mapping and snapshot. Do not register or create a recovery effect. |
+| User requested registration/recovery, identity is unknown, or a binding error is evidenced | current agent | `collab context` | original session, actual project root and host-supplied facts | Follow the result below. |
+| Public context receipt is `completed` with `result.snapshot.registered=true` and a valid name, role, and binding | current agent | Read `role_brief`, `operations` and `next_actions` from `result.snapshot` | same successful public context receipt and current identity mapping | End identity recovery and execute the applicable current action. Registration text or a pending receipt alone is insufficient. |
+| Successful context identifies an owned unfinished task with no next step | task owner, including a DSH task owner | `collab task status '<id>'` | task ID from the context snapshot or current Board | Read the current task state before choosing further work. |
+| Context returns missing facts | current agent | Query only the named fields and sources in the existing host-specific table below, then rerun `collab context` from the same session | `result.requires.fields` and `result.requires.sources` | Recovery remains incomplete until the same entry returns a successful current mapping. |
+| Context returns pending, queued or an error | current agent | Preserve the exact result and affected action | context receipt | Do not report identity recovery as completed. Continue independent work and follow the named recovery or owner path. |
+| DSH has unread messages | DSH message owner | Process native delivery; use `collab inbox` only for read-only inspection | current DSH gateway delivery | Never generate `collab recv` or `collab ack` instructions for DSH. |
+
+Do not add a recovery-only command. Do not run context recovery for a status
+read, wake or queue iteration while the current binding remains valid.
+
 ## 正常恢复
 
 在实际项目和实际宿主执行：
@@ -35,14 +56,20 @@ collab context
 以下每行以用户意图或实际回执为触发条件。任何分支都禁止 Computer Use、CUA、
 桌面或浏览器控制，也禁止用这些工具寻找可执行的终端。
 
+Rex 和 tmux 使用各自的宿主证据。Rex 会话保留原环境，直接运行无参数的
+`collab context`。不要检查 tmux pane、清除 `TMUX_PANE` 或改 AppServer scope
+来改变恢复结果。只有确认当前宿主是 tmux 且回执明确缺 pane 时，才执行 tmux 查询。
+
 | 触发条件 | 命令、参数和继续条件 |
 | --- | --- |
 | 用户要求首次注册或恢复自己的普通 peer | `collab context`，无参数。已有合法角色随当前名字恢复。若与用户指定角色不符，报告实际角色，等待明确的角色操作授权。 |
 | 用户明确授权接替 Jenny、指定名字或角色 | 用[授权表](#当前授权与角色)给 `collab context` 加 `--approve-grant '<JSON>'`。 |
 | 用户只要求查看本会话当前身份 | `collab context --query`，无其他参数。缺映射时报告原结果，等待注册指令。 |
 | `completed` 且 `result.snapshot.registered=true`，名字、角色、绑定均有效 | 从该 snapshot 读取当前身份、项目、master 和订阅，结束身份恢复。投递仍以实际消费回执验收。 |
+| 仅显式 `--project` / `--app-scope` 的 Context 成功，或下一条 `recv` 返回 `BOARD_IDENTITY_REQUIRED` | 在执行 `recv` 的同一 shell 和 cwd 运行无参数选择的 `collab context --query`。对照其项目、app scope 和当前绑定。成功显式探查另一 scope 不证明无参数 `recv` 能读取该邮箱。缺少同作用域绑定时保留原错，在该身份的合法原环境恢复。 |
 | `missing_facts` 或 `requires_identity_update` | 只读 `result.requires.fields` 和 `result.requires.sources`，按下方宿主表查对应字段。若回执仅提供旧式快照，读取 `requires_identity_update.required_fields` 和 `field_descriptions`。 |
 | `scope_required` | 从 `result.requires.sources.target_app_scope_ids` 读取候选。仅在目标 scope 由本次授权明确指定时，按 `result.requires.repair_invocation` 用 `--project`、`--app-scope` 和原授权 JSON 重试。否则交授权者选定。 |
+| 发送返回 `ADDRESS_NOT_FOUND` | 用 `collab list` 核对完整 `<project>.<name>`。地址缺失时记录目标没有当前持有者。若目标是 Jenny，从 Jenny 的原会话恢复她的绑定。自己的身份只有出现独立错误时才查 `collab context --query`；普通 peer 不代替 Jenny 注册、提权、切换 scope 或重发到别名。 |
 | `DAEMON_UNAVAILABLE`、版本读不到或出现 `invalid project context envelope` | `collab status --check`。记录 daemon 状态、版本及原错，交服务 owner。若回执仅为 `caller_context_required`，在原会话继续 `collab context`。 |
 | `IDENTITY_MAP_DECODE_FAILED`、参数冲突、空绑定、其他非成功结果 | 保存原错、原项目和受影响动作，交对应 owner。原会话不换工具猜测或重试；有新事实或修复回执后按对应行继续。 |
 | 无原会话 shell 或 `collab` 不可执行 | 报告原宿主缺少的入口或命令错误。等待原宿主恢复。 |
@@ -51,7 +78,7 @@ collab context
 
 | 已有证据 | 允许的只读检查和处理 |
 | --- | --- |
-| 当前确认为 Rex，且 context 缺 Rex server、session 或 block | 在原 block 执行 `rex whoami --json --autostart=false`。若 `rex` 不在 PATH，用[已安装的 Rex CLI 路径](../operations.md#rex-中的-codex)。用 JSON 的 `endpoint` 核对 server，当前环境的 `REX_SESSION` 和 `REX_BLOCK` 核对位置。若命令不可用、缺 `CODEX_SESSION_ID` 或返回 `REX_EXECUTION_CALLER_MISMATCH`，交当前宿主修复。`rex whoami` 只用于诊断位置。禁止改名、split、新建或切换 block。 |
+| 当前确认为 Rex，且 Context 缺位置，或仅有 `REX_BLOCK` 时回执请求 AppServer `endpoint` | 在原 block 按 [Rex 恢复命令](../operations.md#rex-中的-codex) 用官方 `whoami --json --autostart=false` 读当前位置。核对已有值，从 `session_id`、`block_id` 补齐当前 shell 的 Rex 环境并重试。缺字段、位置冲突或收到 `REX_EXECUTION_CALLER_MISMATCH` 时保留原错并交当前宿主修复。 |
 | 当前确认为 tmux，context 缺当前 pane 事实 | 仅在 `TMUX_PANE` 已由本会话注入时执行 `tmux display-message -p -t "$TMUX_PANE" '#{session_id} #{pane_id} #{pane_tty}'`。遇到 `TMUX_OBSERVATION_CAPABILITY_MISSING` 或 `TMUX_ITERM2_PANE_REQUIRED`，交宿主维护者；由 daemon 验证现有接入。 |
 | Desktop 回报 `DESKTOP_BRIDGE_SESSION_REQUIRED`、`DESKTOP_BRIDGE_THREAD_REQUIRED` 或其他 bridge 缺项 | 在当前 Desktop shell 核对 `CODEX_SESSION_ID`、`CODEX_THREAD_ID` 是否由宿主提供。缺值或能力交 Desktop 宿主补齐。标准 Desktop 由 `collab context` 自动取得 bridge 能力。 |
 | DSH context 返回 session 或 gateway 缺项 | 在原 DSH shell 核对 `DSH_SESSION_ID`。由 gateway 核实当前会话和项目，缺控制能力交 DSH 宿主。 |

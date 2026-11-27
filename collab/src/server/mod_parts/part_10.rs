@@ -83,6 +83,11 @@ fn poll_messages_with_state(
     }
     let mut ids = Vec::new();
     for message in st.inbox_of(worker_id) {
+        if !timers::goal_status_notice_current(server, st, message)
+            && notification_provably_unsubmitted(st, &message.id)
+        {
+            continue;
+        }
         if let (Some(control), Some(authorized_binding), Some(route_scope)) = (
             current_control,
             authorized_binding.as_ref(),
@@ -350,16 +355,20 @@ fn handle_task_wait(
     task_id: String,
     blocking_task_id: String,
 ) -> Resp {
-    let mut st = server.state.lock().unwrap();
-    handle_task_wait_locked(
-        server,
-        &mut st,
-        None,
-        worker_id,
-        token,
-        task_id,
-        blocking_task_id,
-    )
+    let response = {
+        let mut st = server.state.lock().unwrap();
+        handle_task_wait_locked(
+            server,
+            &mut st,
+            None,
+            worker_id,
+            token,
+            task_id,
+            blocking_task_id,
+        )
+    };
+    deliver_board_auto_notice(server, &response);
+    response
 }
 
 fn handle_task_wait_locked(
@@ -431,7 +440,44 @@ fn handle_task_wait_locked(
         escalation: "resource_owner_and_waiter_recheck".into(),
     });
     task.updated_ms = now_ms();
-    let events = [Event::TaskUpdated { task: task.clone() }];
+    let mut events = vec![Event::TaskUpdated { task: task.clone() }];
+    let mut continuation_message_id = None;
+    if let Ok(Some(route)) = server_route_scope(server, st) {
+        let loaded;
+        let resolved_control = match control {
+            Some(control) => Some(control),
+            None => {
+                match binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+                {
+                    Ok(control) => {
+                        loaded = control;
+                        Some(&loaded)
+                    }
+                    Err(_) => None,
+                }
+            }
+        };
+        if let Some(resolved_control) = resolved_control {
+            let mut continuation_state = st.clone();
+            let _ = continuation_state.apply_checked(&Event::TaskUpdated {
+                task: task.clone(),
+            });
+            let continuation = ticket_continuation_events(
+                &continuation_state,
+                resolved_control,
+                &route,
+                &task.owner,
+                &[],
+                false,
+            );
+            for event in &continuation {
+                if let Event::WakeBound { message_id, .. } = event {
+                    continuation_message_id = Some(message_id.clone());
+                }
+            }
+            events.extend(continuation);
+        }
+    }
     let commit = match control {
         Some(control) => server
             .commit_locked_checked_with_control(st, &events, control)
@@ -448,7 +494,12 @@ fn handle_task_wait_locked(
         "waiting_for": blocking_task_id,
         "responsible_actor": responsible_actor,
         "deadline_ms": task.wait.as_ref().map(|wait| wait.deadline_ms),
-        "notification": "none; subscribe for release/deadline or use explicit sendmessage",
+        "notification": if continuation_message_id.is_some() {
+            "auto-ticket-continuation"
+        } else {
+            "none; subscribe for release/deadline or use explicit sendmessage"
+        },
+        "notification_message_id": continuation_message_id,
     }))
 }
 

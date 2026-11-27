@@ -118,8 +118,8 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_review",
-            "Accept a delivered task or return it for rework with evidence.",
-            json!({"id":{"type":"string"},"accept":{"type":"boolean"},"rework":{"type":"boolean"},"evidence":{"type":"string"}}),
+            "Record independent acceptance or rework evidence against the subject revision from task status at review start.",
+            json!({"id":{"type":"string"},"accept":{"type":"boolean"},"rework":{"type":"boolean"},"evidence":{"type":"string"},"expected_subject_revision":{"type":"integer","minimum":0}}),
             &["id", "evidence"]
         ),
         tool(
@@ -154,7 +154,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_context",
-            "The single agent identity entry, also available as collab context CLI. Desktop agents may register and message through CLI without invoking an MCP tool; CLI discovers the enrolled bridge's exact current capability declaration. Agent sessionID anchors identity; native thread and socket only locate communication. Names own work; normal session continuation synchronizes all nonclosed tasks. Master and peer both split work, dispatch subagents, manage resources, verify and deliver at different goal levels. Both own their long-horizon goals and use finite patrols without waiting for wakeups to continue ready work. Restore a name with approve_grant action restore_name and requested_name, or restore_master for Jenny, with user authorization. An online other holder requires replace_confirmed. Query only reads retained progress and needs no endpoint or registration. This managed MCP entry can capture real executor metadata and publish an enrolled bridge capability; startup without genuine enrollment cannot invent a caller turn. Do not supply or guess an AppServer endpoint for Desktop. Direct AppServer clients supply current session_id, thread_id, endpoint and namespace. History cannot fill missing current communication facts. DSH reports typed gateway facts through provide.dsh and restores a unique saved identity from DSH_SESSION_ID. tmux keeps its existing adapter. Connect only to the user-managed daemon; never perform daemon/tmux lifecycle actions or return identity tokens.",
+            "The single agent identity entry, also available as collab context CLI. Desktop agents may register and message through CLI without invoking an MCP tool; CLI discovers the enrolled bridge's exact current capability declaration. Agent sessionID anchors identity; native thread and socket only locate communication. Names own work; normal session continuation synchronizes all nonclosed tasks. Jenny assigns Collab tasks. Each peer uses Codex orchestration for their own independent task, verifies the outcome, records independent review evidence and closes their own resources. Run ready work without waiting for a finite patrol. Restore a name with approve_grant action restore_name and requested_name, or restore_master for Jenny, with user authorization. An online other holder requires replace_confirmed. Query only reads retained progress and needs no endpoint or registration. This managed MCP entry can capture real executor metadata and publish an enrolled bridge capability; startup without genuine enrollment cannot invent a caller turn. Do not supply or guess an AppServer endpoint for Desktop. Direct AppServer clients supply current session_id, thread_id, endpoint and namespace. History cannot fill missing current communication facts. DSH reports typed gateway facts through provide.dsh and restores a unique saved identity from DSH_SESSION_ID. tmux keeps its existing adapter. Connect only to the user-managed daemon; never perform daemon/tmux lifecycle actions or return identity tokens.",
             json!({"operation_id":{"description":"Retained operation key. Required only with query=true.","type":"string","minLength":1},"project_scope":{"description":"Canonical project root to select for this operation.","type":"string","minLength":1},"app_scope_id":{"description":"App scope identifier to select for this operation.","type":"string","minLength":1},"approve_identity":{"description":"Exact user-supplied identity recovery approval object.","oneOf":[{"type":"object"},{"type":"string","minLength":1}]},"approve_grant":{"description":"Exact user-supplied master grant replacement approval object.","oneOf":[{"type":"object"},{"type":"string","minLength":1}]},"provide":{"description":"Current host facts. Desktop uses its managed bridge; direct AppServer uses session_id, thread_id, endpoint, namespace. DSH reports dsh with its actual gateway endpoint, runtime_id, agent_id, session_id and cwd. A unique saved DSH identity can recover with DSH_SESSION_ID alone. Query needs no facts.","oneOf":[{"type":"object","additionalProperties":false,"properties":{"session_id":{"type":"string","minLength":1},"thread_id":{"type":"string","minLength":1},"endpoint":{"type":"string","minLength":1},"namespace":{"type":"string","minLength":1},"dsh":{"type":"object","additionalProperties":false,"required":["endpoint","runtime_id","agent_id","session_id","cwd"],"properties":{"endpoint":{"type":"string","minLength":1},"runtime_id":{"type":"string","minLength":1},"agent_id":{"type":"string","minLength":1},"session_id":{"type":"string","minLength":1},"cwd":{"type":"string","minLength":1}}}}},{"type":"string","minLength":1}]},"query":{"description":"Read the durable projection with operation_id and the locally retained capability.","type":"boolean","default":false}}),
             &[]
         ),
@@ -815,6 +815,12 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             if args.get("rework").and_then(Value::as_bool).unwrap_or(false) {
                 argv.push("--rework".into());
             }
+            optional_integer_flag(
+                &mut argv,
+                args,
+                "expected_subject_revision",
+                "--expected-subject-revision",
+            )?;
             argv.extend(["--evidence".into(), required(args, "evidence")?]);
         }
         "collab_task_relocate" => {

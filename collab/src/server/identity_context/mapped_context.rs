@@ -128,7 +128,13 @@ impl ProjectRuntimeManager {
             .or(request.approval.as_ref())
             .and_then(|approval| approval["action"].as_str()),
             Some("restore_name" | "restore_master"));
-        if request.save && facts.rex.is_some() {
+        if request.save && facts.rex.is_none() {
+            return (
+                self.host.clone(),
+                Resp::err("REX_SAVE_REQUIRES_REX: explicit Save requires a Rex session and block"),
+            );
+        }
+        if request.save {
             let control = match self.binding_control_store().load() {
                 Ok(control) => control,
                 Err(error) => return (self.host.clone(), Resp::err(error)),
@@ -173,6 +179,18 @@ impl ProjectRuntimeManager {
         } else {
             None
         };
+        if request.save
+            && rex_recovery.as_ref().is_some_and(|recovery| {
+                matches!(recovery.admission, RexRecoveryAdmission::DisplacedExecution(_))
+            })
+        {
+            return (
+                self.host.clone(),
+                Resp::err(
+                    "REX_SAVE_REQUIRES_CALLER_BINDING: displaced Rex caller must register without --save first",
+                ),
+            );
+        }
         let mut facts = facts;
         facts.caller_pid = None;
         facts.pane_hint = None;

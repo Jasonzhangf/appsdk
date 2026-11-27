@@ -362,22 +362,14 @@ fn validate_ontology_clauses(manifest: &Value, rules: &[Value]) {
                 "declare the referenced three-axis model entry",
             );
         }
-        for field in [
-            "scope",
-            "scenario",
-            "trigger",
-            "state_before",
-            "state_after",
-            "owner",
-        ] {
+        for field in pipeline_runtime::governance::ONTOLOGY_CLAUSE_STRING_FIELDS
+            .iter()
+            .copied()
+            .filter(|field| !matches!(*field, "clause_id" | "axis" | "axis_id"))
+        {
             required_string(clause, field, "GUIDANCE_ONTOLOGY_CLAUSE_INVALID");
         }
-        for field in [
-            "allowed_actions",
-            "forbidden_actions",
-            "effects",
-            "evidence",
-        ] {
+        for field in pipeline_runtime::governance::ONTOLOGY_CLAUSE_ARRAY_FIELDS {
             let entries = required_array(clause, field, "GUIDANCE_ONTOLOGY_CLAUSE_INVALID");
             if entries.is_empty()
                 || entries

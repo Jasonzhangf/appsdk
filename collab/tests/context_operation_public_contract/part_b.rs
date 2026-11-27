@@ -411,7 +411,7 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
     .unwrap();
     fs::write(&manifest_path, &manifest).unwrap();
 
-    fixture.registered_context("role-name-master-register", &pane);
+    fixture.context(Some("role-name-master-register"), Some(&pane));
     let bob = fixture.run_ok(
         &[
             "context",
@@ -427,6 +427,20 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
         .to_owned();
     assert_eq!(bob_snapshot["name"], "Bob", "{bob}");
 
+    // A peer-owned task with a dependency has a tracked Execute phase.
+    let prerequisite = "role-name-master-promote-input";
+    fixture.run_ok(&["task", "register", prerequisite], Some(&pane));
+    fixture.run_ok(
+        &[
+            "task",
+            "deliver",
+            prerequisite,
+            "--no-candidate",
+            "--evidence",
+            "input ready",
+        ],
+        Some(&pane),
+    );
     let task_id = "role-name-master-promote-bob-ticket";
     fixture.run_ok(
         &[
@@ -441,6 +455,8 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
             "retain the Bob assignment and claim",
             "--test-condition",
             "public board receipts",
+            "--depends-on",
+            prerequisite,
         ],
         Some(&pane),
     );
@@ -462,7 +478,7 @@ fn role_name_master_promote_keeps_bob_ticket_and_rejects_start_as_jenny() {
         ],
         Some(&pane),
     );
-    let promoted = fixture.registered_context("role-name-master-promoted", &pane);
+    let promoted = fixture.context(Some("role-name-master-promoted"), Some(&pane));
     let promoted_snapshot = &promoted["result"]["snapshot"];
     assert_eq!(promoted_snapshot["name"], "Jenny", "{promoted}");
     assert_eq!(
@@ -1829,8 +1845,8 @@ fn current_state_restart_preserves_identity_roles_messages_and_open_tasks() {
     let saved = fs::read_to_string(&state_path).unwrap();
     assert!(!saved.contains("superseded-board-description"));
     assert!(
-        saved.contains("superseded-board-progress"),
-        "the prior board update must remain in its unread automatic notice until retention"
+        !saved.contains("superseded-board-progress"),
+        "ordinary progress belongs in the current Board view without an automatic notice"
     );
     drop(native);
 
@@ -3238,13 +3254,9 @@ fn session_recovery_no_target_peer_intent_uses_current_carrier() {
     let task_after = fixture.run_ok(&["task", "status", "peer-intent-task"], Some(&pane));
     assert_eq!(task_after["owner"], task_before["owner"]);
     assert_eq!(task_after["status"], task_before["status"]);
-    let unread = payload["result"]["snapshot"]["inbox"]["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["id"] == message["id"])
-        .expect("Bob retains unread mail");
-    assert_eq!(unread["body"], message["body"]);
+    let inbox = &payload["result"]["snapshot"]["inbox"];
+    assert!(inbox["unread"].as_u64().unwrap() > 0);
+    assert!(inbox.get("messages").is_none());
     let receipt = fixture.run_ok(&["msg", message["id"].as_str().unwrap()], Some(&pane));
     assert_eq!(receipt["state"], "pending");
     assert_eq!(receipt["body"], message["body"]);
@@ -3836,6 +3848,100 @@ fn b08_rex_first_registration_save_rejects_without_publication() {
     assert_eq!(current["host"]["profile"], facts["profile"], "{current}");
     assert_eq!(current["rex_layout"]["block_id"], facts["rex"]["block_id"], "{current}");
     assert_eq!(current["rex_layout"]["layout"]["block_id"], facts["rex"]["block_id"], "{current}");
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn b08_rex_save_rejects_non_rex_without_publication() {
+    let fixture = Fixture::without_tmux("rex-save-non-rex");
+    let host = TestAppServer::start(&fixture.root, "non-rex-save", "non-rex-thread");
+    let provide = json!({"session_id":"non-rex-save", "thread_id":"non-rex-thread",
+        "endpoint":host.endpoint(), "namespace":"codex_tui", "profile":"gcm"}).to_string();
+    let map = fixture.host_state.join("identity-map.json");
+    let before = fs::read(&map).ok();
+    let output = fixture.command(&["context", "--provide", &provide, "--save"], None);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("REX_SAVE_REQUIRES_REX"), "{output:?}");
+    assert_eq!(fs::read(map).ok(), before);
+}
+
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn rex_owned_public_call(fixture: &Fixture, args: &[&str]) -> Output {
+    let (_, codex) = fixture.ensure_agent_binaries();
+    let base = fixture.configured_command(args, None);
+    let mut command = Command::new(codex);
+    command.current_dir(&fixture.root).env_clear();
+    for (key, value) in base.get_envs() {
+        if let Some(value) = value { command.env(key, value); }
+    }
+    command.args(["-c", "echo $$ > rex-owner-pid; \"$@\"; s=$?; exit $s", "_"])
+        .arg(base.get_program()).args(base.get_args());
+    command.output().unwrap()
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn b08_rex_changed_session_successor_requires_fresh_save() {
+    let (fixture, _listener, server) = rex_layout_public_fixture("rex-successor-save");
+    let rex = json!({"server":server,
+        "session_id":"session:11111111-1111-1111-1111-111111111111",
+        "block_id":"block:22222222-2222-2222-2222-222222222222",
+        "cwd":fixture.root.to_string_lossy()});
+    let original = json!({"session_id":"rex-saved-original", "profile":"gcm", "rex":rex}).to_string();
+    fixture.context_provide("successor-seed", &serde_json::from_str(&original).unwrap(), None);
+    let saved = rex_owned_public_call(&fixture, &["context", "--provide", &original, "--save"]);
+    assert!(saved.status.success(), "{saved:?}");
+    let map_path = fixture.host_state.join("identity-map.json");
+    let saved_map: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    assert!(saved_map["slots"][0]["current"]["rex_layout"].is_object());
+    let refresh = rex_owned_public_call(&fixture, &["context", "--provide", &original]);
+    assert!(refresh.status.success(), "{refresh:?}");
+    let refreshed: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    assert_eq!(refreshed["slots"][0]["current"]["rex_layout"], saved_map["slots"][0]["current"]["rex_layout"]);
+    std::thread::sleep(Duration::from_millis(20));
+    let successor = json!({"session_id":"rex-successor", "profile":"gcm", "rex":rex}).to_string();
+    let output = rex_owned_public_call(&fixture, &["context", "--provide", &successor]);
+    assert!(output.status.success(), "{output:?}");
+    let current: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    let slot = &current["slots"][0];
+    assert_eq!(slot["current"]["binding"]["session_id"], "rex-successor", "{current}");
+    assert!(slot["current"]["rex_layout"].is_null(), "successor must Save its own association: {current}");
+    let restore = fixture.command(&["restore", "--worker", slot["current"]["binding"]["agent_id"].as_str().unwrap(),
+        "--app", "appserver-cli", "--binding-id", slot["current"]["binding"]["binding_id"].as_str().unwrap(),
+        "--generation", &slot["generation"].to_string(), "--session-label", "must-not-create", "--approve"], None);
+    assert!(!restore.status.success(), "{restore:?}");
+    assert!(!fs::read_to_string(fixture.root.join("invocations.jsonl")).unwrap().contains("session.create"));
+    let fresh = rex_owned_public_call(&fixture, &["context", "--provide", &successor, "--save"]);
+    assert!(fresh.status.success(), "{fresh:?}");
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "lifecycle-test-hooks"))]
+fn b08_rex_displaced_save_rejects_without_publication() {
+    let (fixture, _listener, server) = rex_layout_public_fixture("rex-displaced-save");
+    let original = json!({"session_id":"rex-displaced-original", "profile":"gcm", "rex":{
+        "server":server, "session_id":"session:11111111-1111-1111-1111-111111111111",
+        "block_id":"block:22222222-2222-2222-2222-222222222222",
+        "cwd":fixture.root.to_string_lossy()}}).to_string();
+    fixture.context_provide("displaced-seed", &serde_json::from_str(&original).unwrap(), None);
+    let saved = rex_owned_public_call(&fixture, &["context", "--provide", &original, "--save"]);
+    assert!(saved.status.success(), "{saved:?}");
+    let map_path = fixture.host_state.join("identity-map.json");
+    let mut control: Value = serde_json::from_slice(&fs::read(&map_path).unwrap()).unwrap();
+    control["slots"][0]["current"]["rex_execution_fence"] = json!({
+        "seconds": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600,
+        "microseconds": 0
+    });
+    let rejected_baseline = serde_json::to_vec(&control).unwrap();
+    fs::write(&map_path, &rejected_baseline).unwrap();
+    let displaced = json!({"session_id":"rex-displaced-caller", "profile":"gcm", "rex":{
+        "server":server, "session_id":"session:11111111-1111-1111-1111-111111111111",
+        "block_id":"block:22222222-2222-2222-2222-222222222222",
+        "cwd":fixture.root.to_string_lossy()}}).to_string();
+    let output = rex_owned_public_call(&fixture, &["context", "--provide", &displaced, "--save"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("REX_SAVE_REQUIRES_CALLER_BINDING"), "{output:?}");
+    assert_eq!(fs::read(map_path).unwrap(), rejected_baseline);
 }
 
 #[test]

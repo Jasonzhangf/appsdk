@@ -199,7 +199,7 @@ fn unavailable_holder_reflows_once_to_jenny_and_board_reads_do_not_write() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|message| message["subject"] == "board-changed:t8-orphan"),
+            .all(|message| message["subject"] != "board-changed:t8-orphan"),
         "{board_notice}"
     );
     let project = fixture

@@ -254,6 +254,31 @@ impl Fixture {
         self.start_pane_runner_with_interpreter(&self.tmux_socket, &pane.pane_id, "", &interpreter);
     }
 
+    pub fn show_codex_idle_prompt(&self, pane: &Pane) {
+        // The pane observation must see program output. Echo of injected
+        // input depends on the platform's tty settings.
+        let output = self.run_in_pane(
+            pane,
+            "codex-idle-prompt",
+            "printf '\\r\\n%s\\r\\n' '> fixture idle' > /dev/tty && printf 'rendered\\n'",
+        );
+        let capture = || {
+            String::from_utf8_lossy(
+                &tmux(&self.tmux_socket, &["capture-pane", "-p", "-t", &pane.pane_id]).stdout,
+            )
+            .into_owned()
+        };
+        assert!(
+            wait_until(Duration::from_secs(3), || {
+                capture().lines().any(|line| line.starts_with("> fixture idle"))
+            }),
+            "Codex fixture did not render an idle prompt: stdout={:?}, stderr={:?}, pane={}",
+            std::fs::read_to_string(output.stdout),
+            std::fs::read_to_string(output.stderr),
+            capture()
+        );
+    }
+
     fn start_pane_runner_with_interpreter(
         &self,
         socket: &Path,
@@ -938,15 +963,7 @@ impl Drop for Fixture {
                 ])
                 .output();
         }
-        if std::thread::panicking() {
-            eprintln!(
-                "preserving failed public fixture: root={} host_state={}",
-                self.root.display(),
-                self.host_state.display()
-            );
-        } else {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

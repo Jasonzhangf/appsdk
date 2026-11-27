@@ -26,6 +26,7 @@ fn target() -> MonitorTarget {
     MonitorTarget {
         endpoint: endpoint("block:22222222-2222-2222-2222-222222222222"),
         agent_session_id: "agent-session".into(),
+        agent_kind: None,
     }
 }
 
@@ -64,6 +65,7 @@ fn observation(
         process: Some(RexProcessObservation {
             pid: Some(4242),
             name: Some("python3".into()),
+            argv0: None,
             path: None,
             cwd: None,
         }),
@@ -273,13 +275,13 @@ fn status_mapping_covers_working_blocked_idle_and_unknown() {
     }
     assert_eq!(
         project_observation(&observation(vec![record("error", None)])).activity,
-        AgentActivity::Idle,
-        "a current error state must not be offered as busy"
+        AgentActivity::Error,
+        "a current error state must preserve the error"
     );
     assert_eq!(
         project_observation(&observation(vec![record("clear", None)])).activity,
-        AgentActivity::Idle,
-        "an unrecognized current state must project idle"
+        AgentActivity::Unknown,
+        "an unrecognized current state must remain unknown"
     );
     let mut failed = observation(vec![record("working", None)]);
     failed.sources = vec!["com.superlogical.terminal.program_status".into()];
@@ -291,28 +293,28 @@ fn status_mapping_covers_working_blocked_idle_and_unknown() {
 }
 
 #[test]
-fn r1_current_codex_error_projects_idle() {
+fn r1_current_codex_error_projects_error() {
     let projection = project_observation(&observation(vec![record("error", None)]));
 
     assert!(
-        projection.reason.contains("projection=idle"),
-        "expected a current error state to project idle, got {}",
+        projection.reason.contains("projection=error"),
+        "expected a current error state to project error, got {}",
         projection.reason
     );
-    assert_eq!(projection.activity, AgentActivity::Idle);
+    assert_eq!(projection.activity, AgentActivity::Error);
     assert_eq!(projection.presence, AgentPresence::Online);
 }
 
 #[test]
-fn r1_unrecognized_current_codex_state_projects_idle() {
+fn r1_unrecognized_current_codex_state_projects_unknown() {
     let projection = project_observation(&observation(vec![record("future_state", None)]));
 
     assert!(
-        projection.reason.contains("projection=idle"),
-        "an unrecognized Rex state must not become busy, got {}",
+        projection.reason.contains("projection=unknown"),
+        "expected an unrecognized Rex state to remain unknown, got {}",
         projection.reason
     );
-    assert_eq!(projection.activity, AgentActivity::Idle);
+    assert_eq!(projection.activity, AgentActivity::Unknown);
     assert_eq!(projection.presence, AgentPresence::Online);
 }
 
@@ -394,8 +396,53 @@ fn r1_current_codex_working_submission_is_online_and_busy() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rex_native_io_can_finish_while_monitor_waits_for_state() {
+    let target = target();
+    let (server, root) = rex_server(&target);
+    let (locked, lock_ready) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let state_owner = {
+        let server = Arc::clone(&server);
+        std::thread::spawn(move || {
+            let _guard = server.state.lock().unwrap();
+            locked.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(10))
+        })
+    };
+    lock_ready.await.unwrap();
+    let (started, monitor_started) = tokio::sync::oneshot::channel();
+    let monitor = tokio::spawn(async move {
+        started.send(()).unwrap();
+        publish_projection(
+            &server,
+            "worker",
+            &target,
+            project_observation(&observation(vec![record("working", None)])),
+            None,
+        )
+        .await
+    });
+    monitor_started.await.unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::spawn(async {
+            tokio::process::Command::new("printf")
+                .arg("input")
+                .output()
+                .await
+        }),
+    )
+    .await;
+    let released_while_locked = release.send(()).is_ok();
+    assert!(state_owner.join().unwrap().is_ok() && released_while_locked);
+    assert_eq!(output.unwrap().unwrap().unwrap().stdout, b"input");
+    assert!(monitor.await.unwrap());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
-fn r1_unrecognized_current_codex_state_submits_online_idle() {
+fn r1_unrecognized_current_codex_state_submits_online_unknown() {
     let (server, root) = rex_server(&target());
     let projection = project_observation(&observation(vec![record("future_state", None)]));
 
@@ -418,7 +465,7 @@ fn r1_unrecognized_current_codex_state_submits_online_idle() {
         state
             .agent_activity(&scope, "worker")
             .map(|record| record.activity),
-        Some(AgentActivity::Idle)
+        Some(AgentActivity::Unknown)
     );
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
@@ -520,6 +567,7 @@ fn incomplete_foreground_identity_never_projects_busy_or_waiting() {
         observation.process = Some(RexProcessObservation {
             pid: foreground.0,
             name: foreground.1.map(str::to_owned),
+            argv0: None,
             path: None,
             cwd: None,
         });
@@ -533,6 +581,7 @@ fn incomplete_foreground_identity_never_projects_busy_or_waiting() {
     blocked.process = Some(RexProcessObservation {
         pid: Some(0),
         name: Some("python3".into()),
+        argv0: None,
         path: None,
         cwd: None,
     });
@@ -625,6 +674,7 @@ async fn reconcile_replaces_old_binding_and_reaps_removed_binding() {
     let (cancel_b, _) = tokio::sync::watch::channel(false);
     let task_a = RexTask {
         target: target(),
+        sampled: Arc::default(),
         cancel: cancel_a,
         task: tokio::spawn(async {}),
     };
@@ -632,6 +682,7 @@ async fn reconcile_replaces_old_binding_and_reaps_removed_binding() {
     other.agent_session_id = "other-session".into();
     let task_b = RexTask {
         target: other,
+        sampled: Arc::default(),
         cancel: cancel_b,
         task: tokio::spawn(async {}),
     };
@@ -648,6 +699,7 @@ async fn reconcile_replaces_old_binding_and_reaps_removed_binding() {
         let (cancel, _) = tokio::sync::watch::channel(false);
         RexTask {
             target: target(),
+            sampled: Arc::default(),
             cancel,
             task: tokio::spawn(async {}),
         }
@@ -679,6 +731,7 @@ async fn reconcile_reconnects_a_finished_current_task() {
     }
     let task_a = RexTask {
         target: target(),
+        sampled: Arc::default(),
         cancel: cancel_a,
         task: finished,
     };
@@ -692,6 +745,7 @@ async fn reconcile_reconnects_a_finished_current_task() {
         let (cancel, _) = tokio::sync::watch::channel(false);
         RexTask {
             target: target(),
+            sampled: Arc::default(),
             cancel,
             task: tokio::spawn(async {}),
         }
@@ -703,4 +757,321 @@ async fn reconcile_reconnects_a_finished_current_task() {
     );
     assert_eq!(spawned, 1, "a still-current worker must be reconnected");
     assert_eq!(table.len(), 1);
+}
+
+#[test]
+fn antigravity_osc7501_projects_states_auto_updated_argv0_and_cross_agent_isolation() {
+    use crate::host_runtime::AgentKind;
+
+    let make_agy_obs =
+        |name: &str, argv0: Option<&str>, state: &str, app: &str, owner_name: &str| {
+            crate::client::adapters::rex::RexObservation {
+                endpoint: endpoint("block:22222222-2222-2222-2222-222222222222"),
+                process: Some(RexProcessObservation {
+                    pid: Some(56417),
+                    name: Some(name.into()),
+                    argv0: argv0.map(str::to_owned),
+                    path: Some(format!("/Users/fanzhang/.local/bin/{name}")),
+                    cwd: Some("/tmp".into()),
+                }),
+                pwd: Some("/tmp".into()),
+                program_status: vec![RexProgramStatusRecord {
+                    id: Some(String::new()),
+                    state: Some(state.into()),
+                    kind: None,
+                    app: Some(app.into()),
+                    msg: None,
+                    updated_at: Some("2026-11-27T00:47:17-08:00".into()),
+                    owner: Some(RexProgramStatusOwner {
+                        pid: 56417,
+                        name: owner_name.into(),
+                    }),
+                }],
+                sources: vec![
+                    "com.superlogical.terminal.process".into(),
+                    "com.superlogical.terminal.program_status".into(),
+                ],
+                source_errors: Vec::new(),
+                gap_possible: false,
+            }
+        };
+
+    for (state, expected_activity) in [
+        ("working", AgentActivity::Busy),
+        ("blocked", AgentActivity::WaitingUser),
+        ("idle", AgentActivity::Idle),
+        ("done", AgentActivity::Idle),
+        ("error", AgentActivity::Error),
+    ] {
+        let obs = make_agy_obs("agy", Some("agy"), state, "antigravity", "agy");
+        let projection = project_observation_for(&obs, Some(AgentKind::Antigravity));
+        assert_eq!(projection.presence, AgentPresence::Online);
+        assert_eq!(projection.activity, expected_activity, "state={state}");
+    }
+
+    // Live auto-updated binary keeps `.old` name while `argv0` and `program_status.owner.name` stay `agy`.
+    let auto_updated = make_agy_obs(
+        "agy.1795769233322723000.old",
+        Some("agy"),
+        "idle",
+        "antigravity",
+        "agy",
+    );
+    let updated_projection = project_observation_for(&auto_updated, Some(AgentKind::Antigravity));
+    assert_eq!(updated_projection.presence, AgentPresence::Online);
+    assert_eq!(updated_projection.activity, AgentActivity::Idle);
+
+    // Cross-agent isolation: a Codex working record must not project an Antigravity worker as online/busy.
+    let wrong_app = make_agy_obs("codex", Some("codex"), "working", "codex", "codex");
+    let isolated = project_observation_for(&wrong_app, Some(AgentKind::Antigravity));
+    assert_eq!(isolated.presence, AgentPresence::Unknown);
+    assert_eq!(isolated.activity, AgentActivity::Unknown);
+
+    // Process exit detection works for agy returning to shell.
+    let mut execution = None;
+    assert_eq!(
+        project_observation_with_execution_for(
+            &auto_updated,
+            Some(AgentKind::Antigravity),
+            &mut execution,
+            &|_| panic!("online agy must not probe exit"),
+        )
+        .presence,
+        AgentPresence::Online
+    );
+    let mut shell = observation(Vec::new());
+    shell.process.as_mut().unwrap().pid = Some(100);
+    shell.process.as_mut().unwrap().name = Some("zsh".into());
+    assert_eq!(
+        project_observation_with_execution_for(
+            &shell,
+            Some(AgentKind::Antigravity),
+            &mut execution,
+            &|pid| {
+                assert_eq!(pid, 56417);
+                Ok(false)
+            },
+        )
+        .presence,
+        AgentPresence::Offline
+    );
+}
+
+#[test]
+fn submit_activity_persists_rex_execution_and_status_when_target_carries_agent_kind() {
+    for kind in [
+        crate::host_runtime::AgentKind::Codex,
+        crate::host_runtime::AgentKind::Antigravity,
+    ] {
+        let mut monitor_target = target();
+        monitor_target.agent_kind = Some(kind);
+        let (server, root) = rex_server(&monitor_target);
+        let owner = RexProgramStatusOwner {
+            pid: 56417,
+            name: match kind {
+                crate::host_runtime::AgentKind::Codex => "codex",
+                crate::host_runtime::AgentKind::Antigravity => "agy",
+            }
+            .into(),
+        };
+        let submitted = submit_activity_with_execution(
+            &server,
+            "worker",
+            &monitor_target,
+            RexProjection {
+                presence: AgentPresence::Online,
+                activity: AgentActivity::Idle,
+                reason: "native agent status".into(),
+            },
+            Some(&owner),
+        );
+        assert!(submitted, "kind={kind:?} must submit activity");
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state
+                .rex_executions
+                .get("worker")
+                .map(|record| &record.owner),
+            Some(&owner)
+        );
+        let scope = crate::server::GlobalState::canonical_project_scope(&server.root)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        assert_eq!(
+            state
+                .agent_presence
+                .get(&scope)
+                .and_then(|workers| workers.get("worker"))
+                .map(|record| record.presence),
+            Some(AgentPresence::Online)
+        );
+        assert_eq!(
+            state
+                .agent_activity
+                .get(&scope)
+                .and_then(|workers| workers.get("worker"))
+                .map(|record| record.activity),
+            Some(AgentActivity::Idle)
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn submit_activity_tracks_and_resets_idle_since_ms_for_rex_online_idle() {
+    let monitor_target = target();
+    let (server, root) = rex_server(&monitor_target);
+    let scope = crate::server::GlobalState::canonical_project_scope(&server.root)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    let owner = RexProgramStatusOwner {
+        pid: 4242,
+        name: "codex".into(),
+    };
+    let pre_restart_idle = AgentActivityRecord {
+        project_scope: scope.clone(),
+        worker_id: "worker".into(),
+        session_id: monitor_target.agent_session_id.clone(),
+        activity: AgentActivity::Idle,
+        background: false,
+        reason: "stale pre-restart".into(),
+        observed_ms: 1000,
+        idle_since_ms: Some(1000),
+    };
+    {
+        let mut state = server.state.lock().unwrap();
+        state.rex_executions.insert(
+            "worker".into(),
+            ObservedRexExecution {
+                endpoint: monitor_target.endpoint.clone(),
+                agent_session_id: monitor_target.agent_session_id.clone(),
+                owner: owner.clone(),
+            },
+        );
+        state
+            .agent_activity
+            .entry(scope.clone())
+            .or_default()
+            .insert("worker".into(), pre_restart_idle);
+    }
+
+    assert!(submit_activity_with_execution(
+        &server,
+        "worker",
+        &monitor_target,
+        RexProjection {
+            presence: AgentPresence::Online,
+            activity: AgentActivity::Idle,
+            reason: "first sample".into(),
+        },
+        Some(&owner),
+    ));
+    let first_start = server
+        .state
+        .lock()
+        .unwrap()
+        .agent_activity
+        .get(&scope)
+        .and_then(|workers| workers.get("worker"))
+        .and_then(|record| record.idle_since_ms)
+        .expect("first online-idle sample sets idle_since_ms");
+    assert!(first_start > 1000, "first sample must not reuse pre-restart start");
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(submit_activity_with_execution(
+        &server,
+        "worker",
+        &monitor_target,
+        RexProjection {
+            presence: AgentPresence::Online,
+            activity: AgentActivity::Idle,
+            reason: "second sample".into(),
+        },
+        Some(&owner),
+    ));
+    let continued_start = server
+        .state
+        .lock()
+        .unwrap()
+        .agent_activity
+        .get(&scope)
+        .and_then(|workers| workers.get("worker"))
+        .and_then(|record| record.idle_since_ms);
+    assert_eq!(continued_start, Some(first_start));
+
+    assert!(submit_activity_with_execution(
+        &server,
+        "worker",
+        &monitor_target,
+        RexProjection {
+            presence: AgentPresence::Online,
+            activity: AgentActivity::Busy,
+            reason: "working".into(),
+        },
+        Some(&owner),
+    ));
+    let busy_start = server
+        .state
+        .lock()
+        .unwrap()
+        .agent_activity
+        .get(&scope)
+        .and_then(|workers| workers.get("worker"))
+        .and_then(|record| record.idle_since_ms);
+    assert_eq!(busy_start, None);
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(submit_activity_with_execution(
+        &server,
+        "worker",
+        &monitor_target,
+        RexProjection {
+            presence: AgentPresence::Online,
+            activity: AgentActivity::Idle,
+            reason: "back to idle".into(),
+        },
+        Some(&owner),
+    ));
+    let reset_start = server
+        .state
+        .lock()
+        .unwrap()
+        .agent_activity
+        .get(&scope)
+        .and_then(|workers| workers.get("worker"))
+        .and_then(|record| record.idle_since_ms)
+        .expect("fresh episode after Busy");
+    assert!(reset_start > first_start);
+
+    let new_owner = RexProgramStatusOwner {
+        pid: 4243,
+        name: "codex".into(),
+    };
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(submit_activity_with_execution(
+        &server,
+        "worker",
+        &monitor_target,
+        RexProjection {
+            presence: AgentPresence::Online,
+            activity: AgentActivity::Idle,
+            reason: "restarted owner".into(),
+        },
+        Some(&new_owner),
+    ));
+    let restarted_start = server
+        .state
+        .lock()
+        .unwrap()
+        .agent_activity
+        .get(&scope)
+        .and_then(|workers| workers.get("worker"))
+        .and_then(|record| record.idle_since_ms)
+        .expect("fresh episode after owner pid change");
+    assert!(restarted_start > reset_start);
+
+    std::fs::remove_dir_all(root).unwrap();
 }

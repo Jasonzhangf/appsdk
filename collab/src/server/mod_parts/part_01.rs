@@ -560,7 +560,7 @@ pub(crate) enum NotificationAttempt {
     StaleAccepted,
     ReceiptUnconfirmed(String),
     Consumed,
-    Deferred(Option<String>),
+    Deferred,
     NotAttempted(String),
     Rejected(String),
 }

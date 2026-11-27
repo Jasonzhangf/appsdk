@@ -919,14 +919,7 @@ fn attempt_tmux_notification_with_retry(
     let mut register_guard = match server.register_gate.try_lock() {
         Ok(guard) => Some(guard),
         Err(std::sync::TryLockError::WouldBlock) => {
-            let code = if rex {
-                "REX_BINDING_PUBLICATION_BUSY"
-            } else {
-                "BINDING_PUBLICATION_BUSY"
-            };
-            return NotificationAttempt::Deferred(Some(format!(
-                "{code}: retry after current binding publication"
-            )));
+            return NotificationAttempt::Deferred;
         }
         Err(std::sync::TryLockError::Poisoned(error)) => {
             return NotificationAttempt::Rejected(format!(
@@ -963,7 +956,7 @@ fn attempt_tmux_notification_with_retry(
         .as_ref()
         != Some(transport)
     {
-        return NotificationAttempt::Deferred(None);
+        return NotificationAttempt::Deferred;
     }
     if !state.scheduler_message_deliverable(message_id) {
         return NotificationAttempt::NotAttempted("scheduler admission is not deliverable".into());
@@ -1280,7 +1273,7 @@ fn attempt_tmux_notification_with_retry(
         .unwrap_or(0);
     if now.saturating_sub(window_start_ms) < delay || now.saturating_sub(last_attempt) < delay {
         if queued_tmux {
-            return NotificationAttempt::Deferred(None);
+            return NotificationAttempt::Deferred;
         }
         return NotificationAttempt::NotAttempted(
             "notification delivery window has not elapsed".into(),
@@ -1455,7 +1448,7 @@ fn attempt_tmux_notification_with_retry(
                 );
             }
             if !seed_was_submitted {
-                NotificationAttempt::Deferred(None)
+                NotificationAttempt::Deferred
             } else if seed_is_current {
                 NotificationAttempt::Accepted
             } else {
@@ -1522,7 +1515,7 @@ fn attempt_tmux_notification_with_retry(
             } else if seed_was_submitted {
                 NotificationAttempt::Rejected(error)
             } else {
-                NotificationAttempt::Deferred(None)
+                NotificationAttempt::Deferred
             }
         }
     }
@@ -2060,13 +2053,10 @@ fn notification_send_response(
             data["repair_required"] = json!(false);
             Resp::data(data)
         }
-        NotificationAttempt::Deferred(reason) => {
+        NotificationAttempt::Deferred => {
             data["durable"] = json!(true);
             data["notification"] = json!("queued");
             data["consumed"] = json!(false);
-            if let Some(reason) = reason {
-                data["notification_error"] = json!(reason);
-            }
             Resp::data(data)
         }
         NotificationAttempt::Accepted => {

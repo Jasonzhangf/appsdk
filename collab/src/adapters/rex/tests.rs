@@ -7,23 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-const ONLINE_AGENT_PREFLIGHT: [&str; 4] = [
+const SUBMISSION_CALLS: [&str; 7] = [
     "server.status",
     "com.superlogical.terminal.process",
-    "com.superlogical.terminal.pwd",
     "com.superlogical.terminal.program_status",
-];
-const SUBMISSION_CALLS: [&str; 11] = [
-    ONLINE_AGENT_PREFLIGHT[0],
-    ONLINE_AGENT_PREFLIGHT[1],
-    ONLINE_AGENT_PREFLIGHT[2],
-    ONLINE_AGENT_PREFLIGHT[3],
-    "server.status",
     "com.superlogical.terminal.write",
-    ONLINE_AGENT_PREFLIGHT[0],
-    ONLINE_AGENT_PREFLIGHT[1],
-    ONLINE_AGENT_PREFLIGHT[2],
-    ONLINE_AGENT_PREFLIGHT[3],
+    "com.superlogical.terminal.process",
+    "com.superlogical.terminal.program_status",
     "send-key",
 ];
 
@@ -140,6 +130,7 @@ impl Drop for TestEnv {
         std::env::remove_var("COLLAB_TEST_REX_OWNER_NAME");
         std::env::remove_var("COLLAB_TEST_REX_OWNER_ARGV0");
         std::env::remove_var("COLLAB_TEST_REX_OWNER_APP");
+        std::env::remove_var("COLLAB_TEST_REX_OWNER_STATE");
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -202,18 +193,18 @@ async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
         calls.iter().map(method).collect::<Vec<_>>(),
         SUBMISSION_CALLS
     );
-    let write_ns = calls[5]["monotonic_ns"].as_u64().unwrap();
+    let writes: Vec<&Value> = calls
+        .iter()
+        .filter(|call| method(call) == "com.superlogical.terminal.write")
+        .collect();
+    assert_eq!(writes.len(), 1, "notification must not retry the write");
+    let write_ns = writes[0]["monotonic_ns"].as_u64().unwrap();
     let enter_ns = calls.last().unwrap()["monotonic_ns"].as_u64().unwrap();
     assert!(
         Duration::from_nanos(enter_ns - write_ns) >= Duration::from_millis(100),
         "Enter arrived only {} ms after the text write",
         (enter_ns - write_ns) / 1_000_000
     );
-    let writes: Vec<&Value> = calls
-        .iter()
-        .filter(|call| method(call) == "com.superlogical.terminal.write")
-        .collect();
-    assert_eq!(writes.len(), 1, "notification must not retry the write");
     let request: Value =
         serde_json::from_str(writes[0]["stdin"].as_str().unwrap()).expect("write JSON");
     assert_eq!(request["args"]["data"], text);
@@ -274,6 +265,33 @@ async fn notify_refuses_input_when_the_rex_block_has_no_current_agent() {
         }),
         "an offline Agent must receive zero terminal input: {calls:?}"
     );
+}
+
+#[tokio::test]
+async fn notify_refuses_input_when_foreground_agent_is_blocked_or_error() {
+    let _guard = fixture_guard().await;
+    for state in ["blocked", "error"] {
+        let env = TestEnv::online_agent("normal");
+        std::env::set_var("COLLAB_TEST_REX_OWNER_STATE", state);
+        let error = notify(&selected_transport(), "must not enter", Some("immediate"))
+            .await
+            .expect_err("blocked or errored foreground agent must not receive input");
+        assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
+        assert_eq!(error.stage, RexInputStage::BeforeWrite);
+        assert!(error.detail.contains("REX_EXECUTION_UNVERIFIED"));
+        assert!(error.detail.contains("refusing terminal input"));
+        assert!(error.detail.contains(state));
+        let calls = env.calls();
+        assert!(
+            !calls.iter().any(|call| {
+                matches!(
+                    method(call).as_str(),
+                    "com.superlogical.terminal.write" | "send-key"
+                )
+            }),
+            "blocked/errored Agent ({state}) must receive zero terminal input: {calls:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -636,14 +654,7 @@ async fn write_unknown_and_short_write_never_enter() {
         let calls = env.calls();
         assert_eq!(
             calls.iter().map(method).collect::<Vec<_>>(),
-            [
-                ONLINE_AGENT_PREFLIGHT[0],
-                ONLINE_AGENT_PREFLIGHT[1],
-                ONLINE_AGENT_PREFLIGHT[2],
-                ONLINE_AGENT_PREFLIGHT[3],
-                "server.status",
-                "com.superlogical.terminal.write",
-            ]
+            &SUBMISSION_CALLS[..4]
         );
     }
 }
@@ -661,14 +672,7 @@ async fn typed_native_rejections_keep_exact_code() {
         assert_eq!(error.stage, RexInputStage::BeforeWrite);
         assert_eq!(
             env.calls().iter().map(method).collect::<Vec<_>>(),
-            [
-                ONLINE_AGENT_PREFLIGHT[0],
-                ONLINE_AGENT_PREFLIGHT[1],
-                ONLINE_AGENT_PREFLIGHT[2],
-                ONLINE_AGENT_PREFLIGHT[3],
-                "server.status",
-                "com.superlogical.terminal.write",
-            ]
+            &SUBMISSION_CALLS[..4]
         );
     }
     {

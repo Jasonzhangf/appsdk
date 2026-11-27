@@ -246,23 +246,20 @@ pub struct RexObservation {
 }
 
 impl RexObservation {
-    /// Extract the one foreground TUI agent owner only when all current terminal
+    /// Extract the one foreground TUI agent owner only when all requested terminal
     /// sources are complete and the program-status owner matches foreground.
-    pub(crate) fn current_foreground_agent_owner(
+    fn current_foreground_agent_record(
         &self,
         expected: Option<crate::host_runtime::AgentKind>,
-    ) -> Result<(crate::host_runtime::AgentKind, RexProgramStatusOwner), String> {
+        required_sources: &[&str],
+    ) -> Result<(crate::host_runtime::AgentKind, &RexProgramStatusRecord, RexProgramStatusOwner), String> {
         if self.gap_possible || !self.source_errors.is_empty() {
             return Err(format!(
                 "REX_EXECUTION_UNVERIFIED: current Rex observation has source gaps: {}",
                 self.source_errors.join("; ")
             ));
         }
-        for required in [
-            "com.superlogical.terminal.process",
-            "com.superlogical.terminal.pwd",
-            "com.superlogical.terminal.program_status",
-        ] {
+        for required in required_sources {
             if !self.sources.iter().any(|source| source == required) {
                 return Err(format!(
                     "REX_EXECUTION_UNVERIFIED: current Rex observation is missing {required}"
@@ -308,14 +305,53 @@ impl RexObservation {
                         .as_ref()
                         .is_some_and(|owner| process.matches_owner(owner))
             })
-            .and_then(|record| record.owner.clone())
-            .map(|owner| (kind, owner))
+            .and_then(|record| record.owner.clone().map(|owner| (kind, record, owner)))
             .ok_or_else(|| {
                 format!(
                     "REX_EXECUTION_UNVERIFIED: {} program_status owner does not match the Rex foreground",
                     kind.display_name()
                 )
             })
+    }
+
+    pub(crate) fn current_foreground_agent_owner(
+        &self,
+        expected: Option<crate::host_runtime::AgentKind>,
+    ) -> Result<(crate::host_runtime::AgentKind, RexProgramStatusOwner), String> {
+        let (kind, _, owner) = self.current_foreground_agent_record(
+            expected,
+            &[
+                "com.superlogical.terminal.process",
+                "com.superlogical.terminal.pwd",
+                "com.superlogical.terminal.program_status",
+            ],
+        )?;
+        Ok((kind, owner))
+    }
+
+    fn deliverable_foreground_agent_owner(
+        &self,
+        expected: Option<crate::host_runtime::AgentKind>,
+    ) -> Result<(crate::host_runtime::AgentKind, RexProgramStatusOwner), String> {
+        let (kind, record, owner) = self.current_foreground_agent_record(
+            expected,
+            &[
+                "com.superlogical.terminal.process",
+                "com.superlogical.terminal.program_status",
+            ],
+        )?;
+        let normalized_state = record
+            .state
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase);
+        if let Some(state @ ("blocked" | "error")) = normalized_state.as_deref() {
+            return Err(format!(
+                "REX_EXECUTION_UNVERIFIED: {} foreground state is {state}; refusing terminal input",
+                kind.display_name()
+            ));
+        }
+        Ok((kind, owner))
     }
 }
 
@@ -1177,15 +1213,18 @@ async fn verify_service_until(endpoint: &RexEndpoint, deadline: Instant) -> Resu
 }
 
 pub async fn write_text(endpoint: &RexEndpoint, text: &str) -> Result<RexWriteReceipt, RexError> {
-    write_text_until(endpoint, text, Instant::now() + default_timeout()?).await
+    write_text_inner(endpoint, text, Instant::now() + default_timeout()?, true).await
 }
 
-async fn write_text_until(
+async fn write_text_inner(
     endpoint: &RexEndpoint,
     text: &str,
     deadline: Instant,
+    verify_service: bool,
 ) -> Result<RexWriteReceipt, RexError> {
-    verify_service_until(endpoint, deadline).await?;
+    if verify_service {
+        verify_service_until(endpoint, deadline).await?;
+    }
     let request = json!({
         "session_id": endpoint.session_id,
         "block_id": endpoint.block_id,
@@ -1248,12 +1287,18 @@ async fn send_enter_until(
             "Rex operation deadline elapsed while waiting to submit the queued text",
         ));
     }
-    let owner = observe_current_until(endpoint, deadline)
-        .await
-        .map_err(|error| {
-            RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string())
-        })?
-        .current_foreground_agent_owner(Some(expected_kind));
+    let owner = observe_methods_until(
+        endpoint,
+        deadline,
+        &[
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.program_status",
+        ],
+        false,
+    )
+    .await
+    .map_err(|error| RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string()))?
+    .deliverable_foreground_agent_owner(Some(expected_kind));
     if owner.as_ref().ok().map(|(_, owner)| owner) != Some(expected_owner) {
         return Err(RexError::unknown(
             "send_enter",
@@ -1339,17 +1384,34 @@ async fn observe_current_until(
     endpoint: &RexEndpoint,
     deadline: Instant,
 ) -> Result<RexObservation, RexError> {
-    verify_service_until(endpoint, deadline).await?;
+    observe_methods_until(
+        endpoint,
+        deadline,
+        &[
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.pwd",
+            "com.superlogical.terminal.program_status",
+        ],
+        true,
+    )
+    .await
+}
+
+async fn observe_methods_until(
+    endpoint: &RexEndpoint,
+    deadline: Instant,
+    methods: &[&str],
+    verify_service: bool,
+) -> Result<RexObservation, RexError> {
+    if verify_service {
+        verify_service_until(endpoint, deadline).await?;
+    }
     let mut sources = Vec::new();
     let mut source_errors = Vec::new();
     let mut process = None;
     let mut pwd = None;
     let mut program_status = Vec::new();
-    for method in [
-        "com.superlogical.terminal.process",
-        "com.superlogical.terminal.pwd",
-        "com.superlogical.terminal.program_status",
-    ] {
+    for &method in methods {
         let call = run_cli(
             "observe_current",
             Path::new(&official_cli_path()),
@@ -1500,9 +1562,18 @@ pub(crate) async fn notify_for_agent(
             "selected transport carries no verified Rex endpoint",
         )
     })?;
-    let observation = observe_current_until(endpoint, deadline).await?;
+    let observation = observe_methods_until(
+        endpoint,
+        deadline,
+        &[
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.program_status",
+        ],
+        true,
+    )
+    .await?;
     let (kind, owner) = observation
-        .current_foreground_agent_owner(expected_kind)
+        .deliverable_foreground_agent_owner(expected_kind)
         .map_err(|error| {
             RexError::known_not_delivered(
                 "notify",
@@ -1510,7 +1581,7 @@ pub(crate) async fn notify_for_agent(
                 format!("RECIPIENT_NOT_ONLINE: {error}"),
             )
         })?;
-    let receipt = write_text_until(endpoint, text, deadline).await?;
+    let receipt = write_text_inner(endpoint, text, deadline, false).await?;
     let text_stage = RexInputStage::WriteQueued {
         bytes_written: receipt.bytes_written,
     };

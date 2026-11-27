@@ -379,14 +379,15 @@ def program_status() -> None:
         app = os.environ.get("COLLAB_TEST_REX_OWNER_APP") or (
             "antigravity" if owner_name in ("agy", "antigravity") else "codex"
         )
+        state = os.environ.get("COLLAB_TEST_REX_OWNER_STATE") or "working"
         emit(
             {
                 "records": [
                     {
                         "id": "agent",
-                        "state": "working",
+                        "state": state,
                         "app": app,
-                        "msg": "busy",
+                        "msg": state,
                         "owner": {"pid": pid, "name": owner_name},
                         "updated_at": "2026-11-12T00:00:00Z",
                     }

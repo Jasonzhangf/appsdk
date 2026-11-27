@@ -405,13 +405,18 @@ impl ProjectRuntimeManager {
         operation(&control, &mut state)
     }
 
-    fn tick_name_stewardship(&self, runtime: &Server, now: i64) -> Result<(), String> {
+    fn tick_name_stewardship(&self, runtime: &Arc<Server>, now: i64) -> Result<(), String> {
         let wakes = self.with_current_state(runtime, |control, state| {
             name_stewardship::tick_locked(runtime, state, control, now)
         })?;
         for (id, subscription) in wakes {
             if let Some(subscription) = subscription {
-                let _ = attempt_notification_detailed_with_at(runtime, &id, &subscription, now);
+                let _ = attempt_notification_detailed_with_rex_recovery(
+                    runtime,
+                    &id,
+                    &subscription,
+                    now,
+                );
             }
         }
         Ok(())

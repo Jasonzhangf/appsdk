@@ -1107,9 +1107,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(server::run(scope))
         }
-        Cmd::Up => {
-            let _terminal = main_maintenance::user_terminal()?;
-            let project_root = scope::lifecycle_project_root()?;
+        Cmd::Up { restart } => {
+            let project_root = scope::project_root_for_up()?;
             let host_paths = scope::HostPaths::resolve()?;
             if !project_root.join(".agent-collab").is_dir() {
                 scope::init(&project_root)?;
@@ -1121,10 +1120,31 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let sock = host_paths.socket_path();
             // A daemon whose process is alive but whose socket does not answer
             // would otherwise block both the supervised and the detached start
-            // with DAEMON_UNKNOWN. `up` is the user restart entry, so it stops
-            // that verified recorded daemon first and then starts normally.
-            let replaced = client::replace_unresponsive_daemon(&sock, &host_paths.pid_path())?;
-            let was_running = client::alive(&sock);
+            // with DAEMON_UNKNOWN. `up` is the restart entry, so it stops that
+            // verified recorded daemon first and then starts normally.
+            let mut replaced = client::replace_unresponsive_daemon(&sock, &host_paths.pid_path())?;
+            let before_ping = client::call_with_deadline::<serde_json::Value>(
+                &sock,
+                &Req::Ping,
+                None,
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .ok();
+            let was_running = before_ping.is_some();
+            let version_differs = before_ping
+                .as_ref()
+                .and_then(|ping| ping.get("daemon_version"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|version| version != env!("COLLAB_VERSION"));
+            let launchd_reload = main_autostart::launchd_job_loaded();
+            if was_running && (restart || version_differs) && !launchd_reload {
+                // In detached mode or when migrating a detached daemon, stop
+                // the verified held daemon only on explicit `--restart` or
+                // binary version mismatch; plain `up` keeps healthy detached
+                // same-version daemons untouched.
+                replaced = client::replace_running_daemon(&sock, &host_paths.pid_path())?;
+            }
+            let wait_was_running = was_running && launchd_reload && !restart && !version_differs;
             // Bind the supervised daemon to this project, then let launchd own
             // the start. Loading the agent before spawning anything is what
             // makes the supervisor own the daemon: a detached `serve` spawned
@@ -1139,7 +1159,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 Ok(path) => supervised_up_started(
                     path,
                     &sock,
-                    was_running,
+                    wait_was_running,
                     wait_for_daemon(&sock, std::time::Duration::from_secs(5)),
                 )?,
                 Err(error) => {
@@ -1168,11 +1188,14 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 None,
                 std::time::Instant::now() + std::time::Duration::from_secs(5),
             )?;
+            let restarted = replaced.is_some()
+                || (was_running && (restart || version_differs || launchd_reload));
             out(&json!({
                 "ok": true,
                 "server": sock,
                 "daemon_version": ping.get("daemon_version").and_then(serde_json::Value::as_str),
                 "started": started,
+                "restarted": restarted,
                 "supervised": supervised,
                 "replaced": replaced.map(|daemon| json!({
                     "pid": daemon.pid,

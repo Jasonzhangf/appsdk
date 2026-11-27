@@ -796,9 +796,7 @@ verified pair. A path that cannot prove that identity is a collision: preserve
 it and report the exact path. Never delete `~/.local/bin/collab*` or
 `~/.local/lib/collab/*` merely because the pathname matches.
 
-Installing a binary does not replace the running user-managed daemon. Agents
-never perform its lifecycle actions or request maintenance credentials. After
-user-managed activation, verify the available service:
+Installing a binary does not replace the running daemon automatically. Run `collab up` (or `collab up --restart` when forcing replacement of a healthy same-version detached daemon) from the project root (or a registered worktree) to start or restart the daemon onto the newly installed binary, then verify the live service:
 
 ```sh
 collab context

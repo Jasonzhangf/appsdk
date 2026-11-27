@@ -84,13 +84,7 @@ read `~/.cargo/bin/collab --version` and `~/.cargo/bin/collab status` to confirm
 the installed CLI and current `daemon_version`. Other installer failures use
 the original error, failed phase and rollback receipt.
 
-When activation is needed, the user runs `~/.cargo/bin/collab up` in a normal
-terminal from the actual project root. The project path comes from that
-project's current registration. The agent reads `~/.cargo/bin/collab status`
-and checks that `daemon_version` matches the intended installed version.
-`USER_MAINTENANCE_REQUIRED` is the boundary for this operation. Give the user
-the exact directory, command and target version, and resume live checks when
-the version matches. Send an authorized release notice only after that check.
+When activation or restart is needed after installing or upgrading `collab` outside protected TCC folders, the user or an authorized agent runs `~/.cargo/bin/collab up` (or `~/.cargo/bin/collab up --restart` when forcing replacement of a healthy same-version detached daemon) from the project root (or a registered worktree). Run `~/.cargo/bin/collab status` after `collab up` to confirm that `daemon_version` matches `~/.cargo/bin/collab --version`. Run `collab context` when resuming agent work on the restarted daemon. `collab down` and maintenance passwords remain user-only (`USER_MAINTENANCE_REQUIRED`).
 
 The installer builds and installs Collab and refreshes the embedded Skill. It does not
 activate the new global daemon or discard durable state. Verify the installed
@@ -187,8 +181,7 @@ needs no follow-up ACK. `collab inbox` and `collab msg <id>` only inspect.
 A reply uses `collab sendmessage` to the original sender when authorized.
 Queue acceptance, actual arrival, consumption and reply are separate evidence.
 
-Collab has one global user-managed daemon. Agents never start, stop, restart or
-kill it, request maintenance credentials, or create a second global runtime.
+Collab has one global daemon shared across projects. Agents may run `collab up` to start or restart the daemon onto the installed binary (preserving durable routes, identities, mailbox, and board state), but never run `collab down`, request maintenance passwords, or create a second global runtime.
 User maintenance commands and credentials are outside the agent interface.
 When the service is unavailable, preserve durable state and report that fact.
 Project state read failure must not disable authenticated user maintenance: its

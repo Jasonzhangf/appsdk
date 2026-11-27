@@ -493,8 +493,8 @@ fn replay_removes_legacy_declared_roles() {
 #[test]
 fn only_owner_mutates_and_closes_task() {
     let (server, root) = test_server();
-    register(&server, "peer-a", "%peer-a");
-    register(&server, "peer-b", "%peer-b");
+    register_synthetic_peer(&server, "peer-a", "%peer-a");
+    register_synthetic_peer(&server, "peer-b", "%peer-b");
     assert!(create_task(&server, "peer-a", "task-a", "feature-a").ok);
 
     let update = handle_task_update(

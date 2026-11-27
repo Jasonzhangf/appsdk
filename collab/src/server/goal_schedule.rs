@@ -126,6 +126,15 @@ fn goal_schedule_target_with_control(
     let route = server_route_scope(server, state)
         .map_err(Resp::err)?
         .ok_or_else(|| Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING"))?;
+    goal_schedule_target_at_route(state, name, control, &route)
+}
+
+fn goal_schedule_target_at_route(
+    state: &State,
+    name: &str,
+    control: &binding_slot::BindingControlSet,
+    route: &RouteScope,
+) -> Result<String, Resp> {
     let slot = control
         .current_for_name(&route.project_scope_id, &route.app_scope_id, name)
         .map_err(Resp::err)?
@@ -214,6 +223,7 @@ fn commit_goal_schedule(
             change.operation,
             change.reason.as_deref(),
             change.expected_subscription_id.as_deref(),
+            None,
             None,
         ) {
             Ok(result) => result,
@@ -769,6 +779,7 @@ fn task_goal_events(
     reason: Option<&str>,
     expected_subscription_id: Option<&str>,
     current_control: Option<&binding_slot::BindingControlSet>,
+    current_route: Option<&RouteScope>,
 ) -> Result<(Vec<Event>, serde_json::Value), Resp> {
     let Some(spec) = &details.long_horizon else {
         return Ok((Vec::new(), serde_json::Value::Null));
@@ -803,9 +814,16 @@ fn task_goal_events(
     {
         return Ok((Vec::new(), serde_json::Value::Null));
     }
-    let route = server_route_scope(server, state)
-        .map_err(Resp::err)?
-        .ok_or_else(|| Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING"))?;
+    let loaded_route;
+    let route = match current_route {
+        Some(route) => route,
+        None => {
+            loaded_route = server_route_scope(server, state)
+                .map_err(Resp::err)?
+                .ok_or_else(|| Resp::err("GOAL_SCHEDULE_PROJECT_SCOPE_MISSING"))?;
+            &loaded_route
+        }
+    };
     let loaded;
     let control = match current_control {
         Some(control) => control,
@@ -951,6 +969,18 @@ fn task_goal_transition_events(
     after: &State,
     changes: &[Event],
     control: Option<&binding_slot::BindingControlSet>,
+    admitted_route: Option<&RouteScope>,
+) -> Result<Vec<Event>, Resp> {
+    task_goal_transition_events_at_route(server, before, after, changes, control, admitted_route)
+}
+
+fn task_goal_transition_events_at_route(
+    server: &Server,
+    before: &State,
+    after: &State,
+    changes: &[Event],
+    control: Option<&binding_slot::BindingControlSet>,
+    route: Option<&RouteScope>,
 ) -> Result<Vec<Event>, Resp> {
     let mut task_ids = std::collections::BTreeSet::new();
     for change in changes {
@@ -1018,7 +1048,12 @@ fn task_goal_transition_events(
         if !ended && !first_dispatch && !form_changed && old_selection == selection {
             continue;
         }
-        let target = resolve_task_schedule_selection(server, after, selection, control)?;
+        let target = match (selection, control.zip(route)) {
+            (Some(TaskScheduleSelection::Name(name)), Some((control, route))) => {
+                Some(goal_schedule_target_at_route(after, &name, control, route)?)
+            }
+            (selection, _) => resolve_task_schedule_selection(server, after, selection, control)?,
+        };
         if !ended && target.is_none() {
             continue;
         }
@@ -1037,6 +1072,7 @@ fn task_goal_transition_events(
             None,
             None,
             control,
+            route,
         )?;
         events.extend(goal_events);
     }

@@ -1534,7 +1534,7 @@ pub(crate) mod tests {
                     "-p",
                     "-t",
                     "collab-test:0.0",
-                    "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
+                    "#{pid}|#{session_id}|#{pane_id}|#{pane_pid}",
                 ])
                 .output()
                 .expect("query isolated tmux pane");
@@ -1544,7 +1544,7 @@ pub(crate) mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             let line = String::from_utf8(output.stdout).unwrap();
-            let mut fields = line.trim_end().split('\t');
+            let mut fields = line.trim_end().split('|');
             TmuxEndpoint {
                 socket_path: self.socket.to_string_lossy().into_owned(),
                 server_pid: fields.next().unwrap().parse().unwrap_or_else(|error| {

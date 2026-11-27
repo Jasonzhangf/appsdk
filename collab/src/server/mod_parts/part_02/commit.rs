@@ -73,7 +73,7 @@ impl Server {
         state: &mut State,
         changes: &[Event],
     ) -> Result<notification_contract::CommitReceipt, notification_contract::MutationError> {
-        self.commit_locked_checked_with_current(state, changes, None)
+        self.commit_locked_checked_with_current(state, changes, None, None)
     }
 
     pub(crate) fn commit_locked_checked_with_control(
@@ -82,7 +82,17 @@ impl Server {
         changes: &[Event],
         control: &binding_slot::BindingControlSet,
     ) -> Result<notification_contract::CommitReceipt, notification_contract::MutationError> {
-        self.commit_locked_checked_with_current(state, changes, Some(control))
+        self.commit_locked_checked_with_control_at_route(state, changes, control, None)
+    }
+
+    fn commit_locked_checked_with_control_at_route(
+        &self,
+        state: &mut State,
+        changes: &[Event],
+        control: &binding_slot::BindingControlSet,
+        admitted_route: Option<&RouteScope>,
+    ) -> Result<notification_contract::CommitReceipt, notification_contract::MutationError> {
+        self.commit_locked_checked_with_current(state, changes, Some(control), admitted_route)
     }
 
     fn commit_locked_checked_with_current(
@@ -90,6 +100,7 @@ impl Server {
         state: &mut State,
         changes: &[Event],
         control: Option<&binding_slot::BindingControlSet>,
+        admitted_route: Option<&RouteScope>,
     ) -> Result<notification_contract::CommitReceipt, notification_contract::MutationError> {
         if changes.is_empty() {
             return Ok(notification_contract::CommitReceipt {
@@ -97,7 +108,8 @@ impl Server {
                 revision: state.revision,
             });
         }
-        let candidate = self.checked_candidate_with_goal(state, changes, control)?;
+        let candidate =
+            self.checked_candidate_with_goal_at_route(state, changes, control, admitted_route)?;
         self.publish_current_state(state, candidate)
     }
 
@@ -111,6 +123,16 @@ impl Server {
         changes: &[Event],
         control: Option<&binding_slot::BindingControlSet>,
     ) -> Result<State, notification_contract::MutationError> {
+        self.checked_candidate_with_goal_at_route(state, changes, control, None)
+    }
+
+    fn checked_candidate_with_goal_at_route(
+        &self,
+        state: &State,
+        changes: &[Event],
+        control: Option<&binding_slot::BindingControlSet>,
+        admitted_route: Option<&RouteScope>,
+    ) -> Result<State, notification_contract::MutationError> {
         use notification_contract::MutationError;
         state::responsibility_preflight(state, changes).map_err(MutationError::InvalidCommand)?;
         let mut candidate = state.clone();
@@ -119,7 +141,7 @@ impl Server {
                 .apply_checked(change)
                 .map_err(MutationError::InvalidState)?;
         }
-        for change in task_goal_transition_events(self, state, &candidate, changes, control)
+        for change in task_goal_transition_events(self, state, &candidate, changes, control, admitted_route)
             .map_err(|error| MutationError::InvalidCommand(error.error.unwrap_or_default()))?
         {
             candidate.apply_checked(&change).map_err(MutationError::InvalidState)?;

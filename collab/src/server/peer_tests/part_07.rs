@@ -785,7 +785,7 @@ fn holder_close_persists_release_only_for_waiter() {
 fn direct_two_peer_and_three_peer_wait_cycles_fail_closed() {
     let (server, root) = test_server();
     for (id, thread) in [("a", "%a"), ("b", "%b"), ("c", "%c")] {
-        register(&server, id, thread);
+        register_synthetic_peer(&server, id, thread);
     }
     assert!(create_task(&server, "a", "a-task", "a-feature").ok);
     let direct = handle_task_wait(

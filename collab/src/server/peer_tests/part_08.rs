@@ -12,6 +12,7 @@ fn long_polls_do_not_starve_ping_on_the_blocking_pool() {
         use tokio::time::{timeout, Duration};
 
         let (server, root) = test_server();
+        let scope = TestTmuxFixtureScope::for_root(&root);
         register(&server, "peer", "%peer");
         let server = Arc::new(server);
         let mut poll_clients = Vec::new();
@@ -55,13 +56,14 @@ fn long_polls_do_not_starve_ping_on_the_blocking_pool() {
             task.abort();
         }
         drop(poll_clients);
-        std::fs::remove_dir_all(root).ok();
+        drop(scope);
     });
 }
 
 #[tokio::test]
 async fn poll_wakes_when_a_message_is_committed() {
     let (server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "peer", "%peer");
     let server = Arc::new(server);
     let poll = tokio::spawn(handle_poll_async(server.clone(), "peer".into(), 5_000));
@@ -95,12 +97,13 @@ async fn poll_wakes_when_a_message_is_committed() {
         server.state.lock().unwrap().msgs["wake-message"].state,
         "read"
     );
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[tokio::test]
 async fn recv_consumes_messages_without_a_follow_up_ack() {
     let (server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "peer", "%peer");
     server.commit(&[Event::Sent {
         msg: Message {
@@ -126,7 +129,7 @@ async fn recv_consumes_messages_without_a_follow_up_ack() {
         server.state.lock().unwrap().msgs["recv-message"].state,
         "read"
     );
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 fn seeded_receive_peer(server: &Server, root: &Path, id: &str, worker: &str) -> String {
@@ -154,6 +157,7 @@ fn seeded_receive_peer(server: &Server, root: &Path, id: &str, worker: &str) -> 
 #[tokio::test]
 async fn receive_id_commits_once_and_never_replays() {
     let (server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     seeded_receive_peer(&server, &root, "receive-loss-message", "peer");
     let server = Arc::new(server);
 
@@ -191,12 +195,13 @@ async fn receive_id_commits_once_and_never_replays() {
     assert_eq!(second.data["count"], 0);
     assert!(second.data["messages"].as_array().unwrap().is_empty());
     assert!(second.data.get("replayed").is_none());
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[tokio::test]
 async fn receive_id_does_not_grant_another_actor_the_consumed_batch() {
     let (server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     seeded_receive_peer(&server, &root, "receive-owner-message", "peer");
     register(&server, "other", "%other");
     let server = Arc::new(server);
@@ -224,7 +229,7 @@ async fn receive_id_does_not_grant_another_actor_the_consumed_batch() {
     assert!(foreign.ok, "{foreign:?}");
     assert_eq!(foreign.data["count"], 0);
     assert!(!foreign.data["messages"].to_string().contains("receive-owner-message"));
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
@@ -337,6 +342,7 @@ fn configured_worktree_path_rejects_expected_parent_escape() {
 #[test]
 fn configured_worktree_lifecycle_register_relocate_and_cleanup_use_configured_base() {
     let (mut server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     let base = root.with_file_name(format!(
         "{}-external-playground",
         root.file_name().unwrap().to_string_lossy()
@@ -473,7 +479,7 @@ fn configured_worktree_lifecycle_register_relocate_and_cleanup_use_configured_ba
             .success()
     );
     std::fs::remove_dir_all(base).ok();
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
@@ -802,6 +808,7 @@ fn appserver_notification_long_goal_deadline_subjects_keep_the_typed_prefix() {
 #[test]
 fn authenticated_send_cannot_claim_internal_goal_deadline_owner() {
     let (server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     let server = Arc::new(server);
     assert!(register(&server, "sender", "%sender").ok);
     assert!(register(&server, "recipient", "%recipient").ok);
@@ -816,7 +823,7 @@ fn authenticated_send_cannot_claim_internal_goal_deadline_owner() {
         Some("peer messaging requires type notify")
     );
     assert!(server.state.lock().unwrap().msgs.is_empty());
-    std::fs::remove_dir_all(root).unwrap();
+    drop(scope);
 }
 
 #[test]
@@ -844,6 +851,7 @@ fn sendmessage_requires_subject_before_state_mutation() {
 #[test]
 fn send_without_subscription_is_mailbox_only_and_deduplicated() {
     let (server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "sender", "%collab-missing-sender");
     register(&server, "recipient", "%collab-missing-recipient");
     let subscription_id = server
@@ -908,7 +916,7 @@ fn send_without_subscription_is_mailbox_only_and_deduplicated() {
     assert_eq!(duplicate.data["msg_id"], message_id);
     assert_eq!(duplicate.data["deduplicated"], true);
     assert_eq!(server.state.lock().unwrap().msgs.len(), 1);
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
@@ -1295,6 +1303,7 @@ fn qqbot_reply_uses_original_route_after_default_switch_and_rejects_third_party(
 #[test]
 fn explicit_peer_notification_accepts_arbitrary_durable_body() {
     let (server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "sender", "%sender");
     assert!(register_online(&server, "recipient", "%recipient").ok);
     let response = handle_send(
@@ -1319,12 +1328,13 @@ fn explicit_peer_notification_accepts_arbitrary_durable_body() {
     assert_eq!(response.data["notification"], "tmux-input-submitted");
     assert_eq!(response.data["consumed"], false);
     drop(state);
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
 fn send_to_missing_endpoint_stays_durable_and_does_not_promise_delivery() {
     let (mut server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "sender", "%sender");
     let mut transport = test_appserver_transport("thread-recipient");
     let socket = root.join("recipient.sock");
@@ -1359,12 +1369,13 @@ fn send_to_missing_endpoint_stays_durable_and_does_not_promise_delivery() {
     let replayed = current_state::load(&server.state_path, false).unwrap();
     assert!(replayed.msgs.contains_key(&message_id));
     assert!(replayed.notification_delivery_failures.contains_key(&message_id));
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
 fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
     let (mut server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "sender", "%sender");
     assert!(register_online(&server, "recipient", "%recipient").ok);
     server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
@@ -1422,12 +1433,13 @@ fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
 
     assert_eq!(replayed.msgs[message_id].body, "The candidate is ready for your review.");
     assert_eq!(replayed.msgs[message_id].state, "pending");
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
 fn explicit_send_duplicate_after_rejection_retries_the_same_message_once() {
     let (mut server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "sender", "%sender");
     assert!(register_online(&server, "recipient", "%recipient").ok);
     let attempts = Arc::new(AtomicU32::new(0));
@@ -1504,12 +1516,13 @@ fn explicit_send_duplicate_after_rejection_retries_the_same_message_once() {
     let replayed = current_state::load(&server.state_path, false).unwrap();
     assert_eq!(replayed.msgs[&message_id].wake_attempt_count, 2);
     assert!(replayed.msgs[&message_id].retry_attempted);
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
 fn explicit_retry_is_refused_for_an_accepted_original_attempt() {
     let (server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "sender", "%sender");
     assert!(register_online(&server, "recipient", "%recipient").ok);
     let first = handle_send(
@@ -1552,12 +1565,13 @@ fn explicit_retry_is_refused_for_an_accepted_original_attempt() {
     assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
     assert!(!state.msgs[&message_id].retry_attempted);
     drop(state);
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
 fn explicit_retry_is_refused_for_an_unknown_original_attempt() {
     let (mut server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "sender", "%sender");
     assert!(register_online(&server, "recipient", "%recipient").ok);
     server.appserver_notification_sink =
@@ -1598,12 +1612,13 @@ fn explicit_retry_is_refused_for_an_unknown_original_attempt() {
     assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
     assert!(!state.msgs[&message_id].retry_attempted);
     drop(state);
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
 fn explicit_retry_is_refused_for_a_decode_failure() {
     let (mut server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "sender", "%sender");
     assert!(register_online(&server, "recipient", "%recipient").ok);
     server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
@@ -1645,12 +1660,13 @@ fn explicit_retry_is_refused_for_a_decode_failure() {
     assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
     assert!(!state.msgs[&message_id].retry_attempted);
     drop(state);
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
 fn daemon_maintenance_replaces_a_stale_default_target_with_current_tmux_route() {
     let (mut server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
         Ok(serde_json::json!({"text_submitted":true,"enter_submitted":true,"consumed":false}))
     });
@@ -1684,12 +1700,13 @@ fn daemon_maintenance_replaces_a_stale_default_target_with_current_tmux_route() 
     let message = &persisted.msgs[sent.data["msg_id"].as_str().unwrap()];
     assert_eq!(message.to, "peer");
     assert_eq!(message.body, "current lease routes this body");
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 #[test]
 fn explicit_send_repairs_stale_default_direct_message_before_wake() {
     let (server, root) = test_server();
+    let scope = TestTmuxFixtureScope::for_root(&root);
     register(&server, "sender", "%sender");
     register_appserver_peer(
         &server,
@@ -1736,7 +1753,7 @@ fn explicit_send_repairs_stale_default_direct_message_before_wake() {
             .target,
         "thread-current-recipient"
     );
-    std::fs::remove_dir_all(root).ok();
+    drop(scope);
 }
 
 // ---- QQBot leading-address routing ---------------------------------------

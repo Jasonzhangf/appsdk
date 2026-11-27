@@ -863,15 +863,7 @@ fn submit_activity_with_execution_and_claims(
             );
             if !continuation.is_empty() {
                 has_continuation = true;
-                for event in &continuation {
-                    if let Event::WakeBound {
-                        message_id,
-                        subscription_id,
-                    } = event
-                    {
-                        claim_notifications.push((message_id.clone(), subscription_id.clone()));
-                    }
-                }
+                claim_notifications = super::extract_wake_bindings(&continuation);
                 events.extend(continuation);
             }
         }

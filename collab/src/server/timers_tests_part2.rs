@@ -2218,6 +2218,97 @@ use super::*;
     }
 
     #[test]
+    fn ticket_claim_explicit_notification_retries_via_timer_while_manual_explicit_stays_skipped() {
+        let (mut server, root) = test_server();
+        Arc::get_mut(&mut server).unwrap().config.notifications.mode = "immediate".into();
+        register(&server, "claim-worker");
+        register(&server, "manual-worker");
+        let claim_sub = subscribe(&server, "claim-worker", "direct-message", None, None);
+        let manual_sub = subscribe(&server, "manual-worker", "direct-message", None, None);
+        let now = now_ms();
+        let ticket_msg = Message {
+            id: "ticket-claim-retry-1".into(),
+            from: "daemon".into(),
+            to: "claim-worker".into(),
+            mtype: "notification".into(),
+            subject: Some("ticket-claimed:t1".into()),
+            body: "Ticket t1 claimed at attempt 1".into(),
+            in_reply_to: None,
+            created_ms: now,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        };
+        let manual_msg = Message {
+            id: "msg-explicit-manual-1".into(),
+            from: "master".into(),
+            to: "manual-worker".into(),
+            mtype: "notify".into(),
+            subject: Some("manual".into()),
+            body: "Do not retry".into(),
+            in_reply_to: None,
+            created_ms: now,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        };
+        server.commit(&[
+            Event::Sent { msg: ticket_msg },
+            Event::DeliveryMode {
+                msg_id: "ticket-claim-retry-1".into(),
+                mode: "explicit-notification".into(),
+                source_thread_id: None,
+            },
+            Event::WakeBound {
+                message_id: "ticket-claim-retry-1".into(),
+                subscription_id: claim_sub,
+            },
+            Event::Sent { msg: manual_msg },
+            Event::DeliveryMode {
+                msg_id: "msg-explicit-manual-1".into(),
+                mode: "explicit-notification".into(),
+                source_thread_id: None,
+            },
+            Event::WakeBound {
+                message_id: "msg-explicit-manual-1".into(),
+                subscription_id: manual_sub,
+            },
+        ]);
+
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                automatic_delivery_candidate(&state, &state.msgs["ticket-claim-retry-1"]),
+                "ticket-claim-* explicit notifications must qualify for timer delivery"
+            );
+            assert!(
+                !automatic_delivery_candidate(&state, &state.msgs["msg-explicit-manual-1"]),
+                "ordinary explicit notifications must stay excluded from timer delivery"
+            );
+        }
+
+        tick_with_deadline_wake_at(&server, now);
+
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["ticket-claim-retry-1"].wake_attempt_count, 1);
+        assert!(
+            state
+                .notification_delivery_accepted
+                .contains_key("ticket-claim-retry-1"),
+            "timer must deliver deferred ticket-claim-* wake to transport"
+        );
+        assert_eq!(state.msgs["msg-explicit-manual-1"].state, "pending");
+        assert_eq!(state.msgs["msg-explicit-manual-1"].wake_attempt_count, 0);
+        assert!(!state
+            .notification_delivery_accepted
+            .contains_key("msg-explicit-manual-1"));
+        drop(state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn unacked_notifications_limit_pauses_wakes_and_resumes_after_ack() {
         let (mut server, root) = test_server();
         Arc::get_mut(&mut server).unwrap().config.notifications.mode = "immediate".into();

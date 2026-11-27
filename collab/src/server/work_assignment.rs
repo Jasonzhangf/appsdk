@@ -1747,6 +1747,21 @@ pub(crate) fn ticket_continuation_events_with_pending(
     events
 }
 
+/// Collect committed `(message_id, subscription_id)` pairs emitted for bound
+/// ticket continuation or dependency-release wakes.
+pub(super) fn extract_wake_bindings(events: &[Event]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::WakeBound {
+                message_id,
+                subscription_id,
+            } => Some((message_id.clone(), subscription_id.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Re-run the single continuation entry for every idle slot whose queued
 /// phases were waiting on this completed execute phase. The delivering actor's
 /// own slot is handled by its caller to avoid a duplicate claim in one batch.

@@ -1058,15 +1058,7 @@ fn commit_task_close_locked(
                 &closed.owner,
             ));
             if !continuation_events.is_empty() {
-                for event in &continuation_events {
-                    if let Event::WakeBound {
-                        message_id,
-                        subscription_id,
-                    } = event
-                    {
-                        notifications.push((message_id.clone(), subscription_id.clone()));
-                    }
-                }
+                notifications.extend(extract_wake_bindings(&continuation_events));
                 commit_task_close_events(server, st, control, &continuation_events)?;
             }
         }

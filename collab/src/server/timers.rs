@@ -47,7 +47,7 @@ pub fn tick(server: &Arc<Server>) {
 
 pub(super) fn tick_managed(manager: &super::ProjectRuntimeManager, server: &Arc<Server>) {
     let now = now_ms();
-    super::keepalive::tick_at(server, now);
+    super::keepalive::tick_with_rex_recovery(server, now);
     super::name_monitor::tick_managed(manager, server, now);
     tick_after_tmux(server, now);
 }
@@ -638,7 +638,9 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                     .then(|| {
                         let board_invitation_only =
                             state.delivery_modes.get(message_id).map(String::as_str)
-                                == Some("explicit-notification");
+                                == Some("explicit-notification")
+                                && super::current_board_invitation_for_message(&state, message)
+                                    .is_some();
                         (
                             message_id.clone(),
                             subscription_id.clone(),
@@ -685,7 +687,8 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
             super::can_resume_notification(state, message)
         }
         Some("explicit-notification") => {
-            super::current_board_invitation_for_message(state, message).is_some()
+            (super::current_board_invitation_for_message(state, message).is_some()
+                || message.id.starts_with("ticket-claim-"))
                 && super::can_resume_notification(state, message)
         }
         // Internal daemon markers predate the explicit delivery domain and

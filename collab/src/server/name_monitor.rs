@@ -292,7 +292,7 @@ fn tick_internal(
             if state.tmux_executions.get(&worker.id) != baseline.as_ref()
                 || current_target(control, state, scope.as_str(), &worker.id) != target
             {
-                return Ok(());
+                return Ok(Vec::new());
             }
             let current = state
                 .workers
@@ -300,7 +300,7 @@ fn tick_internal(
                 .and_then(|worker| worker.transport.as_ref())
                 .and_then(observation_target);
             if current != Some((session, endpoint)) {
-                return Ok(());
+                return Ok(Vec::new());
             }
             let mut events = Vec::new();
             if let (Some(target), Some(execution)) = (target.clone(), execution) {
@@ -340,16 +340,19 @@ fn tick_internal(
                 events.push(Event::AgentActivityObserved { activity });
             }
             // Keep the existing online-idle ticket continuation owner.
+            let mut claim_notifications = Vec::new();
             if positive_online_idle {
                 if let Ok(Some(route)) = super::server_route_scope(server, state) {
-                    events.extend(super::ticket_continuation_events(
+                    let continuation = super::ticket_continuation_events(
                         state,
                         control,
                         &route,
                         &worker.id,
                         &[],
                         true,
-                    ));
+                    );
+                    claim_notifications = super::extract_wake_bindings(&continuation);
+                    events.extend(continuation);
                 }
             }
             if !events.is_empty() {
@@ -357,13 +360,18 @@ fn tick_internal(
                     .commit_locked_checked_with_control(state, &events, control)
                     .map_err(|error| error.to_string())?;
             }
-            Ok(())
+            Ok(claim_notifications)
         });
-        if let Err(error) = committed {
-            super::presence::append_log(
-                &server.log_path(),
-                &format!("TMUX_MONITOR_COMMIT_FAILED: {error}"),
-            );
+        match committed {
+            Ok(claim_notifications) => {
+                super::deliver_wake_bindings(server, &claim_notifications);
+            }
+            Err(error) => {
+                super::presence::append_log(
+                    &server.log_path(),
+                    &format!("TMUX_MONITOR_COMMIT_FAILED: {error}"),
+                );
+            }
         }
     }
 }

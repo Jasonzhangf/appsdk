@@ -292,8 +292,12 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 let subscription = state.notification_subscriptions.get(subscription_id)?;
                 let key = goal_deadline_key(subscription)?;
                 match message.state.as_str() {
-                    "pending" if key.2 <= now || owned_periodic_goal(subscription) => Some(key),
-                    "delivered" if owned_periodic_goal(subscription) => Some(key),
+                    "pending" if key.2 <= now || owned_periodic_goal(subscription) => {
+                        Some((key, super::task_schedule_binding(subscription)))
+                    }
+                    "delivered" if owned_periodic_goal(subscription) => {
+                        Some((key, super::task_schedule_binding(subscription)))
+                    }
                     _ => None,
                 }
             })
@@ -329,21 +333,8 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             // Quiet only task-owned execution reminders while their actor is
             // waiting. Keep the occurrence and schedule progress for release;
             // independent explicit deadlines retain their declared delivery.
-            if let Some(super::state::GoalScheduleContent::BoardTask { task_id }) = subscription
-                .goal_content
-                .as_ref()
-                .and_then(|binding| binding.source.as_ref())
-            {
-                if let Some(task) = state.tasks.get(task_id) {
-                    let name = state
-                        .task_assignments
-                        .get(task_id)
-                        .map(|assignment| assignment.name.as_str())
-                        .unwrap_or(&subscription.worker_id);
-                    if !state.task_actionable_for(task, Some((&subscription.worker_id, name))) {
-                        continue;
-                    }
-                }
+            if !task_goal_actionable(&state, subscription, &subscription.worker_id) {
+                continue;
             }
             let next_trigger = next_subscription_trigger(subscription);
             let master_idle_gate_open = if subscription.event == "master-idle" {
@@ -463,7 +454,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                 let Some(key) = goal_deadline_key(subscription) else {
                     continue;
                 };
-                if !goal_deadline_keys.insert(key) {
+                if !goal_deadline_keys.insert((key, super::task_schedule_binding(subscription))) {
                     continue;
                 }
                 let revision = next_trigger
@@ -504,11 +495,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                         .get(task_id)
                         .map(|task| task.status.as_str())
                         .unwrap_or("missing");
-                    let action = if details.invitation.is_some() {
-                        "Read the current task revision and accept or decline with collab board respond before execution."
-                    } else {
-                        "Continue only the task's current authorized phase and dependency constraints."
-                    };
+                    let action = "Continue only the task's current authorized phase and dependency constraints.";
                     Some(format!("Task {task_id}\n{}\n{}\nDelivery condition: {}\nTest condition: {}\nCurrent status: {status}\n{action}",
                         details.title, spec.content, details.delivery_condition, details.test_condition))
                 }
@@ -1246,10 +1233,13 @@ pub(super) fn goal_wake_delivery_allowed(
     transport: &crate::proto::SelectedTransport,
     now: i64,
 ) -> bool {
+    let goal = occurrence_goal(state, message).unwrap_or(subscription);
+    if !task_goal_wake_allowed(state, message, goal, now) {
+        return false;
+    }
     if !requires_goal_idle(state, message, subscription, transport) {
         return true;
     }
-    let goal = occurrence_goal(state, message, subscription);
     if goal.status != "armed"
         || goal.worker_id != message.to
         || goal.expires_ms <= now
@@ -1262,15 +1252,68 @@ pub(super) fn goal_wake_delivery_allowed(
         && matches!(current_goal_activity(server, state, worker, transport), GoalIdleStatus::Idle)
 }
 
+fn task_goal_actionable(
+    state: &super::State,
+    subscription: &NotificationSubscription,
+    worker: &str,
+) -> bool {
+    let Some(task_id) = super::task_schedule_binding(subscription) else {
+        return true;
+    };
+    state.tasks.get(task_id).is_some_and(|task| {
+        task.owner == worker
+            && worker == subscription.worker_id
+            && !matches!(task.status.as_str(), "waiting" | "blocked")
+            && super::task_schedule_selection(state, task)
+                .is_some_and(|name| state.task_actionable_for(task, Some((worker, name))))
+    })
+}
+
+pub(super) fn queued_task_occurrence_actionable(state: &super::State, message: &Message) -> bool {
+    message.state != "pending"
+        || state
+            .notification_delivery_accepted
+            .contains_key(&message.id)
+        || occurrence_goal(state, message)
+            .is_none_or(|goal| task_goal_actionable(state, goal, &message.to))
+}
+
 fn occurrence_goal<'a>(
     state: &'a super::State,
     message: &Message,
-    lease: &'a NotificationSubscription,
-) -> &'a NotificationSubscription {
+) -> Option<&'a NotificationSubscription> {
     // Name handoff can replace the transport lease while retaining the goal.
-    state.notification_occurrences.get(&message.id)
-        .and_then(|occurrence| state.notification_subscriptions.get(&occurrence.subscription_id))
-        .unwrap_or(lease)
+    state
+        .notification_occurrences
+        .get(&message.id)
+        .and_then(|occurrence| {
+            state
+                .notification_subscriptions
+                .get(&occurrence.subscription_id)
+        })
+        .or_else(|| {
+            let binding = state.wake_bindings.get(&message.id)?;
+            state.notification_subscriptions.get(binding)
+        })
+}
+
+pub(super) fn task_wake_goal<'a>(
+    state: &'a super::State,
+    message: &Message,
+) -> Option<&'a NotificationSubscription> {
+    occurrence_goal(state, message).filter(|goal| super::task_schedule_binding(goal).is_some())
+}
+
+pub(super) fn task_goal_wake_allowed(
+    state: &super::State,
+    message: &Message,
+    goal: &NotificationSubscription,
+    now: i64,
+) -> bool {
+    super::task_schedule_binding(goal).is_none()
+        || (goal.status == "armed"
+            && goal.expires_ms > now
+            && task_goal_actionable(state, goal, &message.to))
 }
 
 pub(super) fn requires_goal_idle(
@@ -1283,7 +1326,7 @@ pub(super) fn requires_goal_idle(
     state.notification_occurrences.get(&message.id)
         .is_some_and(|occurrence| occurrence.idle_triggered)
         || (matches!(transport.kind, TransportKind::Tmux | TransportKind::Rex)
-            && owned_periodic_goal(occurrence_goal(state, message, lease)))
+            && owned_periodic_goal(occurrence_goal(state, message).unwrap_or(lease)))
 }
 
 fn next_subscription_trigger(

@@ -460,6 +460,317 @@ use super::*;
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(feature = "lifecycle-test-hooks")]
+    #[tokio::test]
+    #[ignore = "requires COLLAB_TEST_ITERM2_ATTACHMENT=fixture and an isolated tmux pane"]
+    async fn periodic_goal_observes_early_idle_and_deadline_consumption() {
+        use crate::server::name_state::{
+            AgentActivity, AgentActivityRecord, AgentPresence, AgentPresenceRecord,
+        };
+        use crate::server::peer_tests::IsolatedTmux;
+        use serde_json::json;
+
+        let (mut server, root) = test_server();
+        Arc::get_mut(&mut server)
+            .unwrap()
+            .appserver_notification_sink = super::super::default_appserver_notification_sink();
+        let tmux = IsolatedTmux::start_online(&root);
+        let endpoints = tmux.endpoints();
+        let owner = "cycle-owner";
+        let endpoint = &endpoints[1];
+        crate::server::peer_tests::wait_for_online_fixture(endpoint);
+        register_tmux(&server, "cycle-sender", endpoints[0].clone());
+        register_tmux(&server, owner, endpoint.clone());
+        let project_scope = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        let runtime = {
+            let state = server.state.lock().unwrap();
+            let binding = state
+                .global
+                .lookup_binding(&crate::identity::BindingId::new("binding-cycle-owner").unwrap())
+                .unwrap();
+            crate::identity::RuntimeIdentity {
+                agent_id: binding.agent_id.clone(),
+                runtime_id: binding.runtime_id.clone(),
+                appserver_id: binding.app_scope_id.clone(),
+                binding_id: binding.binding_id.clone(),
+                session_id: binding.session_id.clone(),
+                native_thread_id: binding.native_thread_id.clone(),
+            }
+        };
+        let context = crate::proto::ProjectContext::for_registered_route(&root, &runtime).unwrap();
+        eprintln!(
+            "OWNED_TIMER_FIXTURE test_pid={} tmux_pid={} sender_pid={} owner_pid={} root={} socket={}",
+            std::process::id(), endpoint.server_pid, endpoints[0].pane_pid, endpoint.pane_pid,
+            root.display(), endpoint.socket_path,
+        );
+
+        // Only the first timer tick uses a past clock. The real Poll clock is
+        // between that first nominal trigger and the next 30-minute deadline.
+        let interval = 1_800_000;
+        let delivery_window = 45_000;
+        let first_trigger = now_ms() + delivery_window - interval;
+        let early_tick = first_trigger - 1_000;
+        let expires = first_trigger + 4 * interval;
+        let repeat = 3;
+        let (target, method) = subscription_target(&server, owner);
+        let id = "sub-cycle35-36";
+        let session_id = runtime.session_id.as_ref().unwrap().as_str().to_owned();
+        server.commit(&[
+            Event::NotificationSubscribed {
+                subscription: NotificationSubscription {
+                    id: id.into(),
+                    worker_id: owner.into(),
+                    event: "deadline".into(),
+                    subject: Some("goal:cycle35-36".into()),
+                    target,
+                    method,
+                    trigger_ms: Some(first_trigger),
+                    trigger_times_ms: Vec::new(),
+                    interval_ms: Some(interval),
+                    repeat_count: repeat,
+                    fired_count: 0,
+                    expires_ms: expires,
+                    status: "armed".into(),
+                    created_ms: early_tick - 1,
+                    updated_ms: early_tick - 1,
+                    status_reason: None,
+                    patrol_idle_since_ms: None,
+                    patrol_last_push_ms: 0,
+                    periodic_declared: true,
+                    goal_content: Some(crate::server::state::GoalScheduleBinding {
+                        source: Some(crate::server::state::GoalScheduleContent::Inline {
+                            content: "Observe one finite periodic goal".into(),
+                        }),
+                        ttl_seconds: ((expires - early_tick + 1) / 1000) as u64,
+                    }),
+                },
+            },
+            Event::AgentPresenceObserved {
+                presence: AgentPresenceRecord {
+                    project_scope: project_scope.clone(),
+                    worker_id: owner.into(),
+                    session_id: session_id.clone(),
+                    presence: AgentPresence::Online,
+                    reason: "isolated online pane".into(),
+                    observed_ms: early_tick,
+                },
+            },
+            Event::AgentActivityObserved {
+                activity: AgentActivityRecord {
+                    project_scope,
+                    worker_id: owner.into(),
+                    session_id,
+                    activity: AgentActivity::Idle,
+                    background: false,
+                    reason: "isolated idle pane".into(),
+                    observed_ms: early_tick,
+                    idle_since_ms: Some(early_tick),
+                },
+            },
+        ]);
+        let readback = |stage: &str| {
+            let status = super::super::handle_notification_status(
+                &server,
+                owner.into(),
+                "token-cycle-owner".into(),
+            );
+            assert!(status.ok, "{status:?}");
+            let sub = status.data["subscriptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|subscription| subscription["id"] == id)
+                .unwrap();
+            assert_eq!(sub["interval_ms"], interval);
+            assert_eq!(sub["repeat_count"], repeat);
+            assert_eq!(sub["expires_ms"], expires);
+            let fired = sub["fired_count"].as_u64().unwrap();
+            println!(
+                "CYCLE_READBACK {}",
+                json!({
+                    "stage": stage, "id": id, "trigger_ms": sub["trigger_ms"],
+                    "interval_ms": interval, "fired_count": fired, "repeat_count": repeat,
+                    "remaining": u64::from(repeat) - fired, "expires_ms": expires,
+                })
+            );
+            sub["trigger_ms"].as_i64().unwrap()
+        };
+        let manager =
+            super::super::ProjectRuntimeManager::new(server.clone(), &server.host_paths).unwrap();
+        let recv = |receive_id: &'static str| {
+            let server = server.clone();
+            let manager = manager.clone();
+            let context = context.clone();
+            async move {
+                let crate::proto::Req::Poll {
+                    worker_id,
+                    token,
+                    timeout_ms,
+                    receive_id,
+                } = crate::recv_request(
+                    owner.into(),
+                    "token-cycle-owner".into(),
+                    0,
+                    receive_id.into(),
+                )
+                else {
+                    panic!("public recv must issue Poll");
+                };
+                let receipt = super::super::handle_poll_async_with_manager_context(
+                    manager,
+                    server,
+                    worker_id,
+                    Some(token),
+                    timeout_ms,
+                    Some(context),
+                    receive_id,
+                )
+                .await;
+                assert!(receipt.ok, "{receipt:?}");
+                println!("CYCLE_RECV {}", receipt.data);
+                receipt.data
+            }
+        };
+        let host_acceptance = |message_id: &str| {
+            let state = server.state.lock().unwrap();
+            let accepted_ms = state
+                .notification_delivery_accepted
+                .get(message_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "message {message_id} missing host acceptance: state={:?}; failure={:?}",
+                        state.msgs[message_id],
+                        state.notification_delivery_failures.get(message_id),
+                    )
+                });
+            let capture = std::process::Command::new("tmux")
+                .args([
+                    "-S",
+                    &endpoint.socket_path,
+                    "capture-pane",
+                    "-p",
+                    "-t",
+                    &endpoint.pane_id,
+                ])
+                .output()
+                .unwrap();
+            assert!(capture.status.success(), "{capture:?}");
+            let pane: String = String::from_utf8_lossy(&capture.stdout)
+                .split_whitespace()
+                .collect();
+            assert!(
+                pane.contains(message_id),
+                "{message_id} absent from fixture pane: {pane}"
+            );
+            println!(
+                "CYCLE_HOST {}",
+                json!({
+                    "message_id": message_id, "accepted_ms": accepted_ms, "pane": endpoint.pane_id,
+                    "attempts": state.msgs[message_id].wake_attempt_count,
+                })
+            );
+        };
+
+        let mut tick = early_tick;
+        let mut seen = None;
+        for (label, is_idle, receive_id) in [
+            ("GOAL_READY_ON_IDLE", true, "cycle35-idle"),
+            ("DEADLINE_REACHED", false, "cycle36-periodic"),
+        ] {
+            let trigger = readback(&format!("before {label}"));
+            if is_idle {
+                assert!(tick < trigger);
+            } else {
+                let until_due = trigger.saturating_sub(now_ms()).max(0);
+                assert!(
+                    until_due <= delivery_window,
+                    "the next observed deadline is outside this fixture's real-clock window: {trigger}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(until_due as u64)).await;
+                tick = trigger;
+            }
+            tick_with_deadline_wake_at(&server, tick);
+            let message_id = {
+                let state = server.state.lock().unwrap();
+                let (message_id, occurrence) = state
+                    .notification_occurrences
+                    .iter()
+                    .find(|(message_id, occurrence)| {
+                        occurrence.subscription_id == id && Some(*message_id) != seen.as_ref()
+                    })
+                    .unwrap();
+                assert_eq!(occurrence.trigger_ms, trigger);
+                assert_eq!(occurrence.idle_triggered, is_idle);
+                assert_eq!(occurrence.consumed_ms, None);
+                assert!(state.msgs[message_id].body.starts_with(label));
+                println!(
+                    "CYCLE_ISSUED {}",
+                    json!({
+                        "message_id": message_id, "tick_ms": tick, "occurrence": occurrence,
+                    })
+                );
+                message_id.clone()
+            };
+            host_acceptance(&message_id);
+            readback(&format!("after {label} delivery"));
+            let received = recv(receive_id).await;
+            assert_eq!(received["receive_id"], receive_id);
+            assert_eq!(received["count"], 1);
+            assert_eq!(received["messages"][0]["id"], message_id);
+            {
+                let durable = current_state::load(&server.state_path, false).unwrap();
+                let occurrence = &durable.notification_occurrences[&message_id];
+                assert!(occurrence.consumed_ms.unwrap() >= tick);
+                assert_eq!(durable.msgs[&message_id].state, "read");
+                println!(
+                    "CYCLE_CONSUMED {}",
+                    json!({
+                        "message_id": message_id, "occurrence": occurrence, "state": "read",
+                    })
+                );
+            }
+            readback(&format!("after {label} recv"));
+            seen = Some(message_id);
+        }
+
+        let sent = super::super::handle_send(
+            &server,
+            "cycle-sender".into(),
+            owner.into(),
+            "notify".into(),
+            Some("cycle-direct".into()),
+            "Independent direct message".into(),
+            None,
+            "immediate".into(),
+        );
+        assert!(sent.ok, "{sent:?}");
+        assert_eq!(sent.data["notification"], "tmux-input-submitted");
+        let direct_id = sent.data["msg_id"].as_str().unwrap();
+        println!("CYCLE_DIRECT_SEND {}", sent.data);
+        host_acceptance(direct_id);
+        let received = recv("cycle36-direct").await;
+        assert_eq!(received["receive_id"], "cycle36-direct");
+        assert_eq!(received["count"], 1);
+        assert_eq!(received["messages"][0]["id"], direct_id);
+        let durable = current_state::load(&server.state_path, false).unwrap();
+        assert_eq!(durable.msgs[direct_id].state, "read");
+        assert_eq!(recv("cycle36-no-replay").await["count"], 0);
+        readback("after direct recv and empty reread");
+        for pane in &endpoints {
+            // The foreground fixture blocks signals while it waits. Terminate
+            // each owned process explicitly before closing the named session.
+            assert_eq!(
+                unsafe { libc::kill(pane.pane_pid as i32, libc::SIGTERM) },
+                0
+            );
+        }
+        drop(tmux);
+        assert!(!std::path::Path::new(&endpoint.socket_path).exists());
+        drop(server);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(!root.exists());
+    }
+
     #[test]
     fn goal_verification_notice_requires_current_missing_fields() {
         use crate::proto::WorkerStatusField::{Activity, Presence};

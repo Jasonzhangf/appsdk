@@ -483,6 +483,106 @@ fn cancel_with_actionable_master_or_peer_project_task_is_rejected() {
 }
 
 #[test]
+fn dependency_completion_rearms_retained_project_patrol_with_progress() {
+    let mut fixture = AppFixture::new();
+    restore_master(&fixture);
+    record_project_progress(&fixture);
+    let original = subscribe_patrol(&fixture);
+    let id = original["subscription"]["id"].as_str().unwrap();
+    cancel_patrol(&fixture, THREAD_A);
+    let mut historical =
+        project_patrol_subscriptions(&fixture.run_public(&["notify", "status"], THREAD_A))
+            .remove(0);
+    // Retain a progressed cancelled batch as a pre-fix daemon could leave it.
+    // Only the historical subscription is seeded. Both tickets and the result
+    // that satisfies their typed dependency use normal CLI operations.
+    historical["fired_count"] = json!(7);
+    historical["trigger_ms"] = json!(historical["created_ms"].as_i64().unwrap() + 1500000);
+    fixture.run_public(&["context"], THREAD_B);
+    fixture.run_public(&["task", "register", "PATROL-PREDECESSOR"], THREAD_B);
+    fixture.run_public(
+        &[
+            "board",
+            "publish",
+            "PATROL-DEPENDENT",
+            "--title",
+            "Dependent project work",
+            "--description",
+            "Wait for the declared predecessor",
+            "--delivery-condition",
+            "Predecessor delivers",
+            "--test-condition",
+            "Public typed transition",
+            "--depends-on",
+            "PATROL-PREDECESSOR",
+        ],
+        THREAD_A,
+    );
+    fixture.update_current_state(|state| {
+        state["notification_subscriptions"][id] = historical.clone();
+    });
+    let waiting = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(waiting["project_patrol"]["status"], "cancelled");
+    assert!(
+        waiting["project_patrol"]["eligibility"]["waiting_task_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("PATROL-DEPENDENT")),
+        "{waiting}"
+    );
+    let delivery = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "PATROL-PREDECESSOR",
+            "--no-candidate",
+            "--evidence",
+            "Isolated predecessor delivered",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(delivery["status"], "delivered", "{delivery}");
+    let recovered = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(
+        recovered["project_patrol"]["status"], "armed",
+        "{recovered}"
+    );
+    assert!(recovered["project_patrol"]["eligibility"]["blocking_tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|task| task["task_id"] == "PATROL-DEPENDENT"));
+    let records = project_patrol_subscriptions(&recovered);
+    assert_eq!(records.len(), 1);
+    for field in [
+        "id",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "fired_count",
+        "expires_ms",
+    ] {
+        assert_eq!(records[0][field], historical[field], "{field}");
+    }
+    let duplicate = fixture.command_public(
+        &[
+            "task",
+            "deliver",
+            "PATROL-PREDECESSOR",
+            "--no-candidate",
+            "--evidence",
+            "Isolated predecessor delivered",
+        ],
+        THREAD_B,
+    );
+    assert!(!duplicate.status.success());
+    fixture.restart_daemon();
+    let replayed = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(project_patrol_subscriptions(&replayed), records);
+    println!("dependency recovery receipt: {}", records[0]);
+}
+
+#[test]
 fn new_project_task_and_wait_release_rearm_the_same_cancelled_patrol() {
     let fixture = AppFixture::new();
     restore_master(&fixture);
@@ -515,6 +615,16 @@ fn new_project_task_and_wait_release_rearm_the_same_cancelled_patrol() {
         Some(patrol_id.as_str()),
         "automatic recovery keeps the same subscription id: {after_new_task}"
     );
+    let recovered = project_patrol_subscriptions(&after_new_task).remove(0);
+    for field in [
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "fired_count",
+        "expires_ms",
+    ] {
+        assert_eq!(recovered[field], armed["subscription"][field], "{field}");
+    }
 
     // The new task now blocks cancellation. Close it through the public task
     // owner path and cancel again with only a waiting task left.
@@ -621,6 +731,17 @@ fn new_project_task_and_wait_release_rearm_the_same_cancelled_patrol() {
         1,
         "wait release must not create a second patrol record: {after_wait_release}"
     );
+    let after_release = project_patrol_subscriptions(&after_wait_release).remove(0);
+    for field in [
+        "id",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "fired_count",
+        "expires_ms",
+    ] {
+        assert_eq!(after_release[field], recovered[field], "{field}");
+    }
 }
 
 #[test]
@@ -633,7 +754,16 @@ fn peer_board_idle_cancellation_survives_master_project_patrol_rearm() {
     cancel_patrol(&fixture, THREAD_A);
 
     fixture.run_public(&["context"], THREAD_B);
-    fixture.run_public(&["task", "register", "PEER-PATROL"], THREAD_B);
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "PEER-PATROL",
+            "--feature",
+            "peer-patrol-feature",
+        ],
+        THREAD_B,
+    );
     let rearmed = fixture.run_public(&["notify", "status"], THREAD_A);
     assert_eq!(
         rearmed["project_patrol"]["status"], "armed",
@@ -644,6 +774,28 @@ fn peer_board_idle_cancellation_survives_master_project_patrol_rearm() {
         Some(patrol_id.as_str())
     );
 
+    let refused =
+        fixture.command_public(&["notify", "cancel", "--task-id", "PEER-PATROL"], THREAD_B);
+    assert!(!refused.status.success());
+    assert!(rejection_text(&refused).contains("BOARD_PATROL_CANCEL_NOT_ELIGIBLE"));
+    let conflict = fixture.command_public(
+        &[
+            "task",
+            "register",
+            "PEER-PATROL-HOLDER",
+            "--feature",
+            "peer-patrol-feature",
+        ],
+        THREAD_A,
+    );
+    assert!(!conflict.status.success());
+    assert!(rejection_text(&conflict).contains("TASK_RESOURCE_CONFLICT"));
+    fixture.run_public(
+        &["task", "wait", "PEER-PATROL", "--for", "PEER-PATROL-HOLDER"],
+        THREAD_B,
+    );
+    let waiting = fixture.run_public(&["notify", "status"], THREAD_B);
+    assert_eq!(waiting["board_patrol"]["eligible_task_ids"], json!([]));
     let cancelled = fixture.run_public(&["notify", "cancel", "--task-id", "PEER-PATROL"], THREAD_B);
     assert_eq!(cancelled["cancelled_task_ids"], json!(["PEER-PATROL"]));
     let peer_status = fixture.run_public(&["notify", "status"], THREAD_B);
@@ -1122,10 +1274,16 @@ fn project_patrol_rearm_survives_replay_without_refreshing_schedule() {
         .into_iter()
         .find(|record| record["id"] == patrol_id)
         .unwrap();
-    assert!(
-        rearmed_record["trigger_ms"].as_i64().is_some(),
-        "the rearm must schedule the next wake: {rearmed_status}"
-    );
+    for field in [
+        "trigger_ms",
+        "created_ms",
+        "interval_ms",
+        "repeat_count",
+        "fired_count",
+        "expires_ms",
+    ] {
+        assert_eq!(rearmed_record[field], armed_record[field], "{field}");
+    }
 
     // Replay must reapply the persisted task event time, not the restart time.
     fixture.restart_daemon();

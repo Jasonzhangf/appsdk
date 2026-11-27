@@ -124,6 +124,31 @@ impl Server {
         {
             candidate.apply_checked(&change).map_err(MutationError::InvalidState)?;
         }
+        if changes.iter().any(|change| {
+            matches!(
+                change,
+                Event::TaskCreated { .. }
+                    | Event::TaskUpdated { .. }
+                    | Event::TicketPhaseRecorded { .. }
+                    | Event::TaskAssignmentUpdated { .. }
+                    | Event::TaskLifecycleUpdated { .. }
+                    | Event::MergeRequested { .. }
+                    | Event::MergeResolved { .. }
+                    | Event::CleanupVerified { .. }
+                    | Event::WorktreeBound { .. }
+                    | Event::NameResolutionCommitted { .. }
+            )
+        }) {
+            if let Ok(Some(route)) = server_route_scope(self, &candidate) {
+                if let Some(event) = candidate.project_patrol_rearm_event(state, &route, now_ms()) {
+                    state::responsibility_preflight(&candidate, std::slice::from_ref(&event))
+                        .map_err(MutationError::InvalidCommand)?;
+                    candidate
+                        .apply_checked(&event)
+                        .map_err(MutationError::InvalidState)?;
+                }
+            }
+        }
         let ids = edited_board_goal_reminders(state, &candidate, changes);
         if !ids.is_empty() {
             candidate

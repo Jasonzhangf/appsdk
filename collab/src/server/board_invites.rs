@@ -1023,8 +1023,11 @@ fn prepare_board_response_locked(
                     };
                     claimed.wait_reason = None;
                     events.push(Event::TicketPhaseRecorded { phase: claimed });
-                } else if phase.status == crate::server::ticket_state::TicketPhaseStatus::Claimed
-                    && phase.slot_name.as_deref() != Some(current_slot.identity_key.name.as_str())
+                } else if matches!(
+                    phase.status,
+                    crate::server::ticket_state::TicketPhaseStatus::Claimed
+                        | crate::server::ticket_state::TicketPhaseStatus::Running
+                ) && phase.slot_name.as_deref() != Some(current_slot.identity_key.name.as_str())
                 {
                     let batch = match phase.batch.checked_add(1) {
                         Some(batch) => batch,

@@ -3,6 +3,7 @@ use state::{GoalScheduleBinding, GoalScheduleContent};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GoalScheduleOperation {
     Explicit,
+    TaskStart,
     Edit,
     Rearm,
     Derived,
@@ -175,7 +176,7 @@ fn commit_goal_schedule(
         if details.long_horizon.is_none() {
             return Resp::err("BOARD_LONG_HORIZON_CONTENT_REQUIRED");
         }
-        let current = task_schedule_target(server, state, task, &details, None);
+        let current = task_schedule_target(server, state, task, None);
         match current {
             Ok(Some(current)) if current == target => {}
             Ok(_) => return Resp::err("GOAL_SCHEDULE_TASK_OWNER_MISMATCH"),
@@ -306,12 +307,22 @@ fn prepare_goal_schedule(
         Some(GoalScheduleContent::BoardTask { task_id }) => Some(task_id),
         _ => None,
     };
-    let mut matching: Vec<_> = state.notification_subscriptions.values().filter(|subscription| {
-        subscription.event == "deadline"
-            && subscription.subject.as_deref() == Some(subject.as_str())
-            && (subscription.worker_id == target || task_id.is_some_and(|id| matches!(
-                subscription.goal_content.as_ref().and_then(|binding| binding.source.as_ref()), Some(GoalScheduleContent::BoardTask { task_id }) if task_id == id)))
-    }).cloned().collect();
+    let mut matching: Vec<_> = state
+        .notification_subscriptions
+        .values()
+        .filter(|subscription| {
+            subscription.event == "deadline"
+                && match task_id {
+                    Some(id) => task_schedule_binding(subscription) == Some(id.as_str()),
+                    None => {
+                        task_schedule_binding(subscription).is_none()
+                            && subscription.subject.as_deref() == Some(subject.as_str())
+                            && subscription.worker_id == target
+                    }
+                }
+        })
+        .cloned()
+        .collect();
     matching.sort_by(|left, right| {
         right
             .created_ms
@@ -410,12 +421,14 @@ fn prepare_goal_schedule(
             })
         });
         // Older callers update an existing periodic batch without --at-ms.
-        // A start carrying an initial trigger and a one-shot reconcile retain
-        // their policy. The explicit edit operation handles both shapes.
+        // A task start retains a valid batch even if name recovery already
+        // transferred it to this worker. Cadence edits use their own entry.
         let retain_policy = existing.is_some_and(|old| {
-            change.operation == GoalScheduleOperation::Rearm
-                || (change.operation == GoalScheduleOperation::Explicit
-                    && (change.trigger_ms.is_some() || !old.periodic_declared))
+            matches!(
+                change.operation,
+                GoalScheduleOperation::Rearm | GoalScheduleOperation::TaskStart
+            ) || (change.operation == GoalScheduleOperation::Explicit
+                && (change.trigger_ms.is_some() || !old.periodic_declared))
         });
         let interval = change
             .interval_ms
@@ -759,6 +772,13 @@ fn terminal_goal_edit_schedule(
     Ok((events, response))
 }
 
+pub(super) fn task_schedule_binding(subscription: &NotificationSubscription) -> Option<&str> {
+    match subscription.goal_content.as_ref()?.source.as_ref()? {
+        GoalScheduleContent::BoardTask { task_id } => Some(task_id),
+        GoalScheduleContent::Inline { .. } => None,
+    }
+}
+
 fn task_goal_events(
     server: &Server,
     state: &State,
@@ -774,11 +794,10 @@ fn task_goal_events(
     let Some(spec) = &details.long_horizon else {
         return Ok((Vec::new(), serde_json::Value::Null));
     };
-    let subject = format!("goal:task:{}", task.id);
     let existing = state
         .notification_subscriptions
         .values()
-        .find(|subscription| subscription.subject.as_deref() == Some(subject.as_str()));
+        .find(|subscription| task_schedule_binding(subscription) == Some(task.id.as_str()));
     // Only a running Execute phase supplies an active target. Cancellation
     // uses the existing subscription, including residue from older invitations.
     let target = selected.or_else(|| {
@@ -797,7 +816,7 @@ fn task_goal_events(
             .notification_subscriptions
             .values()
             .any(|subscription| {
-                subscription.subject.as_deref() == Some(subject.as_str())
+                task_schedule_binding(subscription) == Some(task.id.as_str())
                     && subscription.status == "waiting-owner"
             })
     {
@@ -849,53 +868,96 @@ fn task_goal_events(
 }
 
 fn task_goal_receipt(state: &State, task_id: &str) -> serde_json::Value {
-    let subject = format!("goal:task:{task_id}");
     let subscription = state
         .notification_subscriptions
         .values()
-        .filter(|subscription| subscription.subject.as_deref() == Some(subject.as_str()))
-        .max_by_key(|subscription| (subscription.created_ms, subscription.status == "armed"));
-    json!({ "armed": subscription.is_some_and(|subscription| subscription.status == "armed"), "subscription": subscription })
+        .filter(|subscription| task_schedule_binding(subscription) == Some(task_id))
+        .max_by_key(|subscription| {
+            (
+                subscription.created_ms,
+                subscription.status == "armed",
+                &subscription.id,
+            )
+        });
+    let armed = subscription.is_some_and(|subscription| subscription.status == "armed")
+        && state
+            .tasks
+            .get(task_id)
+            .and_then(|task| task_schedule_selection(state, task))
+            .is_some();
+    json!({ "armed": armed, "subscription": subscription })
 }
 
-#[derive(PartialEq, Eq)]
-enum TaskScheduleSelection {
-    Name(String),
-}
-
-fn task_schedule_selection(
-    state: &State,
-    task: &TaskRec,
-    details: &crate::board::BoardTaskDetails,
-) -> Option<TaskScheduleSelection> {
-    if details.invitation.is_some()
-        || matches!(task.status.as_str(), "pending" | "invited" | "closed" | "cancelled")
-    {
-        return None;
-    }
+fn latest_task_execute<'a>(
+    state: &'a State,
+    task_id: &str,
+) -> Option<&'a ticket_state::TicketPhaseRecord> {
     state
         .ticket_phases
         .iter()
         .filter(|phase| {
-            phase.task_id == task.id
-                && phase.phase == ticket_state::TicketPhaseKind::Execute
+            phase.task_id == task_id && phase.phase == ticket_state::TicketPhaseKind::Execute
         })
         .max_by_key(|phase| phase.batch)
+}
+
+pub(super) fn task_schedule_selection<'a>(state: &'a State, task: &TaskRec) -> Option<&'a str> {
+    if matches!(
+        task.status.as_str(),
+        "pending" | "invited" | "closed" | "cancelled"
+    ) {
+        return None;
+    }
+    latest_task_execute(state, &task.id)
         .filter(|phase| phase.status == ticket_state::TicketPhaseStatus::Running)
-        .and_then(|phase| phase.slot_name.clone())
-        .map(TaskScheduleSelection::Name)
+        .and_then(|phase| phase.slot_name.as_deref())
+        .filter(|name| {
+            state
+                .task_assignment(&task.id)
+                .is_none_or(|current| current.name == *name)
+        })
+}
+
+fn holding_execute_batch(state: &State, task: &TaskRec) -> bool {
+    use ticket_state::{TicketPhaseKind, TicketPhaseStatus};
+    let Some(phase) = latest_task_execute(state, &task.id) else {
+        return false;
+    };
+    let Some(assignment) = state.task_assignment(&task.id) else {
+        return false;
+    };
+    task.status == "working"
+        && phase.slot_name.as_deref() == Some(assignment.name.as_str())
+        && state.ticket_phases.iter().any(|previous| {
+            previous.task_id == task.id
+                && previous.phase == TicketPhaseKind::Execute
+                && previous.status == TicketPhaseStatus::Revoked
+                && previous.batch.checked_add(1) == Some(phase.batch)
+                && previous.binding_generation > 0
+                && match phase.status {
+                    TicketPhaseStatus::Queued => {
+                        previous.slot_name == phase.slot_name && phase.binding_generation == 0
+                    }
+                    TicketPhaseStatus::Claimed => {
+                        phase.binding_generation > 0
+                            && (previous.slot_name != phase.slot_name
+                                || phase.binding_generation > previous.binding_generation)
+                    }
+                    _ => false,
+                }
+        })
 }
 
 fn resolve_task_schedule_selection(
     server: &Server,
     state: &State,
-    selection: Option<TaskScheduleSelection>,
+    selection: Option<&str>,
     control: Option<&binding_slot::BindingControlSet>,
 ) -> Result<Option<String>, Resp> {
     match selection {
-        Some(TaskScheduleSelection::Name(name)) => match control {
-            Some(control) => goal_schedule_target_with_control(server, state, &name, control),
-            None => goal_schedule_target(server, state, &name),
+        Some(name) => match control {
+            Some(control) => goal_schedule_target_with_control(server, state, name, control),
+            None => goal_schedule_target(server, state, name),
         }
         .map(Some),
         None => Ok(None),
@@ -906,10 +968,9 @@ fn task_schedule_target(
     server: &Server,
     state: &State,
     task: &TaskRec,
-    details: &crate::board::BoardTaskDetails,
     control: Option<&binding_slot::BindingControlSet>,
 ) -> Result<Option<String>, Resp> {
-    let selection = task_schedule_selection(state, task, details);
+    let selection = task_schedule_selection(state, task);
     resolve_task_schedule_selection(server, state, selection, control)
 }
 
@@ -934,6 +995,9 @@ fn task_goal_transition_events(
             Event::TicketPhaseRecorded { phase } => {
                 task_ids.insert(phase.task_id.as_str());
             }
+            Event::TaskAssignmentUpdated { assignment } => {
+                task_ids.insert(assignment.task_id.as_str());
+            }
             _ => {}
         }
     }
@@ -953,10 +1017,7 @@ fn task_goal_transition_events(
                 } => before.notification_subscriptions.get(subscription_id),
                 _ => None,
             };
-            subscription.is_some_and(|subscription| {
-                matches!(subscription.goal_content.as_ref().and_then(|binding| binding.source.as_ref()),
-                Some(GoalScheduleContent::BoardTask { task_id }) if task_id == id)
-            })
+            subscription.and_then(task_schedule_binding) == Some(id)
         });
         if explicit_goal_change {
             continue;
@@ -971,16 +1032,23 @@ fn task_goal_transition_events(
         let selection = if ended {
             None
         } else {
-            task_schedule_selection(after, task, details)
+            task_schedule_selection(after, task)
         };
-        let old_selection = match (old_task, old_details) {
-            (Some(task), Some(details)) => task_schedule_selection(before, task, details),
-            _ => None,
-        };
+        // A revoked Execute phase can be reclaimed by the same name or
+        // reassigned by invitation. Keep the cadence held until typed start.
+        if !ended && selection.is_none() && holding_execute_batch(after, task) {
+            continue;
+        }
+        let old_selection = old_task.and_then(|task| task_schedule_selection(before, task));
         let form_changed = old_details.and_then(|details| details.long_horizon.as_ref())
             != details.long_horizon.as_ref();
         ended |= selection.is_none();
-        if !ended && !form_changed && old_selection == selection {
+        if !ended
+            && old_selection == selection
+            && (!form_changed
+                || details.invitation.is_some()
+                || old_details.is_some_and(|details| details.invitation.is_some()))
+        {
             continue;
         }
         let started = !ended && old_selection.is_none();
@@ -996,7 +1064,7 @@ fn task_goal_transition_events(
             target.as_deref(),
             ended,
             if started {
-                GoalScheduleOperation::Explicit
+                GoalScheduleOperation::TaskStart
             } else {
                 GoalScheduleOperation::Derived
             },
@@ -1010,26 +1078,36 @@ fn task_goal_transition_events(
 }
 
 fn edited_board_goal_reminders(before: &State, after: &State, changes: &[Event]) -> Vec<String> {
-    let changed_tasks: std::collections::HashSet<_> = changes.iter().filter_map(|change| {
-        let Event::BoardDetailsChanged { task_id, details } = change else { return None };
-        let old = before.board_details.get(task_id)?;
-        let old_goal = old.long_horizon.as_ref()?;
-        let current_goal = details.long_horizon.as_ref()?;
-        (old_goal != current_goal
-            || old.title != details.title
-            || old.delivery_condition != details.delivery_condition
-            || old.test_condition != details.test_condition
-            || old.invitation.is_some() != details.invitation.is_some()).then_some(task_id)
-    }).collect();
+    let changed_tasks: std::collections::HashSet<_> = changes
+        .iter()
+        .filter_map(|change| {
+            let Event::BoardDetailsChanged { task_id, details } = change else {
+                return None;
+            };
+            let old = before.board_details.get(task_id)?;
+            let old_goal = old.long_horizon.as_ref()?;
+            let current_goal = details.long_horizon.as_ref()?;
+            (old.invitation.is_none()
+                && details.invitation.is_none()
+                && (old_goal != current_goal
+                    || old.title != details.title
+                    || old.delivery_condition != details.delivery_condition
+                    || old.test_condition != details.test_condition))
+                .then_some(task_id.as_str())
+        })
+        .collect();
     if changed_tasks.is_empty() {
         return Vec::new();
     }
-    after.notification_subscriptions.values().filter_map(|sub| {
-        let Some(GoalScheduleContent::BoardTask { task_id }) =
-            sub.goal_content.as_ref().and_then(|binding| binding.source.as_ref())
-        else { return None };
-        (sub.periodic_declared && changed_tasks.contains(task_id)).then_some(sub)
-    }).flat_map(|sub| retractable_messages_for_subscription(after, &sub.id)).collect()
+    after
+        .notification_subscriptions
+        .values()
+        .filter_map(|sub| {
+            let task_id = task_schedule_binding(sub)?;
+            (sub.periodic_declared && changed_tasks.contains(task_id)).then_some(sub)
+        })
+        .flat_map(|sub| retractable_messages_for_subscription(after, &sub.id))
+        .collect()
 }
 
 impl ProjectRuntimeManager {

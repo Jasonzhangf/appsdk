@@ -9,21 +9,12 @@ fn timer_state_execution_schedule_requires_typed_running_phase() {
         "status":"invited", "created_ms":1, "updated_ms":1
     }))
     .unwrap();
-    let mut details = crate::board::BoardTaskDetails::legacy(&task.id, true);
-    details.invitation = Some(
-        serde_json::from_value(json!({
-            "peer_id":"invitee", "binding_id":"binding", "message_id":"invite",
-            "created_ms":1
-        }))
-        .unwrap(),
-    );
     assert!(
-        task_schedule_selection(&state, &task, &details).is_none(),
+        task_schedule_selection(&state, &task).is_none(),
         "a pending invitation must not select an Execute timer owner"
     );
     let mut task = task;
     task.status = "working".into();
-    details.invitation = None;
     let mut phase = TicketPhaseRecord {
         task_id: task.id.clone(),
         phase: TicketPhaseKind::Execute,
@@ -41,13 +32,12 @@ fn timer_state_execution_schedule_requires_typed_running_phase() {
     };
     state.ticket_phases.push(phase.clone());
     assert!(
-        task_schedule_selection(&state, &task, &details).is_none(),
+        task_schedule_selection(&state, &task).is_none(),
         "acceptance and claim are not typed start"
     );
     phase.status = TicketPhaseStatus::Running;
     state.ticket_phases[0] = phase;
-    assert!(matches!(task_schedule_selection(&state, &task, &details),
-        Some(TaskScheduleSelection::Name(name)) if name == "Alice"));
+    assert_eq!(task_schedule_selection(&state, &task), Some("Alice"));
     for status in [
         TicketPhaseStatus::WaitingAssignment,
         TicketPhaseStatus::Queued,
@@ -56,19 +46,19 @@ fn timer_state_execution_schedule_requires_typed_running_phase() {
         TicketPhaseStatus::Revoked,
     ] {
         state.ticket_phases[0].status = status;
-        assert!(task_schedule_selection(&state, &task, &details).is_none());
+        assert!(task_schedule_selection(&state, &task).is_none());
     }
     let mut older = state.ticket_phases[0].clone();
     older.batch = 0;
     older.status = TicketPhaseStatus::Running;
     state.ticket_phases.push(older);
     assert!(
-        task_schedule_selection(&state, &task, &details).is_none(),
+        task_schedule_selection(&state, &task).is_none(),
         "a revoked latest batch must not expose an older Running phase"
     );
     state.ticket_phases.clear();
     assert!(
-        task_schedule_selection(&state, &task, &details).is_none(),
+        task_schedule_selection(&state, &task).is_none(),
         "legacy working status alone must not start execution cadence"
     );
 }
@@ -83,6 +73,80 @@ fn edit_worker(state: &mut State, id: &str) {
             registered_ms: now_ms(),
             transport: Some(peer_tests::test_appserver_transport(id)),
         },
+    );
+}
+
+#[test]
+fn timer_state_wait_holds_task_occurrence_bound_through_direct_lease() {
+    let (server, root) = peer_tests::test_server();
+    let mut state = State::default();
+    let now = now_ms();
+    let transport = peer_tests::test_appserver_transport("timer-owner");
+    let mut task: TaskRec = serde_json::from_value(json!({
+        "id":"queued-timer", "owner":"timer-owner", "created_by":"timer-owner",
+        "status":"working", "created_ms":now, "updated_ms":now
+    }))
+    .unwrap();
+    state.apply(&Event::TaskCreated { task: task.clone() });
+    state.apply(&Event::TicketPhaseRecorded {
+        phase: serde_json::from_value(json!({
+            "task_id": task.id, "phase":"execute", "batch":1, "priority":"p2",
+            "status":"running", "slot_name":"Bob", "binding_generation":1,
+            "enqueue_seq":1, "attempt_generation":1, "depends_on":[]
+        }))
+        .unwrap(),
+    });
+    let lease = edit_subscription("direct-lease", "timer-owner", "armed", now);
+    let mut goal = lease.clone();
+    goal.id = "linked-goal".into();
+    goal.goal_content.as_mut().unwrap().source = Some(GoalScheduleContent::BoardTask {
+        task_id: task.id.clone(),
+    });
+    state.apply(&Event::NotificationSubscribed { subscription: goal });
+    let message: Message = serde_json::from_value(json!({
+        "id":"queued-wake", "from":"daemon", "to":"timer-owner", "type":"notify",
+        "subject":"deadline:goal:task:queued-timer", "body":"prior occurrence",
+        "created_ms":now, "state":"pending"
+    }))
+    .unwrap();
+    state.apply(&Event::NotificationOccurrenceIssued {
+        message_id: message.id.clone(),
+        subscription_id: "linked-goal".into(),
+        trigger_ms: now,
+        idle_triggered: false,
+    });
+    let allowed = |state: &State| {
+        timers::goal_wake_delivery_allowed(&server, state, &message, &lease, &transport, now)
+    };
+    let running = allowed(&state);
+    task.status = "waiting".into();
+    task.wait = Some(
+        serde_json::from_value(json!({
+            "waiter":"timer-owner", "waiting_for":"resource", "responsible_actor":"holder",
+            "reason":"resource_conflict", "deadline_ms":now + 60_000,
+            "resume_on":["resource_released"], "escalation":"master"
+        }))
+        .unwrap(),
+    );
+    state.apply(&Event::TaskUpdated { task });
+    let waiting = allowed(&state);
+    state.notification_occurrences.clear();
+    let independent = allowed(&state);
+    state.apply(&Event::WakeBound {
+        message_id: message.id.clone(),
+        subscription_id: "linked-goal".into(),
+    });
+    let historical = timers::queued_task_occurrence_actionable(&state, &message);
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(running);
+    assert!(
+        !waiting,
+        "the final AppServer reservation must hold the queued task occurrence"
+    );
+    assert!(independent);
+    assert!(
+        !historical,
+        "a historical task wake binding must also stay quiet"
     );
 }
 
@@ -142,7 +206,8 @@ fn timer_state_running_transition_arms_once_and_clears_execution_residue() {
             phase: phase.clone(),
         })
         .unwrap();
-    let true_schedule = edit_subscription("true-goal", "timer-owner", "armed", now_ms());
+    let mut true_schedule = edit_subscription("true-goal", "timer-owner", "armed", now_ms());
+    true_schedule.subject = Some(format!("goal:task:{}", task.id));
     before
         .notification_subscriptions
         .insert(true_schedule.id.clone(), true_schedule.clone());
@@ -184,6 +249,29 @@ fn timer_state_running_transition_arms_once_and_clears_execution_residue() {
         running.notification_subscriptions
     );
     assert_eq!(repeated.ticket_phases, running.ticket_phases);
+
+    let mut offered = details.clone();
+    offered.invitation = Some(
+        serde_json::from_value(json!({
+            "peer_id":"other", "binding_id":"other-binding", "message_id":"reassign",
+            "created_ms":2
+        }))
+        .unwrap(),
+    );
+    let invited = server
+        .checked_candidate_with_goal(
+            &running,
+            &[Event::BoardDetailsChanged {
+                task_id: task.id.clone(),
+                details: offered,
+            }],
+            Some(&control),
+        )
+        .unwrap();
+    assert_eq!(
+        invited.notification_subscriptions,
+        running.notification_subscriptions
+    );
 
     let mut with_residue = running.clone();
     let message: Message = serde_json::from_value(json!({
@@ -264,9 +352,13 @@ fn timer_state_running_transition_arms_once_and_clears_execution_residue() {
             // A typed restart can create the next batch within the same
             // millisecond. The receipt must select the live batch on a tie.
             let retired_created_ms = restarted.notification_subscriptions[id].created_ms;
-            for subscription in restarted.notification_subscriptions.values_mut().filter(|sub| {
-                sub.subject.as_deref() == Some("goal:task:timer-lifecycle") && sub.status == "armed"
-            }) {
+            for subscription in restarted
+                .notification_subscriptions
+                .values_mut()
+                .filter(|sub| {
+                    task_schedule_binding(sub) == Some(task.id.as_str()) && sub.status == "armed"
+                })
+            {
                 subscription.created_ms = retired_created_ms;
             }
             assert_eq!(task_goal_receipt(&restarted, &task.id)["armed"], true);
@@ -274,10 +366,8 @@ fn timer_state_running_transition_arms_once_and_clears_execution_residue() {
                 restarted
                     .notification_subscriptions
                     .values()
-                    .filter(
-                        |sub| sub.subject.as_deref() == Some("goal:task:timer-lifecycle")
-                            && sub.status == "armed"
-                    )
+                    .filter(|sub| task_schedule_binding(sub) == Some(task.id.as_str())
+                        && sub.status == "armed")
                     .count(),
                 1
             );

@@ -2,80 +2,55 @@ use super::*;
 use crate::scope::RouteScope;
 use crate::server::binding_slot;
 
-fn rearm_cancelled_project_patrol(
-    state: &mut State,
-    created: bool,
-    previous: Option<&TaskRec>,
-    task: &TaskRec,
-    event_ms: i64,
-) {
-    if task_status_is_terminal(&task.status) {
-        return;
-    }
-    let became_actionable = crate::server::keepalive::actionable(&task.status)
-        && !previous.is_some_and(|previous| crate::server::keepalive::actionable(&previous.status));
-    let wait_released = previous
-        .and_then(|previous| previous.wait.as_ref())
-        .is_some()
-        && task.wait.is_none();
-    if !created && !became_actionable && !wait_released {
-        return;
-    }
-    let subscription_ids: Vec<String> = state
-        .notification_subscriptions
-        .values()
-        .filter(|subscription| {
-            crate::server::is_exact_project_patrol(subscription)
-                && subscription.status == "cancelled"
-                && state.global.projects.values().any(|project| {
-                    project.master_grants.values().any(|grant| {
-                        grant.agent_id.as_str() == subscription.worker_id
-                            && state
-                                .global
-                                .lookup_master_grant(&grant.project_scope, &grant.binding_id)
-                                .is_some_and(|current| current == grant)
-                            && state
-                                .global
-                                .lookup_binding_for(
-                                    &crate::scope::RouteScope {
-                                        app_scope_id: grant.app_scope_id.clone(),
-                                        project_scope_id: grant.project_scope.clone(),
-                                    },
-                                    &grant.binding_id,
-                                )
-                                .is_some_and(|binding| binding.agent_id == grant.agent_id)
-                    })
-                })
-        })
-        .map(|subscription| subscription.id.clone())
-        .collect();
-    for subscription_id in subscription_ids {
-        let Some(subscription) = state.notification_subscriptions.get_mut(&subscription_id) else {
-            continue;
-        };
-        let Some(worker) = state.workers.get(&subscription.worker_id).cloned() else {
-            continue;
-        };
-        let Some(transport) = crate::server::selected_transport_for_worker(&worker) else {
-            continue;
-        };
-        let Some(target) = crate::server::notification_target(&transport) else {
-            continue;
-        };
+impl State {
+    pub(crate) fn project_patrol_rearm_event(
+        &self,
+        before: &State,
+        route: &RouteScope,
+        now: i64,
+    ) -> Option<Event> {
+        let state = self;
+        let grant = crate::server::current_master_grant(state, Some(route))?;
+        let master = grant.agent_id.as_str();
+        if state
+            .global
+            .lookup_binding_for(route, &grant.binding_id)?
+            .agent_id
+            != grant.agent_id
+        {
+            return None;
+        }
+        let subscription =
+            crate::server::exact_project_patrol(&state.notification_subscriptions, master, now)?;
+        if subscription.status != "cancelled"
+            || subscription.expires_ms <= now
+            || subscription.fired_count >= subscription.repeat_count
+        {
+            return None;
+        }
+        let project = route.project_scope_id.as_str();
+        let before_ready: std::collections::HashSet<_> =
+            crate::server::project_task_ids(before, project)
+                .into_iter()
+                .filter(|id| before.task_actionable_for(&before.tasks[id], None))
+                .collect();
+        if !crate::server::project_task_ids(state, project)
+            .iter()
+            .any(|id| {
+                !before_ready.contains(id) && state.task_actionable_for(&state.tasks[id], None)
+            })
+        {
+            return None;
+        }
+        let transport = crate::server::selected_transport_for_worker(state.workers.get(master)?)?;
+        let target = crate::server::notification_target(&transport)?;
+        let mut subscription = subscription.clone();
         subscription.method = transport.kind.as_str().to_owned();
         subscription.target = target.into_owned();
         subscription.status = "armed".into();
         subscription.status_reason = None;
-        subscription.trigger_ms = Some(
-            event_ms.saturating_add(crate::board_patrol_policy::BOARD_IDLE_PATROL_INTERVAL_MS),
-        );
-        subscription.repeat_count = subscription
-            .repeat_count
-            .max(subscription.fired_count.saturating_add(100));
-        subscription.expires_ms = subscription.expires_ms.max(
-            event_ms.saturating_add((crate::server::MAX_NOTIFICATION_TTL_SECONDS as i64) * 1000),
-        );
-        subscription.updated_ms = event_ms;
+        subscription.updated_ms = now;
+        Some(Event::NotificationSubscribed { subscription })
     }
 }
 
@@ -172,7 +147,7 @@ impl State {
         use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
         let state = self;
         let matches = |id: &str| actor.is_none_or(|(worker, name)| id == worker || id == name);
-        let owner = || {
+        let owner = |task: &TaskRec| {
             state.task_assignments.get(&task.id).map_or_else(
                 || matches(&task.owner),
                 |assignment| matches(&assignment.name),
@@ -184,7 +159,7 @@ impl State {
                 .get(&task.id)
                 .is_some_and(|receipt| receipt.verification == CleanupVerification::Verified);
         if task_status_is_terminal(&task.status) {
-            return cleanup && owner();
+            return cleanup && owner(task);
         }
         if let Some(wait) = task.wait.as_ref().filter(|wait| {
             !wait.responsible_actor.is_empty()
@@ -202,7 +177,14 @@ impl State {
                             .is_some_and(|receipt| {
                                 receipt.verification == CleanupVerification::Verified
                             })))
-                    && matches(&wait.responsible_actor)
+                    && (if let Some(binding) = state.worktree_bindings.values().find(|binding| {
+                        binding.task_id == holder.id
+                            && task.worktree_path.as_deref() == Some(binding.worktree_root.as_str())
+                    }) {
+                        matches(&binding.owner_agent_id)
+                    } else {
+                        owner(holder)
+                    })
             });
         }
         if let Some(merge) = state.pending_merges.get(&task.id) {
@@ -265,8 +247,43 @@ impl State {
         }
         // The current owner records review evidence when there is no typed
         // reviewer assignment, and owns integration and cleanup by default.
-        owner()
+        owner(task)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn timer_state_resource_wait_follows_current_holder() {
+    let mut state = State::default();
+    let holder: TaskRec = serde_json::from_value(serde_json::json!({
+        "id":"resource", "owner":"new-carrier", "created_by":"old-carrier",
+        "status":"working", "feature_id":"shared", "created_ms":1, "updated_ms":2
+    }))
+    .unwrap();
+    let waiter: TaskRec = serde_json::from_value(serde_json::json!({
+        "id":"waiter", "owner":"waiter", "created_by":"waiter",
+        "status":"waiting", "feature_id":"shared", "created_ms":1, "updated_ms":2,
+        "wait":{"waiter":"waiter","waiting_for":"resource","responsible_actor":"old-carrier",
+                "reason":"resource_conflict","deadline_ms":100,"resume_on":["resource_released"],
+                "escalation":"master"}
+    }))
+    .unwrap();
+    state.tasks.insert(holder.id.clone(), holder);
+    state.task_assignments.insert(
+        "resource".into(),
+        crate::server::name_state::TaskAssignment {
+            task_id: "resource".into(),
+            name: "Bob".into(),
+            session_id: "new-session".into(),
+            assignment_revision: 2,
+            updated_ms: 2,
+            reflow: None,
+        },
+    );
+    assert!(state.task_actionable_for(&waiter, Some(("new-carrier", "Bob"))));
+    assert!(!state.task_actionable_for(&waiter, Some(("old-carrier", "Carol"))));
+    assert!(!state.task_actionable_for(&waiter, Some(("waiter", "Alice"))));
+    assert!(state.task_actionable_for(&waiter, None));
 }
 
 impl State {
@@ -1202,8 +1219,6 @@ impl State {
                 self.board_patrol_notice_ids.insert(message_id.clone());
             }
             Event::TaskCreated { task } | Event::TaskUpdated { task } => {
-                let created = matches!(ev, Event::TaskCreated { .. });
-                let previous_task = self.tasks.get(&task.id).cloned();
                 let cancellation_owner = self
                     .cancelled_board_patrol_tasks
                     .get(&task.id)
@@ -1235,17 +1250,6 @@ impl State {
                     }
                 }
                 self.tasks.insert(task.id.clone(), task.clone());
-                rearm_cancelled_project_patrol(
-                    self,
-                    created,
-                    previous_task.as_ref(),
-                    task,
-                    if task.updated_ms > 0 {
-                        task.updated_ms
-                    } else {
-                        task.created_ms
-                    },
-                );
             }
             Event::NameResolutionCommitted {
                 project_scope,
@@ -1761,6 +1765,7 @@ impl State {
                     && m.state != "read"
                     && m.state != "superseded"
                     && self.scheduler_message_deliverable(&m.id)
+                    && crate::server::timers::queued_task_occurrence_actionable(self, m)
                     && self
                         .target_sessions
                         .get(&m.id)

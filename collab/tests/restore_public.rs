@@ -171,15 +171,12 @@ impl Fixture {
             std::thread::sleep(Duration::from_millis(20));
         }
         let signal_target = if signal_group {
-            format!("-{}", child.id())
+            -(child.id() as libc::pid_t)
         } else {
-            child.id().to_string()
+            child.id() as libc::pid_t
         };
-        let signal = Command::new("kill")
-            .args(["-INT", &signal_target])
-            .status()
-            .unwrap();
-        assert!(signal.success(), "failed to interrupt restore");
+        let signal = unsafe { libc::kill(signal_target, libc::SIGINT) };
+        assert_eq!(signal, 0, "failed to interrupt restore");
         fs::write(self.state.join("release-create"), b"signal-delivered")
             .expect("failed to release fixture create response");
         let output = child.wait_with_output().unwrap();

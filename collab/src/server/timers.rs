@@ -73,8 +73,107 @@ fn tick_after_tmux(server: &Arc<Server>, now: i64) {
     // outside this contract. Deadline wakeups use the normal notification
     // path; pane output is observation only, never a consumption receipt.
     tick_with_deadline_wake_at(server, now);
+    tick_batch_receipt_coalescing_at(server, now);
     if stale_identity_maintenance_due(&server.root, now) {
         super::peer_lifecycle::maintain_definitive_missing(server.as_ref(), now);
+    }
+}
+
+fn tick_batch_receipt_coalescing_at(server: &Arc<Server>, now: i64) {
+    if !server.config.notifications.enabled {
+        return;
+    }
+    let window_ms =
+        (server.config.notifications.receipt_batch_window_seconds as i64).saturating_mul(1000);
+    if window_ms <= 0 {
+        return;
+    }
+    let candidates: Vec<(String, crate::server::state::WorkerRec, String)> = {
+        let state = server.state.lock().unwrap();
+        if state.admission_frozen() || state.pending_batch_receipts.is_empty() {
+            return;
+        }
+        state
+            .pending_batch_receipts
+            .keys()
+            .filter_map(|sender| {
+                let worker = state.workers.get(sender)?.clone();
+                let transport = super::selected_transport_for_worker(&worker)?;
+                let sub = state
+                    .notification_subscriptions
+                    .get(&super::default_direct_message_id(sender))?;
+                (sub.status == "armed"
+                    && sub.expires_ms > now
+                    && super::subscription_matches_transport(sub, &transport))
+                .then(|| (sender.clone(), worker, sub.id.clone()))
+            })
+            .collect()
+    };
+    for (sender, worker, subscription_id) in candidates {
+        let activity = super::keepalive::current_board_patrol_activity(server, &worker)
+            .unwrap_or(crate::server::name_state::AgentActivity::Unknown);
+        if activity == crate::server::name_state::AgentActivity::Busy {
+            continue;
+        }
+        let message_id = {
+            let mut state = server.state.lock().unwrap();
+            if state.admission_frozen() {
+                continue;
+            }
+            let Some(entries) = state.pending_batch_receipts.get(&sender).cloned() else {
+                continue;
+            };
+            let Some((coalesced, body)) =
+                super::mailbox::coalesce_batch_receipts(&entries, now, window_ms)
+            else {
+                continue;
+            };
+            let message_ids = coalesced
+                .iter()
+                .map(|entry| entry.message_id.clone())
+                .collect::<Vec<_>>();
+            let id = super::gen_msg_id();
+            let events = vec![
+                Event::BatchReceiptsFlushed {
+                    sender: sender.clone(),
+                    message_ids,
+                },
+                Event::DeliveryMode {
+                    msg_id: id.clone(),
+                    mode: "immediate".into(),
+                    source_thread_id: None,
+                },
+                Event::Sent {
+                    msg: Message {
+                        id: id.clone(),
+                        from: "collab-server".into(),
+                        to: sender.clone(),
+                        mtype: "batch-receipt".into(),
+                        subject: Some("batch-receipt".into()),
+                        body,
+                        in_reply_to: None,
+                        created_ms: now,
+                        state: "pending".into(),
+                        wake_attempt_count: 0,
+                        last_wake_attempt_ms: 0,
+                        retry_attempted: false,
+                    },
+                },
+                Event::WakeBound {
+                    message_id: id.clone(),
+                    subscription_id: subscription_id.clone(),
+                },
+            ];
+            if server.commit_locked_checked(&mut state, &events).is_ok() {
+                Some(id)
+            } else {
+                None
+            }
+        };
+        if let Some(message_id) = message_id {
+            let _ =
+                super::attempt_notification_detailed_with_at(server, &message_id, &subscription_id, now);
+        }
     }
 }
 

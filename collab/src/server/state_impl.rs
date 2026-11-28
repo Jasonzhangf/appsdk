@@ -905,6 +905,30 @@ impl State {
                         &mut self.master_wake,
                     );
                 }
+                if let Some(message) = self.msgs.get(message_id) {
+                    if message.from != "collab-server"
+                        && message.mtype != "batch-receipt"
+                        && self.workers.contains_key(&message.from)
+                    {
+                        self.pending_batch_receipts
+                            .entry(message.from.clone())
+                            .or_default()
+                            .push(crate::server::mailbox::BatchReceiptEntry {
+                                message_id: message.id.clone(),
+                                recipient: message.to.clone(),
+                                status: "delivered".into(),
+                                observed_ms: *accepted_ms,
+                            });
+                    }
+                }
+            }
+            Event::BatchReceiptsFlushed { sender, message_ids } => {
+                if let Some(entries) = self.pending_batch_receipts.get_mut(sender) {
+                    entries.retain(|entry| !message_ids.contains(&entry.message_id));
+                    if entries.is_empty() {
+                        self.pending_batch_receipts.remove(sender);
+                    }
+                }
             }
             Event::NotificationSubscribed { subscription } => {
                 self.notification_subscriptions
@@ -1081,6 +1105,21 @@ impl State {
                         .is_some_and(|message| message.state != "read");
                     if let Some(m) = self.msgs.get_mut(id) {
                         m.state = "read".into();
+                        if message_was_unread
+                            && m.from != "collab-server"
+                            && m.mtype != "batch-receipt"
+                            && self.workers.contains_key(&m.from)
+                        {
+                            self.pending_batch_receipts
+                                .entry(m.from.clone())
+                                .or_default()
+                                .push(crate::server::mailbox::BatchReceiptEntry {
+                                    message_id: m.id.clone(),
+                                    recipient: m.to.clone(),
+                                    status: "read".into(),
+                                    observed_ms: consumed_ms.unwrap_or_else(now_ms),
+                                });
+                        }
                     }
                     'subscription: {
                         let Some(subscription_id) = self.notification_occurrences.get(id)

@@ -391,6 +391,7 @@ impl Fixture {
             .env("HOME", self.root.join("home"))
             .env("CODEX_HOME", self.root.join("home"))
             .env("COLLAB_STATE_DIR", &self.host_state)
+            .env("COLLAB_TEST_ITERM2_ATTACHMENT", "fixture")
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env_remove("ANTIGRAVITY_CONVERSATION_ID");
         for (key, value) in std::env::vars_os() {
@@ -539,6 +540,7 @@ impl Fixture {
                 std::env::var_os("PATH").unwrap_or_default(),
             )
             .env("COLLAB_STATE_DIR", &self.host_state)
+            .env("COLLAB_TEST_ITERM2_ATTACHMENT", "fixture")
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env_remove("ANTIGRAVITY_CONVERSATION_ID");
         command

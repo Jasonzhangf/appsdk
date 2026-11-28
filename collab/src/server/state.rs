@@ -1646,6 +1646,10 @@ pub enum Event {
         #[serde(default)]
         evidence: Option<serde_json::Value>,
     },
+    BatchReceiptsFlushed {
+        sender: String,
+        message_ids: Vec<String>,
+    },
     NotificationSubscribed {
         subscription: NotificationSubscription,
     },

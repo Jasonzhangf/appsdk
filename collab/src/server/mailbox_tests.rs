@@ -172,3 +172,38 @@ fn batch_selection_keeps_complete_window_without_stranding() {
     assert_eq!(batch.first().map(|item| item.1.as_str()), Some("m0"));
     assert!(!batch.iter().any(|item| item.1 == "m_boundary"));
 }
+
+#[test]
+fn coalesce_batch_receipts_waits_for_window_and_deduplicates_latest_status() {
+    let entries = vec![
+        BatchReceiptEntry {
+            message_id: "m1".into(),
+            recipient: "peer-a".into(),
+            status: "delivered".into(),
+            observed_ms: 1_000,
+        },
+        BatchReceiptEntry {
+            message_id: "m2".into(),
+            recipient: "peer-b".into(),
+            status: "delivered".into(),
+            observed_ms: 5_000,
+        },
+        BatchReceiptEntry {
+            message_id: "m1".into(),
+            recipient: "peer-a".into(),
+            status: "read".into(),
+            observed_ms: 30_000,
+        },
+    ];
+    assert!(
+        coalesce_batch_receipts(&entries, 120_999, 120_000).is_none(),
+        "must hold inside 120s coalescing window"
+    );
+    let (coalesced, body) = coalesce_batch_receipts(&entries, 121_000, 120_000).unwrap();
+    assert_eq!(coalesced.len(), 2);
+    assert_eq!(coalesced[0].message_id, "m1");
+    assert_eq!(coalesced[0].status, "read");
+    assert_eq!(coalesced[1].message_id, "m2");
+    assert_eq!(coalesced[1].status, "delivered");
+    assert!(body.contains("COLLAB_BATCH_RECEIPT: 2 message update(s)"));
+}

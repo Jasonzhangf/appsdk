@@ -278,12 +278,13 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
     let tmux = default_tmux_notification_sink();
     Arc::new(
         move |transport, source_thread_id, body, message_id, context, mode| {
+            let bounded_submission = context.guarded_one_shot || context.guarded_goal;
             // Exhaustive on purpose. This used to be `if kind != AppServer`,
             // which sent any new kind into the tmux sink and failed with
             // "Collab notifications require tmux".
             match transport.kind {
                 TransportKind::DesktopBridge => {
-                    if context.guarded_one_shot {
+                    if bounded_submission {
                         crate::client::adapters::desktop_bridge::guarded_send(
                             transport,
                             body,
@@ -301,7 +302,7 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                     // the mailbox id.
                     let client_message_id = appserver_client_message_id(message_id);
                     if mode == "queued" {
-                        if context.guarded_one_shot {
+                        if bounded_submission {
                             crate::client::adapters::codex_app_server::guarded_queued_notify(
                                 transport,
                                 source_thread_id,
@@ -318,7 +319,7 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                         }
                         .map_err(|error| error.to_string())
                     } else {
-                        if context.guarded_one_shot {
+                        if bounded_submission {
                             crate::client::adapters::codex_app_server::guarded_immediate_notify(
                                 transport,
                                 source_thread_id,
@@ -352,7 +353,7 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                         "DSH_ENDPOINT_REJECTED: selected dsh transport has no agent id".to_owned()
                     })?;
                     let (gateway_mode, internal_marker) = dsh_wake_mode(mode, message_id)?;
-                    let mut receipt = if context.guarded_one_shot {
+                    let mut receipt = if bounded_submission {
                         crate::client::adapters::dsh::guarded_notify(
                             endpoint,
                             runtime_id,

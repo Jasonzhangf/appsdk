@@ -1250,6 +1250,54 @@ fn has_direct_message_subscription(status: &Value) -> bool {
         .any(|subscription| subscription["event"] == "direct-message")
 }
 
+fn set_typed_external_wait(fixture: &mut AppFixture, task_id: &str) {
+    fixture.update_current_state(|state| {
+        state["tasks"][task_id]["status"] = json!("waiting");
+        state["tasks"][task_id]["wait"] = json!({
+            "waiter": state["tasks"][task_id]["owner"].clone(),
+            "waiting_for": "external-resource",
+            "responsible_actor": "external-owner",
+            "reason": "external dependency",
+            "deadline_ms": i64::MAX,
+            "resume_on": ["resource_released"],
+            "escalation": "master"
+        });
+    });
+}
+
+fn release_retained_external_wait(fixture: &AppFixture, task_id: &str) {
+    fixture.run_public(&["context"], NEXT_CARRIER);
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "external-resource",
+            "--feature",
+            "patrol-resource",
+        ],
+        NEXT_CARRIER,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "close",
+            "external-resource",
+            "--force",
+            "--reason",
+            "external holder returned and completed",
+        ],
+        NEXT_CARRIER,
+    );
+    fixture.run_public(
+        &["task", "finalize-cleanup", "external-resource"],
+        NEXT_CARRIER,
+    );
+    fixture.run_public(
+        &["task", "update", task_id, "--status", "working"],
+        THREAD_A,
+    );
+}
+
 #[test]
 fn board_idle_patrol_control_cancel_persists_and_rearm_keeps_inbox() {
     let mut fixture = AppFixture::new();
@@ -1268,6 +1316,21 @@ fn board_idle_patrol_control_cancel_persists_and_rearm_keeps_inbox() {
         "context must retain the daemon-owned direct-message lease: {before}"
     );
 
+    let refused = fixture.command_public(&["notify", "cancel", "--task-id", "T1"], THREAD_A);
+    assert!(
+        !refused.status.success(),
+        "ready work must refuse patrol cancellation"
+    );
+    let refused = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        refused.contains("BOARD_PATROL_CANCEL_NOT_ELIGIBLE"),
+        "{refused}"
+    );
+    set_typed_external_wait(&mut fixture, "T1");
     let cancelled = fixture.run_public(
         &[
             "notify",
@@ -1315,15 +1378,15 @@ fn board_idle_patrol_control_cancel_persists_and_rearm_keeps_inbox() {
 
     let final_status = fixture.run_public(&["notify", "status"], THREAD_A);
     assert!(board_patrol_ids(&final_status, "cancelled_tasks").is_empty());
-    assert_eq!(
-        board_patrol_ids(&final_status, "eligible_task_ids"),
-        vec!["T1"]
-    );
+    assert!(board_patrol_ids(&final_status, "eligible_task_ids").is_empty());
+    release_retained_external_wait(&fixture, "T1");
+    let ready = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(board_patrol_ids(&ready, "eligible_task_ids"), vec!["T1"]);
 }
 
 #[test]
 fn board_idle_patrol_control_cancel_all_is_atomic_and_new_task_stays_eligible() {
-    let fixture = AppFixture::new();
+    let mut fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);
     fixture.run_public(&["context"], THREAD_B);
     fixture.run_public(&["task", "register", "T1"], THREAD_A);
@@ -1351,6 +1414,13 @@ fn board_idle_patrol_control_cancel_all_is_atomic_and_new_task_stays_eligible() 
         vec!["T1", "T2"]
     );
 
+    let refused = fixture.command_public(&["notify", "cancel", "--reason", "all"], THREAD_A);
+    assert!(
+        !refused.status.success(),
+        "ready tasks must refuse cancellation"
+    );
+    set_typed_external_wait(&mut fixture, "T1");
+    set_typed_external_wait(&mut fixture, "T2");
     let cancelled = fixture.run_public(&["notify", "cancel", "--reason", "all"], THREAD_A);
     assert_eq!(cancelled["cancelled_task_ids"], json!(["T1", "T2"]));
 
@@ -1378,25 +1448,31 @@ fn board_idle_patrol_control_cancel_all_is_atomic_and_new_task_stays_eligible() 
     );
     let rearmed = fixture.run_public(&["notify", "status"], THREAD_A);
     assert_eq!(rearmed["board_patrol"]["cancelled_tasks"], json!(["T2"]));
+    assert_eq!(board_patrol_ids(&rearmed, "eligible_task_ids"), vec!["T3"]);
+    release_retained_external_wait(&fixture, "T1");
+    let ready = fixture.run_public(&["notify", "status"], THREAD_A);
     assert_eq!(
-        board_patrol_ids(&rearmed, "eligible_task_ids"),
+        board_patrol_ids(&ready, "eligible_task_ids"),
         vec!["T1", "T3"]
     );
 }
 
 #[test]
 fn board_idle_patrol_control_rearm_is_scoped_to_the_caller() {
-    let fixture = AppFixture::new();
+    let mut fixture = AppFixture::new();
     fixture.run_public(&["context"], THREAD_A);
     fixture.run_public(&["context"], THREAD_B);
     fixture.run_public(&["task", "register", "T1"], THREAD_A);
     fixture.run_public(&["task", "register", "U1"], THREAD_B);
+    set_typed_external_wait(&mut fixture, "T1");
+    set_typed_external_wait(&mut fixture, "U1");
     fixture.run_public(&["notify", "cancel", "--task-id", "T1"], THREAD_A);
     fixture.run_public(&["notify", "cancel", "--task-id", "U1"], THREAD_B);
 
     let rearmed = fixture.run_public(&["notify", "subscribe", "--event", "board-idle"], THREAD_A);
     assert_eq!(rearmed["rearmed_task_ids"], json!(["T1"]));
 
+    release_retained_external_wait(&fixture, "T1");
     let alice = fixture.run_public(&["notify", "status"], THREAD_A);
     assert!(board_patrol_ids(&alice, "cancelled_tasks").is_empty());
     assert_eq!(board_patrol_ids(&alice, "eligible_task_ids"), vec!["T1"]);
@@ -1416,6 +1492,7 @@ fn board_idle_patrol_control_lifecycle_uses_stable_owner_key() {
     fixture.run_public(&["context", "--approve-grant",
         r#"{"action":"restore_master","authorization":"fixture independent master routes real task transfer"}"#], NEXT_CARRIER);
     fixture.run_public(&["task", "register", "T1"], THREAD_A);
+    set_typed_external_wait(&mut fixture, "T1");
     fixture.run_public(
         &[
             "board",
@@ -1507,15 +1584,15 @@ fn board_idle_patrol_control_lifecycle_uses_stable_owner_key() {
         board_patrol_ids(&transferred_back, "cancelled_tasks").is_empty(),
         "a true owner transfer must clear the old cancellation: {transferred_back}"
     );
-    assert_eq!(
-        board_patrol_ids(&transferred_back, "eligible_task_ids"),
-        vec!["T1"]
-    );
+    assert!(board_patrol_ids(&transferred_back, "eligible_task_ids").is_empty());
+    release_retained_external_wait(&fixture, "T1");
+    let ready = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(board_patrol_ids(&ready, "eligible_task_ids"), vec!["T1"]);
 }
 
 #[test]
 fn master_notify_status_projects_peer_board_patrol_cancellations() {
-    let fixture = AppFixture::new();
+    let mut fixture = AppFixture::new();
     let master = fixture.run_public(
         &[
             "context",
@@ -1531,6 +1608,7 @@ fn master_notify_status_projects_peer_board_patrol_cancellations() {
     let peer_id = peer["identity"]["worker_id"].as_str().unwrap().to_owned();
     let peer_name = peer["name"].as_str().unwrap().to_owned();
     fixture.run_public(&["task", "register", "T1"], THREAD_B);
+    set_typed_external_wait(&mut fixture, "T1");
     let cancelled = fixture.run_public(
         &[
             "notify",

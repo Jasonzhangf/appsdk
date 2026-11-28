@@ -52,7 +52,10 @@ fn project_task_ids(state: &State, project: &str) -> Vec<String> {
     let mut task_ids: Vec<_> = state
         .tasks
         .values()
-        .filter(|task| canonical_worker_project(state, &task.owner).as_deref() == Some(project))
+        .filter(|task| {
+            canonical_worker_project(state, &task.owner).as_deref() == Some(project)
+                || canonical_worker_project(state, &task.created_by).as_deref() == Some(project)
+        })
         .map(|task| task.id.clone())
         .collect();
     task_ids.sort();
@@ -76,10 +79,7 @@ fn project_patrol_eligibility(
         let Some(task) = state.tasks.get(task_id) else {
             continue;
         };
-        if matches!(task.status.as_str(), "closed" | "cancelled") {
-            continue;
-        }
-        if task.status == "waiting" && task.wait.is_some() {
+        if !state.task_actionable_for(task, None) {
             waiting.push(task.id.clone());
         } else {
             blocked.push(json!({
@@ -209,7 +209,8 @@ fn handle_notification_subscribe(
             .notification_subscriptions
             .values()
             .filter(|subscription| {
-                goal_deadline_key(subscription).as_ref() == requested_key.as_ref()
+                task_schedule_binding(subscription).is_none()
+                    && goal_deadline_key(subscription).as_ref() == requested_key.as_ref()
                     && matches!(subscription.status.as_str(), "armed" | "consumed")
                     && subscription.expires_ms > now
             })
@@ -461,8 +462,6 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
             (left.0.as_str(), left.1.as_str()).cmp(&(right.0.as_str(), right.1.as_str()))
         });
     }
-    let owned_unclosed =
-        crate::server::state::board_patrol_owned_unclosed_task_ids(&state, &worker_id, &owner_key);
     let mut cancelled_tasks: Vec<String> = state
         .cancelled_board_patrol_tasks
         .values()
@@ -470,16 +469,14 @@ fn handle_notification_status(server: &Server, worker_id: String, token: String)
         .map(|record| record.task_id.clone())
         .collect();
     cancelled_tasks.sort();
-    let eligible_task_ids: Vec<String> = owned_unclosed
-        .iter()
-        .filter(|task_id| {
-            !state
-                .cancelled_board_patrol_tasks
-                .get(*task_id)
-                .is_some_and(|record| record.owner_key == owner_key)
-        })
-        .cloned()
-        .collect();
+    let eligible_task_ids =
+        match state::board_patrol_eligible_task_ids(&state, &control, route.as_ref(), &worker_id) {
+            Ok(Some(tasks)) => tasks,
+            Ok(None) => {
+                return Resp::err("IDENTITY_MAP_NOT_FOUND: patrol owner has no current name")
+            }
+            Err(error) => return Resp::err(error),
+        };
     let mut body = json!({
         "subscriptions": subscriptions,
         "board_patrol": {
@@ -684,6 +681,18 @@ fn handle_notification_cancel(
         Ok(cancelled) => cancelled,
         Err(error) => return Resp::err(error),
     };
+    let actionable: Vec<_> = state
+        .tasks
+        .values()
+        .filter(|task| state.task_actionable_for(task, Some((&worker_id, &owner_key))))
+        .map(|task| task.id.clone())
+        .collect();
+    if !actionable.is_empty() {
+        return Resp::err_data(
+            "BOARD_PATROL_CANCEL_NOT_ELIGIBLE: actor has ready work",
+            json!({"actionable_task_ids": actionable}),
+        );
+    }
     let events: Vec<Event> = cancelled
         .iter()
         .filter_map(|task_id| {

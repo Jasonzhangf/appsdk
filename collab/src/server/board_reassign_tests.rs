@@ -482,14 +482,13 @@ fn prepared_claim_commit_retains_admitted_control_across_rebind() {
         .expect("claim assignment");
     assert_eq!(assignment.name, idle_name);
     assert_eq!(assignment.session_id, idle_session);
-    let subscription = state
+    assert!(!state
         .notification_subscriptions
         .values()
-        .find(|subscription| {
+        .any(|subscription| {
             subscription.subject.as_deref() == Some("goal:task:named-work")
-        })
-        .expect("claim wake subscription");
-    assert_eq!(subscription.worker_id, "idle");
+                && subscription.status == "armed"
+        }), "a committed claim must not arm execution before typed start");
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

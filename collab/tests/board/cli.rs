@@ -841,13 +841,17 @@ fn task_integration_held_git_rechecks_current_owner() {
             "requested_name": owner["name"],
             "authorization": "fixture user replaces the old carrier during held integration",
             "replace_confirmed": true,
-        }).to_string();
+        })
+        .to_string();
         fixture.run_public(&["context", "--approve-grant", &grant], THREAD_C);
     });
     let (success, result) = parse_public_response(output);
     assert!(!success, "{result}");
     assert!(
-        result["error"].as_str().unwrap().starts_with("TASK_CURRENT_BINDING_REQUIRED"),
+        result["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("TASK_CURRENT_BINDING_REQUIRED"),
         "{result}"
     );
     let state = probe.fixture.current_state();
@@ -891,7 +895,10 @@ fn task_integration_held_git_rejects_changed_review_subject() {
             THREAD_B,
         );
         let current = fixture.run_public(&["task", "status", "integration-liveness"], THREAD_B);
-        let review_revision = current["review"]["subject_revision"].as_u64().unwrap().to_string();
+        let review_revision = current["review"]["subject_revision"]
+            .as_u64()
+            .unwrap()
+            .to_string();
         let reviewed = fixture.run_public(
             &[
                 "task",
@@ -1699,47 +1706,93 @@ fn architect_cannot_dispatch_and_jenny_can_assign() {
     fixture.run_public(&["context"], THREAD_C);
     let published = fixture.run_public(
         &[
-            "board", "publish", "peer-owned-task", "--title", "Independent work",
-            "--description", "One owner", "--delivery-condition", "Result available",
-            "--test-condition", "Observable result",
+            "board",
+            "publish",
+            "peer-owned-task",
+            "--title",
+            "Independent work",
+            "--description",
+            "One owner",
+            "--delivery-condition",
+            "Result available",
+            "--test-condition",
+            "Observable result",
         ],
         THREAD_C,
     );
     let revision = published["task"]["revision"].to_string();
     let before = fixture.current_state();
     let rejected = fixture.command_public(
-        &["board", "invite", "peer-owned-task", "--to", peer,
-          "--expected-revision", &revision],
+        &[
+            "board",
+            "invite",
+            "peer-owned-task",
+            "--to",
+            peer,
+            "--expected-revision",
+            &revision,
+        ],
         THREAD_B,
     );
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("BOARD_MASTER_REQUIRED"));
     let unassigned = fixture.command_public(
-        &["board", "claim", "peer-owned-task", "--expected-revision", &revision],
+        &[
+            "board",
+            "claim",
+            "peer-owned-task",
+            "--expected-revision",
+            &revision,
+        ],
         THREAD_B,
     );
     assert!(!unassigned.status.success());
     assert_eq!(fixture.current_state()["tasks"], before["tasks"]);
     let assigned = fixture.run_public(
         &[
-            "board", "publish", "jenny-task", "--title", "Scheduled work",
-            "--description", "One owner", "--delivery-condition", "Result available",
-            "--test-condition", "Observable result", "--executor", peer,
-            "--long-horizon-content", "Complete the independent task",
-            "--long-horizon-every-ms", "600000",
+            "board",
+            "publish",
+            "jenny-task",
+            "--title",
+            "Scheduled work",
+            "--description",
+            "One owner",
+            "--delivery-condition",
+            "Result available",
+            "--test-condition",
+            "Observable result",
+            "--executor",
+            peer,
+            "--long-horizon-content",
+            "Complete the independent task",
+            "--long-horizon-every-ms",
+            "600000",
         ],
         THREAD_A,
     );
     let revision = assigned["task"]["revision"].to_string();
     let invitation = fixture.run_public(
-        &["board", "invite", "jenny-task", "--to", peer,
-          "--expected-revision", &revision],
+        &[
+            "board",
+            "invite",
+            "jenny-task",
+            "--to",
+            peer,
+            "--expected-revision",
+            &revision,
+        ],
         THREAD_A,
     );
     let revision = invitation["task"]["revision"].to_string();
     let accepted = fixture.run_public(
-        &["board", "respond", "jenny-task", "--accept",
-          "--expected-revision", &revision],
+        &[
+            "board",
+            "respond",
+            "jenny-task",
+            "--accept",
+            "--expected-revision",
+            &revision,
+        ],
         THREAD_B,
     );
     assert_eq!(accepted["task"]["status"], "working");
@@ -1893,7 +1946,10 @@ fn admitted_ticket_reviewer_change_keeps_delivered_then_rework_reopens_execute_p
     );
     assert_eq!(policy["task"]["status"], "delivered");
     assert!(policy["task"]["reviewer_name"].is_null());
-    assert!(policy["task"]["next_step"].as_str().unwrap().contains("independent Codex review"));
+    assert!(policy["task"]["next_step"]
+        .as_str()
+        .unwrap()
+        .contains("independent Codex review"));
     let rework = fixture.run_public(&["task", "update", id, "--status", "rework"], THREAD_B);
     assert_eq!(rework["status"], "rework");
     let rework_board = fixture.run_public(&["board", "show"], THREAD_B);
@@ -2289,11 +2345,26 @@ fn admitted_ticket_owner_rework_status_reopens_execute_phase() {
     let id = "owner-rework-cycle";
     publish(&fixture, id);
     fixture.run_public(
-        &["board", "invite", id, "--to", &peer, "--expected-revision", "1"],
+        &[
+            "board",
+            "invite",
+            id,
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+        ],
         THREAD_A,
     );
     fixture.run_public(
-        &["board", "respond", id, "--accept", "--expected-revision", "2"],
+        &[
+            "board",
+            "respond",
+            id,
+            "--accept",
+            "--expected-revision",
+            "2",
+        ],
         THREAD_B,
     );
     fixture.run_public(
@@ -2323,7 +2394,10 @@ fn admitted_ticket_owner_rework_status_reopens_execute_phase() {
     );
     assert_eq!(delivered["status"], "delivered");
     let first = fixture.run_public(&["task", "status", id], THREAD_B);
-    let reviewed_revision = first["review"]["subject_revision"].as_u64().unwrap().to_string();
+    let reviewed_revision = first["review"]["subject_revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
     let reworked = fixture.run_public(&["task", "update", id, "--status", "rework"], THREAD_B);
     assert_eq!(reworked["status"], "rework");
     let board = fixture.run_public(&["board", "show"], THREAD_B);
@@ -2365,25 +2439,56 @@ fn admitted_ticket_owner_rework_status_reopens_execute_phase() {
     assert_eq!(redelivered["evidence"], "redelivery after owner rework");
     let status = fixture.run_public(&["task", "status", id], THREAD_B);
     assert_eq!(status["status"], "delivered");
-    let current_revision = status["review"]["subject_revision"].as_u64().unwrap().to_string();
+    let current_revision = status["review"]["subject_revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
     assert_ne!(current_revision, reviewed_revision);
     let unbound = fixture.command_public(
-        &["task", "review", id, "--accept", "--evidence", "unbound review for first delivery"],
+        &[
+            "task",
+            "review",
+            id,
+            "--accept",
+            "--evidence",
+            "unbound review for first delivery",
+        ],
         THREAD_B,
     );
     assert!(!unbound.status.success(), "{unbound:?}");
-    assert!(String::from_utf8_lossy(&unbound.stderr).contains("TASK_REVIEW_SUBJECT_REVISION_REQUIRED"));
+    assert!(
+        String::from_utf8_lossy(&unbound.stderr).contains("TASK_REVIEW_SUBJECT_REVISION_REQUIRED")
+    );
     let stale = fixture.command_public(
-        &["task", "review", id, "--accept", "--expected-subject-revision",
-            &reviewed_revision, "--evidence", "delayed independent result for first delivery"],
+        &[
+            "task",
+            "review",
+            id,
+            "--accept",
+            "--expected-subject-revision",
+            &reviewed_revision,
+            "--evidence",
+            "delayed independent result for first delivery",
+        ],
         THREAD_B,
     );
     assert!(!stale.status.success(), "{stale:?}");
     assert!(String::from_utf8_lossy(&stale.stderr).contains("TASK_REVIEW_SUBJECT_STALE"));
-    assert_eq!(fixture.run_public(&["task", "status", id], THREAD_B)["status"], "delivered");
+    assert_eq!(
+        fixture.run_public(&["task", "status", id], THREAD_B)["status"],
+        "delivered"
+    );
     let accepted = fixture.run_public(
-        &["task", "review", id, "--accept", "--expected-subject-revision",
-            &current_revision, "--evidence", "independent result for the current delivery"],
+        &[
+            "task",
+            "review",
+            id,
+            "--accept",
+            "--expected-subject-revision",
+            &current_revision,
+            "--evidence",
+            "independent result for the current delivery",
+        ],
         THREAD_B,
     );
     assert_eq!(accepted["status"], "accepted");
@@ -2703,13 +2808,25 @@ fn ordinary_request_with_historical_review_text_remains_receivable() {
     let (fixture, _, peer) = setup();
     let body = "Task quoted is delivered and requires your review as an example.";
     let sent = fixture.run_public(
-        &["send", "--to", &peer, "--type", "request",
-            "--subject", "review-required:quoted", "--content", body],
+        &[
+            "send",
+            "--to",
+            &peer,
+            "--type",
+            "request",
+            "--subject",
+            "review-required:quoted",
+            "--content",
+            body,
+        ],
         THREAD_A,
     );
     assert_eq!(sent["durable"], true);
     let received = fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
-    let quoted = received["messages"].as_array().unwrap().iter()
+    let quoted = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
         .find(|message| message["id"] == sent["msg_id"])
         .expect("ordinary request remains in the receiver's inbox");
     assert_eq!(quoted["body"], body);
@@ -2718,23 +2835,57 @@ fn ordinary_request_with_historical_review_text_remains_receivable() {
 #[test]
 fn peer_owned_publication_preserves_dependencies_and_current_name_on_claim() {
     let (fixture, _, original) = setup();
-    fixture.run_public(&["task", "register", "claim-prerequisite", "--next", "produce input"], THREAD_A);
+    fixture.run_public(
+        &[
+            "task",
+            "register",
+            "claim-prerequisite",
+            "--next",
+            "produce input",
+        ],
+        THREAD_A,
+    );
     let id = "dependent-peer-owned";
     let published = fixture.run_public(
-        &["board", "publish", id, "--title", "Dependent owner task",
-            "--description", "Use the completed input", "--delivery-condition", "Deliver output",
-            "--test-condition", "Check output", "--depends-on", "claim-prerequisite"],
+        &[
+            "board",
+            "publish",
+            id,
+            "--title",
+            "Dependent owner task",
+            "--description",
+            "Use the completed input",
+            "--delivery-condition",
+            "Deliver output",
+            "--test-condition",
+            "Check output",
+            "--depends-on",
+            "claim-prerequisite",
+        ],
         THREAD_B,
     );
     assert_eq!(published["task"]["owner"], original);
-    let blocked = fixture.command_public(&["board", "claim", id, "--expected-revision", "1"], THREAD_B);
+    let blocked = fixture.command_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        THREAD_B,
+    );
     assert!(!blocked.status.success());
     assert!(String::from_utf8_lossy(&blocked.stderr).contains("BOARD_DEPENDENCY_UNSATISFIED"));
     for status in ["verifying", "reviewed"] {
-        fixture.run_public(&["task", "update", "claim-prerequisite", "--status", status], THREAD_A);
+        fixture.run_public(
+            &["task", "update", "claim-prerequisite", "--status", status],
+            THREAD_A,
+        );
     }
     fixture.run_public(
-        &["task", "deliver", "claim-prerequisite", "--no-candidate", "--evidence", "input produced"],
+        &[
+            "task",
+            "deliver",
+            "claim-prerequisite",
+            "--no-candidate",
+            "--evidence",
+            "input produced",
+        ],
         THREAD_A,
     );
     let successor = fixture.run_public(
@@ -2743,12 +2894,25 @@ fn peer_owned_publication_preserves_dependencies_and_current_name_on_claim() {
         THREAD_C,
     );
     let board = fixture.run_public(&["board", "show"], THREAD_C);
-    let pending = board["tasks"].as_array().unwrap().iter()
-        .find(|task| task["id"] == id).unwrap();
+    let pending = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap();
     let revision = pending["revision"].as_u64().unwrap().to_string();
     assert_eq!(pending["owner"], successor["identity"]["worker_id"]);
-    assert!(!fixture.command_public(&["board", "claim", id, "--expected-revision", &revision], THREAD_B).status.success());
-    let claimed = fixture.run_public(&["board", "claim", id, "--expected-revision", &revision], THREAD_C);
+    assert!(!fixture
+        .command_public(
+            &["board", "claim", id, "--expected-revision", &revision],
+            THREAD_B
+        )
+        .status
+        .success());
+    let claimed = fixture.run_public(
+        &["board", "claim", id, "--expected-revision", &revision],
+        THREAD_C,
+    );
     assert_eq!(claimed["task"]["owner"], successor["identity"]["worker_id"]);
     assert_eq!(claimed["task"]["publisher"], original);
     assert_eq!(claimed["task"]["status"], "working");
@@ -2830,9 +2994,11 @@ fn owner_update_does_not_queue_an_offline_manager_report() {
         THREAD_B,
     );
     let updated_state = fixture.current_state();
-    assert!(updated_state["msgs"].as_object().unwrap().values().all(|message| {
-        message["subject"] != "board-changed:offline-board-change"
-    }));
+    assert!(updated_state["msgs"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|message| { message["subject"] != "board-changed:offline-board-change" }));
     let after_inputs = fixture
         .state
         .lock()
@@ -3092,8 +3258,8 @@ fn board_invitation_transfers_owner_only_after_peer_acceptance() {
     assert_eq!(invited["task"]["status"], "invited");
     assert_eq!(invited["task"]["revision"], 2);
     assert_eq!(invited["consumed"], false);
-    assert_eq!(invited["goal_schedule"]["armed"], true);
-    assert!(!invited["goal_schedule"]["subscription"].is_null());
+    assert_eq!(invited["goal_schedule"]["armed"], false);
+    assert!(invited["goal_schedule"]["subscription"].is_null());
     let outsider = fixture.command_public(
         &[
             "board",
@@ -3122,6 +3288,7 @@ fn board_invitation_transfers_owner_only_after_peer_acceptance() {
     assert_eq!(declined["task"]["owner"], master);
     assert_eq!(declined["task"]["status"], "pending");
     assert_eq!(declined["task"]["revision"], 3);
+    assert_eq!(declined["goal_schedule"]["armed"], false);
     fixture.run_public(
         &[
             "board",
@@ -3148,6 +3315,8 @@ fn board_invitation_transfers_owner_only_after_peer_acceptance() {
     assert_eq!(accepted["task"]["owner"], peer);
     assert_eq!(accepted["task"]["status"], "working");
     assert_eq!(accepted["task"]["revision"], 5);
+    assert_eq!(accepted["goal_schedule"]["armed"], false);
+    assert!(accepted["goal_schedule"]["subscription"].is_null());
 }
 
 #[test]
@@ -3830,7 +3999,14 @@ fn invite_modes_require_explicit_nonmixed_declarations() {
 
 #[test]
 fn dispatch_preserves_inline_long_horizon_schedule() {
-    let (fixture, master, peer) = setup();
+    let (mut fixture, master, peer) = setup();
+    eprintln!(
+        "TIMER_FIXTURE owned_test_pid={} owned_daemon_pid={} root={} socket={}",
+        std::process::id(),
+        fixture.daemon.as_ref().unwrap().id(),
+        fixture.root.display(),
+        fixture.host_state.join("server.sock").display()
+    );
     publish_one_shot(&fixture, "dispatch-inline-schedule");
     activate_peer(&fixture, &peer);
     let goals_before = goal_subscriptions(&fixture.current_state());
@@ -3845,23 +4021,243 @@ fn dispatch_preserves_inline_long_horizon_schedule() {
             "--long-horizon-content",
             "Continue the dispatched task under its periodic contract",
             "--long-horizon-every-ms",
-            "3600000",
+            "2000",
         ],
         THREAD_A,
     );
 
     assert_eq!(dispatched["task"]["owner"], master);
     assert_eq!(dispatched["task"]["status"], "invited");
-    assert_eq!(dispatched["goal_schedule"]["armed"], true);
-    assert_eq!(
-        dispatched["goal_schedule"]["subscription"]["worker_id"],
-        peer
-    );
+    assert_eq!(dispatched["goal_schedule"]["armed"], false);
+    assert!(dispatched["goal_schedule"]["subscription"].is_null());
     let goals_after = goal_subscriptions(&fixture.current_state());
+    assert_eq!(goals_after, goals_before);
+    fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
+    let quiet = fixture.run_public(&["recv", "--timeout", "5"], THREAD_B);
+    assert!(quiet["messages"].as_array().unwrap().is_empty(), "{quiet}");
+    assert_eq!(goal_subscriptions(&fixture.current_state()), goals_before);
+    let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "dispatch-inline-schedule",
+            "--accept",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_B,
+    );
+    assert_eq!(accepted["goal_schedule"]["armed"], false);
+    assert_eq!(goal_subscriptions(&fixture.current_state()), goals_before);
+    fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
+    let quiet = fixture.run_public(&["recv", "--timeout", "5"], THREAD_B);
+    assert!(quiet["messages"].as_array().unwrap().is_empty(), "{quiet}");
+    assert_eq!(goal_subscriptions(&fixture.current_state()), goals_before);
+    let revision = accepted["task"]["revision"].as_u64().unwrap().to_string();
+    let attempt = accepted["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let started = fixture.run_public(
+        &[
+            "task",
+            "start",
+            "dispatch-inline-schedule",
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &attempt,
+        ],
+        THREAD_B,
+    );
+    assert_eq!(started["goal_schedule"]["armed"], true);
+    assert_eq!(started["goal_schedule"]["subscription"]["worker_id"], peer);
+    let goals_started = goal_subscriptions(&fixture.current_state());
     assert_eq!(
-        goals_after.as_object().unwrap().len(),
+        goals_started.as_object().unwrap().len(),
         goals_before.as_object().unwrap().len() + 1
     );
+    let duplicate = fixture.command_public(
+        &[
+            "task",
+            "start",
+            "dispatch-inline-schedule",
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &attempt,
+        ],
+        THREAD_B,
+    );
+    assert!(!duplicate.status.success());
+    assert_eq!(goal_subscriptions(&fixture.current_state()), goals_started);
+    fixture.observe_native_agent(&peer, "online", "idle");
+    let received = fixture.run_public(&["recv", "--timeout", "5"], THREAD_B);
+    let reminder = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["subject"] == "deadline:goal:task:dispatch-inline-schedule")
+        .expect("typed start must enable the real task reminder");
+    assert!(reminder["body"]
+        .as_str()
+        .unwrap()
+        .contains("Continue the dispatched task"));
+    let subscription = &started["goal_schedule"]["subscription"];
+    let ended = fixture.run_public(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "task:dispatch-inline-schedule",
+            "--owner",
+            "Bob",
+            "--desired",
+            "ended",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(ended["status"], "ended");
+    let status = fixture.run_public(&["notify", "status"], THREAD_B);
+    let cancelled = status["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|sub| sub["id"] == subscription["id"])
+        .unwrap()
+        .clone();
+    assert_eq!(cancelled["status"], "cancelled");
+    fixture.restart_daemon();
+    let status = fixture.run_public(&["notify", "status"], THREAD_B);
+    let retained = status["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|sub| sub["id"] == subscription["id"])
+        .unwrap();
+    for field in [
+        "id",
+        "created_ms",
+        "fired_count",
+        "expires_ms",
+        "status",
+        "repeat_count",
+        "trigger_ms",
+    ] {
+        assert_eq!(retained[field], cancelled[field], "{field}");
+    }
+    fixture.run_public(
+        &[
+            "send",
+            "--to",
+            &peer,
+            "--subject",
+            "after-execution-end",
+            "new task",
+        ],
+        THREAD_A,
+    );
+    let received = fixture.run_public(&["recv", "--timeout", "5"], THREAD_B);
+    assert!(received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["subject"] == "after-execution-end"));
+}
+
+#[test]
+fn execution_timer_capacity_refuses_start_without_partial_running_commit() {
+    let (fixture, _, peer) = setup();
+    activate_peer(&fixture, &peer);
+    for goal in ["capacity-one", "capacity-two"] {
+        fixture.run_public(
+            &[
+                "goal",
+                "reconcile",
+                "--goal-id",
+                goal,
+                "--owner",
+                "Bob",
+                "--desired",
+                "active",
+                "--every-ms",
+                "60000",
+                "--ttl-seconds",
+                "300",
+            ],
+            THREAD_B,
+        );
+    }
+    publish(&fixture, "capacity-start");
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "capacity-start",
+            "--to",
+            &peer,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(invited["goal_schedule"]["armed"], false);
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "capacity-start",
+            "--accept",
+            "--expected-revision",
+            "2",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(accepted["goal_schedule"]["armed"], false);
+    let revision = accepted["task"]["revision"].as_u64().unwrap().to_string();
+    let attempt = accepted["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let start = [
+        "task",
+        "start",
+        "capacity-start",
+        "--expected-revision",
+        &revision,
+        "--attempt",
+        &attempt,
+    ];
+    let before = fixture.current_state();
+    let denied = fixture.command_public(&start, THREAD_B);
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("maximum 3 active subscriptions"));
+    let after = fixture.current_state();
+    for field in [
+        "ticket_phases",
+        "tasks",
+        "board_details",
+        "notification_subscriptions",
+    ] {
+        assert_eq!(after[field], before[field], "{field}");
+    }
+    fixture.run_public(
+        &[
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "capacity-one",
+            "--owner",
+            "Bob",
+            "--desired",
+            "ended",
+        ],
+        THREAD_B,
+    );
+    let started = fixture.run_public(&start, THREAD_B);
+    assert_eq!(started["goal_schedule"]["armed"], true);
+    assert_eq!(started["task"]["execute"]["status"], "running");
 }
 
 #[test]
@@ -3870,11 +4266,23 @@ fn publishing_long_horizon_with_idle_peer_waits_for_dispatch_subscription() {
     activate_peer(&fixture, &peer);
     let before = goal_subscriptions(&fixture.current_state());
     let published = fixture.run_public(
-        &["board", "publish", "scheduled-after-publish",
-            "--title", "Long-horizon goal", "--description", "Own an independent goal",
-            "--delivery-condition", "Deliver the result", "--test-condition", "Verify the result",
-            "--long-horizon-content", "Continue under the periodic contract",
-            "--long-horizon-every-ms", "3600000"],
+        &[
+            "board",
+            "publish",
+            "scheduled-after-publish",
+            "--title",
+            "Long-horizon goal",
+            "--description",
+            "Own an independent goal",
+            "--delivery-condition",
+            "Deliver the result",
+            "--test-condition",
+            "Verify the result",
+            "--long-horizon-content",
+            "Continue under the periodic contract",
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
         THREAD_A,
     );
     assert_eq!(published["task"]["owner"], master);
@@ -3882,14 +4290,29 @@ fn publishing_long_horizon_with_idle_peer_waits_for_dispatch_subscription() {
     assert_eq!(goal_subscriptions(&fixture.current_state()), before);
     let start_current = |fixture: &AppFixture, task_id: &str| {
         let board = fixture.run_public(&["board", "show"], THREAD_B);
-        let task = board["tasks"].as_array().unwrap().iter()
-            .find(|task| task["id"] == task_id).expect("public current task");
+        let task = board["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == task_id)
+            .expect("public current task");
         assert_eq!(task["owner"], peer);
         assert_eq!(task["execute"]["status"], "claimed");
         let revision = task["revision"].as_u64().unwrap().to_string();
-        let attempt = task["execute"]["attempt_generation"].as_u64().unwrap().to_string();
+        let attempt = task["execute"]["attempt_generation"]
+            .as_u64()
+            .unwrap()
+            .to_string();
         fixture.run_public(
-            &["board", "start", task_id, "--expected-revision", &revision, "--attempt", &attempt],
+            &[
+                "board",
+                "start",
+                task_id,
+                "--expected-revision",
+                &revision,
+                "--attempt",
+                &attempt,
+            ],
             THREAD_B,
         );
         attempt
@@ -3901,8 +4324,12 @@ fn publishing_long_horizon_with_idle_peer_waits_for_dispatch_subscription() {
     publish_one_shot(&fixture, ordinary_next);
     let id = "scheduled-after-publish";
     fixture.update_current_state(|state| {
-        let phase = state["ticket_phases"].as_array_mut().unwrap().iter_mut()
-            .find(|phase| phase["task_id"] == id).expect("persisted execute phase");
+        let phase = state["ticket_phases"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|phase| phase["task_id"] == id)
+            .expect("persisted execute phase");
         phase["status"] = json!("queued");
         phase["slot_name"] = json!("Bob");
         phase["wait_reason"] = Value::Null;
@@ -3911,13 +4338,24 @@ fn publishing_long_horizon_with_idle_peer_waits_for_dispatch_subscription() {
     let retained = fixture.run_public(&["task", "status", id], THREAD_A);
     assert_eq!(retained["owner"], master);
     assert_eq!(retained["status"], "pending");
-    let claim = fixture.command_public(&["board", "claim", id, "--expected-revision", "1"], THREAD_B);
+    let claim = fixture.command_public(
+        &["board", "claim", id, "--expected-revision", "1"],
+        THREAD_B,
+    );
     assert!(!claim.status.success());
     assert!(String::from_utf8_lossy(&claim.stderr).contains("BOARD_LONG_HORIZON_DISPATCH_REQUIRED"));
     assert_eq!(goal_subscriptions(&fixture.current_state()), before);
     fixture.run_public(
-        &["task", "deliver", blocker, "--no-candidate", "--evidence", "release occupied execute slot",
-            "--attempt", &blocker_attempt],
+        &[
+            "task",
+            "deliver",
+            blocker,
+            "--no-candidate",
+            "--evidence",
+            "release occupied execute slot",
+            "--attempt",
+            &blocker_attempt,
+        ],
         THREAD_B,
     );
     let after_continuation = fixture.run_public(&["task", "status", id], THREAD_A);
@@ -3926,17 +4364,31 @@ fn publishing_long_horizon_with_idle_peer_waits_for_dispatch_subscription() {
     assert_eq!(goal_subscriptions(&fixture.current_state()), before);
     let ordinary_attempt = start_current(&fixture, ordinary_next);
     fixture.run_public(
-        &["task", "deliver", ordinary_next, "--no-candidate", "--evidence", "ordinary slot released",
-            "--attempt", &ordinary_attempt],
+        &[
+            "task",
+            "deliver",
+            ordinary_next,
+            "--no-candidate",
+            "--evidence",
+            "ordinary slot released",
+            "--attempt",
+            &ordinary_attempt,
+        ],
         THREAD_B,
     );
     let dispatched = fixture.run_public(
-        &["board", "dispatch", "scheduled-after-publish", "--expected-revision", "1"],
+        &[
+            "board",
+            "dispatch",
+            "scheduled-after-publish",
+            "--expected-revision",
+            "1",
+        ],
         THREAD_A,
     );
     assert_eq!(dispatched["task"]["status"], "invited");
-    assert_eq!(dispatched["goal_schedule"]["armed"], true);
-    assert_eq!(dispatched["goal_schedule"]["subscription"]["worker_id"], peer);
+    assert_eq!(dispatched["goal_schedule"]["armed"], false);
+    assert!(dispatched["goal_schedule"]["subscription"].is_null());
 }
 
 #[test]
@@ -4104,36 +4556,728 @@ fn one_shot_rejects_same_id_binding_generation_refresh_before_acceptance() {
 }
 
 #[test]
-fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status() {
-    let (fixture, master, peer) = setup();
-    publish_one_shot(&fixture, "working-reassign");
-    let claimed = fixture.run_public(
+fn running_task_wait_holds_queued_occurrence_until_owner_resumes() {
+    let (mut fixture, _, peer) = setup();
+    let holder = fixture.run_public(&["context"], THREAD_C);
+    let base = configure_fixture_worktree_base(&mut fixture).join("project");
+    let config = fixture.root.join("home/.appsdk/config.toml");
+    let worktree_config = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        config,
+        format!("{worktree_config}\n[notifications]\nmode = \"immediate\"\nbatch_window_seconds = 3\n[notifications.events.deadline]\nmode = \"batch\"\n"),
+    ).unwrap();
+    fixture.restart_daemon();
+    let resource = base.join("shared-timer");
+    let resource = resource.to_str().unwrap();
+    let id = "waiting-execution";
+    let started = start_running_timer_fixture(&fixture, id, &peer);
+    let original_execute = &started["task"]["execute"];
+    let original_batch = started["ticket"]["phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["phase"] == "execute" && phase["status"] == "running")
+        .unwrap()["batch"]
+        .as_u64()
+        .unwrap();
+    fixture.run_public(&["task", "relocate", id, "--worktree", resource], THREAD_B);
+    let conflict = fixture.command_public(
+        &["task", "register", "timer-holder", "--worktree", resource],
+        THREAD_C,
+    );
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("TASK_RESOURCE_CONFLICT"));
+    fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
+    fixture.observe_native_agent(&peer, "online", "idle");
+    #[cfg(feature = "lifecycle-test-hooks")]
+    let (hook, listener) = {
+        let hook = fixture.host_state.join("task-wake-test.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&hook).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        (hook, listener)
+    };
+    let change = fixture.run_public(
         &[
-            "board",
-            "claim",
-            "working-reassign",
-            "--expected-revision",
-            "1",
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "task:waiting-execution",
+            "--owner",
+            "Bob",
+            "--desired",
+            "active",
+            "--every-ms",
+            "2500",
+            "--operation",
+            "edit",
         ],
         THREAD_B,
     );
-    assert_eq!(claimed["task"]["owner"], peer);
-    assert_eq!(claimed["task"]["status"], "working");
-
-    let carol = fixture.run_public(&["context"], THREAD_C)["identity"]["worker_id"]
-        .as_str()
+    let original = &change["subscription"];
+    let sub_id = original["id"].as_str().unwrap();
+    let find_occurrence = || {
+        fixture.current_state()["notification_occurrences"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, occurrence)| occurrence["subscription_id"] == sub_id)
+            .map(|(id, _)| id.clone())
+    };
+    let until = std::time::Instant::now() + Duration::from_secs(8);
+    let occurrence = loop {
+        if let Some(id) = find_occurrence() {
+            break id;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "the running batch must queue an occurrence"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(
+        fixture.current_state()["notification_occurrences"][&occurrence]["idle_triggered"],
+        false
+    );
+    let client_message_id = format!("collab-notification-{occurrence}");
+    let host_submissions = || {
+        fixture
+            .state
+            .lock()
+            .unwrap()
+            .get(THREAD_B)
+            .map_or(0, |host| {
+                host.inputs
+                    .iter()
+                    .filter(|input| input["clientUserMessageId"] == client_message_id)
+                    .count()
+            })
+    };
+    #[cfg(feature = "lifecycle-test-hooks")]
+    let mut dispatch = {
+        use std::io::Read;
+        let until = Instant::now() + Duration::from_secs(8);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until =>
+                {
+                    std::thread::sleep(Duration::from_millis(25))
+                }
+                Err(error) => panic!("dispatch did not reach the selected batch: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut selected = String::new();
+        stream.read_to_string(&mut selected).unwrap();
+        assert_eq!(selected, occurrence);
+        assert_eq!(host_submissions(), 0);
+        std::fs::remove_file(hook).unwrap();
+        stream
+    };
+    let wait = fixture.run_public(&["task", "wait", id, "--for", "timer-holder"], THREAD_B);
+    assert_eq!(wait["status"], "waiting", "{wait}");
+    assert_eq!(
+        wait["responsible_actor"], holder["identity"]["worker_id"],
+        "{wait}"
+    );
+    assert!(wait["deadline_ms"].as_i64().unwrap() > original["trigger_ms"].as_i64().unwrap());
+    #[cfg(feature = "lifecycle-test-hooks")]
+    {
+        use std::io::Write;
+        assert_eq!(host_submissions(), 0);
+        println!("selected task occurrence {occurrence}; public wait committed before host input: {wait}");
+        dispatch.write_all(b"1").unwrap();
+    }
+    let waiting_board = fixture.run_public(&["board", "show"], THREAD_B);
+    let waiting_revision = waiting_board["tasks"]
+        .as_array()
         .unwrap()
-        .to_owned();
-    assert_ne!(carol, master);
+        .iter()
+        .find(|task| task["id"] == id)
+        .unwrap()["revision"]
+        .as_u64()
+        .unwrap();
+    fixture.run_public(
+        &["task", "update", "timer-holder", "--status", "working"],
+        THREAD_C,
+    );
+    let grant = json!({
+        "action":"restore_name", "requested_name":holder["name"],
+        "authorization":"fixture verifies resource authority follows the current holder",
+        "replace_confirmed":true,
+    })
+    .to_string();
+    let successor_thread = "01a0d63c-1a3e-7a55-8f47-5b6c7d8e9f10";
+    let successor = fixture.run_public(&["context", "--approve-grant", &grant], successor_thread);
+    assert_ne!(
+        successor["identity"]["worker_id"],
+        wait["responsible_actor"]
+    );
 
-    let revision = fixture.set_task_schedule_for_reassignment("working-reassign");
+    for _ in 0..2 {
+        std::thread::sleep(Duration::from_millis(2500));
+        let current = fixture.current_state();
+        assert_eq!(
+            host_submissions(),
+            0,
+            "wait must suppress host input for {occurrence}"
+        );
+        assert!(current["notification_delivery_accepted"][&occurrence].is_null());
+        assert!(current["notification_occurrences"][&occurrence]["consumed_ms"].is_null());
+        assert_eq!(current["msgs"][&occurrence]["state"], "pending");
+        assert_eq!(current["msgs"][&occurrence]["wake_attempt_count"], 0);
+        assert_eq!(
+            current["notification_subscriptions"][sub_id]["fired_count"],
+            original["fired_count"]
+        );
+    }
+    let waiter_status = fixture.run_public(&["notify", "status"], THREAD_B);
+    assert!(!waiter_status["board_patrol"]["eligible_task_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(id)));
+    let holder_status = fixture.run_public(&["notify", "status"], successor_thread);
+    assert!(holder_status["board_patrol"]["eligible_task_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(id)));
+    let refused = fixture.command_public(
+        &[
+            "notify",
+            "cancel",
+            "--event",
+            "board-idle",
+            "--task-id",
+            "timer-holder",
+        ],
+        successor_thread,
+    );
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        error.contains("BOARD_PATROL_CANCEL_NOT_ELIGIBLE") && error.contains(id),
+        "{error}"
+    );
+    fixture.run_public(
+        &[
+            "send",
+            "--to",
+            &peer,
+            "--subject",
+            "during-wait",
+            "direct message",
+        ],
+        THREAD_A,
+    );
+    let direct = fixture.run_public(&["recv", "--timeout", "3"], THREAD_B);
+    let messages = direct["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["subject"] == "during-wait"),
+        "{direct}"
+    );
+    assert!(
+        !messages.iter().any(|message| message["id"] == occurrence),
+        "{direct}"
+    );
+    let at = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 1000)
+        .to_string();
+    fixture.run_public(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "deadline",
+            "--subject",
+            "goal:independent-during-wait",
+            "--at-ms",
+            &at,
+            "--ttl-seconds",
+            "60",
+        ],
+        THREAD_B,
+    );
+    let independent = fixture.run_public(&["recv", "--timeout", "6"], THREAD_B);
+    let messages = independent["messages"].as_array().unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["subject"] == "deadline:goal:independent-during-wait")
+            .count(),
+        1,
+        "{independent}"
+    );
+    assert!(
+        !messages.iter().any(|message| message["id"] == occurrence),
+        "{independent}"
+    );
+
+    fixture.run_public(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "resource-released",
+            "--subject",
+            "timer-holder",
+        ],
+        THREAD_B,
+    );
+    let final_workspace = base.join("finished-holder");
+    fixture.run_public(
+        &[
+            "task",
+            "relocate",
+            "timer-holder",
+            "--worktree",
+            final_workspace.to_str().unwrap(),
+        ],
+        successor_thread,
+    );
+    fixture.run_public(
+        &[
+            "task",
+            "close",
+            "timer-holder",
+            "--force",
+            "--reason",
+            "isolated resource holder finished",
+        ],
+        THREAD_A,
+    );
+    fixture.run_public(
+        &["task", "finalize-cleanup", "timer-holder"],
+        successor_thread,
+    );
+    fixture.run_public(
+        &["task", "finalize-cleanup", "timer-holder"],
+        successor_thread,
+    );
+    let released = fixture.run_public(&["recv", "--timeout", "3"], THREAD_B);
+    let messages = released["messages"].as_array().unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["subject"] == "released:timer-holder")
+            .count(),
+        1,
+        "{released}"
+    );
+    assert!(
+        !messages.iter().any(|message| message["id"] == occurrence),
+        "{released}"
+    );
+    let board = fixture.run_public(&["board", "show"], THREAD_B);
+    let task = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    assert_eq!(task["status"], "blocked");
+    let release_revision = task["revision"].as_u64().unwrap();
+    assert!(release_revision > waiting_revision);
+    let revision = release_revision.to_string();
+    let resumed = fixture.run_public(
+        &[
+            "board",
+            "update",
+            id,
+            "--expected-revision",
+            &revision,
+            "--status",
+            "working",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(resumed["task"]["status"], "working");
+    assert_eq!(resumed["task"]["revision"], release_revision + 1);
+    assert_eq!(&resumed["task"]["execute"], original_execute);
+    let retained = &resumed["goal_schedule"]["subscription"];
+    for field in [
+        "id",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "fired_count",
+        "expires_ms",
+    ] {
+        assert_eq!(retained[field], original[field], "{field}");
+    }
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while fixture.current_state()["notification_delivery_accepted"][&occurrence].is_null() {
+        assert!(
+            std::time::Instant::now() < until,
+            "the retained wake must submit after resume"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        host_submissions(),
+        1,
+        "resume must submit the original occurrence once"
+    );
+    let recovered = fixture.run_public(&["recv", "--timeout", "5"], THREAD_B);
+    let messages = recovered["messages"].as_array().unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["id"] == occurrence)
+            .count(),
+        1,
+        "{recovered}"
+    );
+    let current = fixture.current_state();
+    let phase = current["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| phase["task_id"] == id && phase["phase"] == "execute")
+        .max_by_key(|phase| phase["batch"].as_u64().unwrap())
+        .unwrap();
+    assert_eq!(phase["batch"], original_batch);
+    assert_eq!(phase["status"], "running");
+    assert_eq!(host_submissions(), 1);
+    assert_eq!(current["msgs"][&occurrence]["wake_attempt_count"], 1);
+    assert!(current["notification_occurrences"][&occurrence]["consumed_ms"].is_number());
+    assert_eq!(
+        current["notification_subscriptions"][sub_id]["fired_count"],
+        1
+    );
+    println!("running wait receipt: task={id} phase={phase} occurrence={occurrence} wait={wait} waiting_revision={waiting_revision} after_release_revision={revision} resumed={} subscription={retained}", resumed["task"]["revision"]);
+}
+
+#[test]
+fn public_execute_revocation_holds_batch_until_same_name_starts_again() {
+    let (fixture, _, peer) = setup();
+    let id = "timer-binding-revoke";
+    let started = start_running_timer_fixture(&fixture, id, &peer);
+    let progressed = progress_running_timer_batch(&fixture, id, &peer);
+    let original = &progressed["subscription"];
+    let receiver = fixture.run_public(&["context"], THREAD_C);
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let task = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    let offered = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            id,
+            "--to",
+            receiver["identity"]["worker_id"].as_str().unwrap(),
+            "--expected-revision",
+            &task["revision"].as_u64().unwrap().to_string(),
+        ],
+        THREAD_A,
+    );
+    assert_eq!(&offered["goal_schedule"]["subscription"], original);
+    let offered = describe_pending_running_offer(&fixture, id, &offered, original);
+    let withdrawn = fixture.run_public(
+        &[
+            "board",
+            "withdraw",
+            id,
+            "--expected-revision",
+            &offered["task"]["revision"].as_u64().unwrap().to_string(),
+            "--reason",
+            "retain incumbent batch through binding recovery",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(withdrawn["task"]["long_horizon"]["interval_ms"], 3600000);
+    assert_eq!(&withdrawn["goal_schedule"]["subscription"], original);
+    let recovered = fixture.run_public(
+        &["context", "--approve-grant",
+          r#"{"action":"restore_name","requested_name":"Bob","authorization":"isolated binding recovery","replace_confirmed":true}"#],
+        THREAD_C,
+    );
+    assert_eq!(recovered["name"], "Bob", "{recovered}");
+    let board = fixture.run_public(&["board", "show"], THREAD_C);
+    let task = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    let revision = task["revision"].as_u64().unwrap().to_string();
+    let claimed = fixture.run_public(
+        &["board", "claim", id, "--expected-revision", &revision],
+        THREAD_C,
+    );
+    let state = fixture.current_state();
+    let phases: Vec<_> = state["ticket_phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|phase| phase["task_id"] == id)
+        .collect();
+    assert!(phases.iter().any(|phase| phase["status"] == "revoked"
+        && phase["attempt_generation"] == started["task"]["execute"]["attempt_generation"]));
+    assert_eq!(claimed["task"]["execute"]["status"], "claimed");
+    assert_eq!(claimed["goal_schedule"]["armed"], false);
+    let held = &claimed["goal_schedule"]["subscription"];
+    assert_eq!(held["worker_id"], recovered["identity"]["worker_id"]);
+    assert_ne!(held["worker_id"], original["worker_id"]);
+    assert_ne!(
+        claimed["task"]["long_horizon"]["interval_ms"],
+        held["interval_ms"]
+    );
+    println!(
+        "same-name pre-start mismatch: declaration={} held={held}",
+        claimed["task"]["long_horizon"]["interval_ms"]
+    );
+    for field in [
+        "id",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "fired_count",
+        "expires_ms",
+    ] {
+        assert_eq!(held[field], original[field], "{field}");
+    }
+    let revision = claimed["task"]["revision"].as_u64().unwrap().to_string();
+    let attempt = claimed["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let restarted = fixture.run_public(
+        &[
+            "task",
+            "start",
+            id,
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &attempt,
+        ],
+        THREAD_C,
+    );
+    assert_eq!(restarted["goal_schedule"]["armed"], true);
+    let resumed = &restarted["goal_schedule"]["subscription"];
+    for field in [
+        "id",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "fired_count",
+        "expires_ms",
+    ] {
+        assert_eq!(resumed[field], original[field], "{field}");
+    }
+    println!("public binding revoke receipt: phases={phases:?} resumed_subscription={resumed}");
+}
+
+#[test]
+fn task_lifecycle_preserves_independent_deadline_with_exact_task_subject() {
+    let (fixture, master, _) = setup();
+    let task_id = "exact-deadline";
+    publish(&fixture, task_id);
+    let at = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 4000)
+        .to_string();
+    let subscribed = fixture.run_public(
+        &[
+            "notify",
+            "subscribe",
+            "--event",
+            "deadline",
+            "--subject",
+            "goal:task:exact-deadline",
+            "--at-ms",
+            &at,
+            "--ttl-seconds",
+            "60",
+        ],
+        THREAD_A,
+    );
+    let deadline = &subscribed["subscription"];
+    let claimed = fixture.run_public(
+        &["board", "claim", task_id, "--expected-revision", "1"],
+        THREAD_A,
+    );
+    assert!(
+        claimed["goal_schedule"]["subscription"].is_null(),
+        "{claimed}"
+    );
+    let started = fixture.run_public(
+        &[
+            "task",
+            "start",
+            task_id,
+            "--expected-revision",
+            "2",
+            "--attempt",
+            "1",
+        ],
+        THREAD_A,
+    );
+    let execution = &started["goal_schedule"]["subscription"];
+    assert_ne!(execution["id"], deadline["id"]);
+    assert_eq!(execution["status"], "armed", "{started}");
+    let closed = fixture.run_public(
+        &[
+            "task",
+            "close",
+            task_id,
+            "--force",
+            "--reason",
+            "isolated timer check",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(closed["status"], "closed", "{closed}");
+    fixture.observe_native_agent(&master, "online", "idle");
+    let received = fixture.run_public(&["recv", "--timeout", "8"], THREAD_A);
+    let occurrences: Vec<_> = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|msg| msg["subject"] == "deadline:goal:task:exact-deadline")
+        .collect();
+    assert_eq!(occurrences.len(), 1, "{received}");
+    let status = fixture.run_public(&["notify", "status"], THREAD_A);
+    let rows = status["subscriptions"].as_array().unwrap();
+    let independent = rows.iter().find(|row| row["id"] == deadline["id"]).unwrap();
+    assert_eq!(independent["status"], "consumed");
+    assert_eq!(independent["fired_count"], 1);
+    let linked = rows
+        .iter()
+        .find(|row| row["id"] == execution["id"])
+        .unwrap();
+    assert_eq!(linked["status"], "cancelled");
+    assert_eq!(linked["fired_count"], 0);
+    println!("exact subject receipt: independent={independent} execution={linked}");
+}
+
+fn progress_running_timer_batch(fixture: &AppFixture, id: &str, peer: &str) -> Value {
+    fixture.run_public(&["recv", "--timeout", "0"], THREAD_B);
+    fixture.observe_native_agent(peer, "online", "idle");
+    let goal = format!("task:{id}");
+    let edit_cadence = |interval: &str| {
+        fixture.run_public(
+            &[
+                "goal",
+                "reconcile",
+                "--goal-id",
+                &goal,
+                "--owner",
+                "Bob",
+                "--desired",
+                "active",
+                "--every-ms",
+                interval,
+                "--operation",
+                "edit",
+            ],
+            THREAD_B,
+        )
+    };
+    edit_cadence("2500");
+    let received = fixture.run_public(&["recv", "--timeout", "6"], THREAD_B);
+    let subject = format!("deadline:goal:{goal}");
+    assert!(
+        received["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["subject"] == subject),
+        "{received}"
+    );
+    let retained = edit_cadence("1800000");
+    assert_eq!(retained["subscription"]["fired_count"], 1, "{retained}");
+    assert_eq!(
+        retained["subscription"]["interval_ms"], 1800000,
+        "{retained}"
+    );
+    retained
+}
+
+fn describe_pending_running_offer(
+    fixture: &AppFixture,
+    id: &str,
+    offer: &Value,
+    subscription: &Value,
+) -> Value {
+    let task = &offer["task"];
+    let described = fixture.run_public(
+        &[
+            "board",
+            "describe",
+            id,
+            "--expected-revision",
+            &task["revision"].as_u64().unwrap().to_string(),
+            "--title",
+            task["title"].as_str().unwrap(),
+            "--description",
+            task["description"].as_str().unwrap(),
+            "--delivery-condition",
+            task["delivery_condition"].as_str().unwrap(),
+            "--test-condition",
+            task["test_condition"].as_str().unwrap(),
+            "--long-horizon-every-ms",
+            "3600000",
+        ],
+        THREAD_A,
+    );
+    assert!(task["invited_peer"].is_string(), "{offer}");
+    assert_eq!(described["task"]["invited_peer"], task["invited_peer"]);
+    assert_eq!(described["task"]["long_horizon"]["interval_ms"], 3600000);
+    assert_ne!(
+        described["task"]["long_horizon"]["interval_ms"],
+        subscription["interval_ms"]
+    );
+    assert_eq!(&described["goal_schedule"]["subscription"], subscription);
+    described
+}
+
+#[test]
+fn working_task_reassignment_preserves_the_progressed_batch() {
+    let (fixture, master, peer) = setup();
+    let started = start_running_timer_fixture(&fixture, "working-reassign", &peer);
+    assert_eq!(
+        started["goal_schedule"]["subscription"]["status"], "armed",
+        "{started}"
+    );
+    let retained = progress_running_timer_batch(&fixture, "working-reassign", &peer);
+    let incumbent = &retained["subscription"];
+    let board = fixture.run_public(&["board", "show"], THREAD_B);
+    let revision = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "working-reassign")
+        .unwrap()["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+
+    let receiver = fixture.run_public(&["context"], THREAD_C);
+    let receiver_id = receiver["identity"]["worker_id"].as_str().unwrap();
+    assert_ne!(receiver_id, master);
+
     let invited = fixture.run_public(
         &[
             "board",
             "invite",
             "working-reassign",
             "--to",
-            &carol,
+            receiver_id,
             "--expected-revision",
             &revision,
         ],
@@ -4141,7 +5285,8 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
     );
     assert_eq!(invited["task"]["owner"], peer);
     assert_eq!(invited["task"]["status"], "working");
-    assert_eq!(invited["task"]["invited_peer"], carol);
+    assert_eq!(invited["task"]["invited_peer"], receiver_id);
+    assert_eq!(&invited["goal_schedule"]["subscription"], incumbent);
     let invitation_revision = invited["task"]["revision"].as_u64().unwrap();
     let duplicate = fixture.command_public(
         &[
@@ -4149,7 +5294,7 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
             "invite",
             "working-reassign",
             "--to",
-            &carol,
+            receiver_id,
             "--expected-revision",
             &invitation_revision.to_string(),
         ],
@@ -4189,6 +5334,7 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
     assert_eq!(declined["task"]["owner"], peer);
     assert_eq!(declined["task"]["status"], "working");
     assert_eq!(declined["task"]["revision"], invitation_revision + 1);
+    assert_eq!(&declined["goal_schedule"]["subscription"], incumbent);
 
     let reinvited = fixture.run_public(
         &[
@@ -4196,13 +5342,14 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
             "invite",
             "working-reassign",
             "--to",
-            &carol,
+            receiver_id,
             "--expected-revision",
             &(invitation_revision + 1).to_string(),
         ],
         THREAD_A,
     );
     assert_eq!(reinvited["task"]["status"], "working");
+    assert_eq!(&reinvited["goal_schedule"]["subscription"], incumbent);
     let withdrawn = fixture.run_public(
         &[
             "board",
@@ -4218,10 +5365,137 @@ fn working_task_can_be_reassigned_and_decline_or_withdraw_preserves_owner_status
     assert_eq!(withdrawn["task"]["owner"], peer);
     assert_eq!(withdrawn["task"]["status"], "working");
     assert_eq!(withdrawn["task"]["revision"], invitation_revision + 3);
+    assert_eq!(&withdrawn["goal_schedule"]["subscription"], incumbent);
 
     let durable = fixture.run_public(&["task", "status", "working-reassign"], THREAD_A);
     assert_eq!(durable["owner"], peer);
     assert_eq!(durable["status"], "working");
+    println!("decline and withdrawal preserved the progressed subscription: {incumbent}");
+
+    let offered = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            "working-reassign",
+            "--to",
+            receiver_id,
+            "--expected-revision",
+            &withdrawn["task"]["revision"].as_u64().unwrap().to_string(),
+        ],
+        THREAD_A,
+    );
+    assert_eq!(&offered["goal_schedule"]["subscription"], incumbent);
+    let offered = describe_pending_running_offer(&fixture, "working-reassign", &offered, incumbent);
+    let accepted = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            "working-reassign",
+            "--accept",
+            "--expected-revision",
+            &offered["task"]["revision"].as_u64().unwrap().to_string(),
+        ],
+        THREAD_C,
+    );
+    println!("public Running reassignment acceptance: {accepted}");
+    assert_eq!(accepted["task"]["owner"], receiver_id);
+    assert_eq!(accepted["task"]["owner_name"], receiver["name"]);
+    assert_eq!(accepted["task"]["execute"]["status"], "claimed");
+    assert_eq!(accepted["goal_schedule"]["armed"], false);
+    assert_eq!(accepted["task"]["long_horizon"]["interval_ms"], 3600000);
+    assert_ne!(
+        accepted["task"]["long_horizon"]["interval_ms"],
+        accepted["goal_schedule"]["subscription"]["interval_ms"]
+    );
+    let fields = [
+        "id",
+        "trigger_ms",
+        "interval_ms",
+        "repeat_count",
+        "fired_count",
+        "expires_ms",
+    ];
+    for field in fields {
+        assert_eq!(
+            accepted["goal_schedule"]["subscription"][field], incumbent[field],
+            "held {field}"
+        );
+    }
+    let attempt = accepted["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        attempt
+            > started["task"]["execute"]["attempt_generation"]
+                .as_u64()
+                .unwrap()
+    );
+    let resumed = fixture.run_public(
+        &[
+            "task",
+            "start",
+            "working-reassign",
+            "--expected-revision",
+            &accepted["task"]["revision"].as_u64().unwrap().to_string(),
+            "--attempt",
+            &attempt.to_string(),
+        ],
+        THREAD_C,
+    );
+    println!("public receiver start: {resumed}");
+    assert_eq!(resumed["task"]["execute"]["status"], "running");
+    assert_eq!(resumed["goal_schedule"]["armed"], true);
+    let restarted = &resumed["goal_schedule"]["subscription"];
+    assert_eq!(restarted["worker_id"], receiver_id);
+    for field in fields {
+        assert_eq!(restarted[field], incumbent[field], "restarted {field}");
+    }
+}
+
+fn start_running_timer_fixture(fixture: &AppFixture, id: &str, peer: &str) -> Value {
+    publish(fixture, id);
+    let invited = fixture.run_public(
+        &[
+            "board",
+            "invite",
+            id,
+            "--to",
+            peer,
+            "--expected-revision",
+            "1",
+        ],
+        THREAD_A,
+    );
+    let revision = invited["task"]["revision"].as_u64().unwrap().to_string();
+    let claimed = fixture.run_public(
+        &[
+            "board",
+            "respond",
+            id,
+            "--accept",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_B,
+    );
+    assert_eq!(claimed["task"]["owner"], peer);
+    let revision = claimed["task"]["revision"].as_u64().unwrap().to_string();
+    let attempt = claimed["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    fixture.run_public(
+        &[
+            "task",
+            "start",
+            id,
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &attempt,
+        ],
+        THREAD_B,
+    )
 }
 
 #[test]
@@ -4803,25 +6077,47 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
     let trigger = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() + 1_500)
+        .as_millis()
+        + 1_500)
         .to_string();
     let authorized_batch = fixture.run_public(
         &[
-            "goal", "reconcile", "--goal-id", "role-patrol-regression",
-            "--owner", demoted_peer["name"].as_str().unwrap(), "--desired", "active",
-            "--at-ms", &trigger, "--every-ms", "1800000", "--repeat", "3",
-            "--ttl-seconds", "7200",
+            "goal",
+            "reconcile",
+            "--goal-id",
+            "role-patrol-regression",
+            "--owner",
+            demoted_peer["name"].as_str().unwrap(),
+            "--desired",
+            "active",
+            "--at-ms",
+            &trigger,
+            "--every-ms",
+            "1800000",
+            "--repeat",
+            "3",
+            "--ttl-seconds",
+            "7200",
         ],
         THREAD_A,
     );
     let batch_id = authorized_batch["subscription"]["id"].as_str().unwrap();
     let read_batch = |fixture: &AppFixture| {
         let status = fixture.run_public(&["notify", "status"], THREAD_A);
-        let batch = status["subscriptions"].as_array().unwrap().iter()
+        let batch = status["subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|row| row["id"].as_str() == Some(batch_id))
             .expect("the authorized batch is still present");
-        json!([batch["id"], batch["status"], batch["interval_ms"],
-            batch["trigger_ms"], batch["repeat_count"], batch["fired_count"]])
+        json!([
+            batch["id"],
+            batch["status"],
+            batch["interval_ms"],
+            batch["trigger_ms"],
+            batch["repeat_count"],
+            batch["fired_count"]
+        ])
     };
     let receive_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let batch_before = loop {
@@ -4842,7 +6138,10 @@ fn role_patrol_context_reminders_follow_master_and_peer_roles_across_restoration
     let peer_subscriptions_before =
         notification_subscription_count(&fixture, THREAD_A, "peer before restoration");
     let memory = fixture.run_public(&["context", "--work-roles", "memory"], THREAD_A);
-    assert!(memory["role_brief"]["role_task"].as_str().unwrap().contains("memory patrol"));
+    assert!(memory["role_brief"]["role_task"]
+        .as_str()
+        .unwrap()
+        .contains("memory patrol"));
     assert_eq!(
         notification_subscription_count(&fixture, THREAD_A, "memory role selected"),
         peer_subscriptions_before,
@@ -5472,7 +6771,12 @@ fn assert_public_task_integration_landing(squash: bool) {
     let executor_name = executor["name"].as_str().unwrap();
     fixture.run_public(&["context"], THREAD_B);
     fixture.run_public(
-        &["master", "promote", "--approval", "integration proof fixture"],
+        &[
+            "master",
+            "promote",
+            "--approval",
+            "integration proof fixture",
+        ],
         THREAD_B,
     );
 
@@ -5581,7 +6885,15 @@ fn assert_public_task_integration_landing(squash: bool) {
         .unwrap()
         .to_string();
     fixture.run_public(
-        &["task", "start", task_id, "--expected-revision", &revision, "--attempt", &attempt],
+        &[
+            "task",
+            "start",
+            task_id,
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &attempt,
+        ],
         THREAD_A,
     );
     let registered = fixture.run_public(
@@ -5727,9 +7039,13 @@ fn assert_public_task_integration_landing(squash: bool) {
         "--evidence",
         "merged task branch onto main",
     ];
-    let (success, refusal) = parse_public_response(fixture.command_public(&integration_args, THREAD_B));
+    let (success, refusal) =
+        parse_public_response(fixture.command_public(&integration_args, THREAD_B));
     assert!(!success, "{refusal}");
-    assert!(refusal["error"].as_str().unwrap().starts_with("TASK_OWNER_REQUIRED"));
+    assert!(refusal["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("TASK_OWNER_REQUIRED"));
     let integrated = fixture.run_public(&integration_args, THREAD_A);
     assert_eq!(integrated["status"], "merged");
     assert!(fixture.current_state()["pending_merges"][task_id].is_null());

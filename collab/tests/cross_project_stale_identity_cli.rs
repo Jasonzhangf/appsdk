@@ -62,7 +62,10 @@ fn public_master_commands_discover_send_consume_and_reply_across_projects() {
     let inbox = &context["result"]["snapshot"]["inbox"];
     assert!(inbox["unread"].as_u64().unwrap() > 0, "{context}");
     assert!(inbox.get("messages").is_none(), "{context}");
-    assert!(!context.to_string().contains("return the result"), "{context}");
+    assert!(
+        !context.to_string().contains("return the result"),
+        "{context}"
+    );
     let received = run_ok_at(
         &fixture,
         &target_root,
@@ -560,6 +563,13 @@ fn wait_for_dispatch_target(fixture: &Fixture, root: &Path, peer_id: &str) {
 fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (mut fixture, master_pane) = Fixture::isolated("delegated-goal");
+    eprintln!(
+        "TIMER_FIXTURE owned_test_pid={} owned_daemon_pid={} root={} socket={}",
+        std::process::id(),
+        fixture.daemon.as_ref().unwrap().id(),
+        fixture.root.display(),
+        fixture.host_state.join("server.sock").display()
+    );
     let root = fixture.root.canonicalize().unwrap();
     register_context(&fixture, &root, &master_pane, "goal-master", false);
     run_ok_at(
@@ -643,9 +653,26 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
         ],
         false,
     );
-    assert_eq!(dispatched["goal_schedule"]["armed"], true, "{dispatched}");
-    let invitation_subscription = &dispatched["goal_schedule"]["subscription"];
-    assert_eq!(invitation_subscription["worker_id"], peer_id);
+    assert_eq!(dispatched["goal_schedule"]["armed"], false, "{dispatched}");
+    assert!(dispatched["goal_schedule"]["subscription"].is_null());
+    let assert_quiet = || {
+        let until = Instant::now() + Duration::from_millis(4200);
+        assert!(wait_until(Duration::from_secs(6), || {
+            let current = fixture.current_state_for(&root, "appserver-cli");
+            assert!(!current["notification_subscriptions"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|sub| sub["subject"] == "goal:task:goal-task" && sub["status"] == "armed"));
+            assert!(!current["msgs"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|msg| msg["subject"] == "deadline:goal:task:goal-task"));
+            Instant::now() >= until
+        }));
+    };
+    assert_quiet();
     assert_eq!(dispatched["task"]["owner"], published["task"]["owner"]);
     let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
     let accepted = run_ok_at(
@@ -662,9 +689,31 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
         ],
         false,
     );
-    assert_eq!(accepted["goal_schedule"]["armed"], true, "{accepted}");
-    let subscription = &accepted["goal_schedule"]["subscription"];
-    assert_eq!(subscription["id"], invitation_subscription["id"]);
+    assert_eq!(accepted["goal_schedule"]["armed"], false, "{accepted}");
+    assert!(accepted["goal_schedule"]["subscription"].is_null());
+    assert_quiet();
+    let revision = accepted["task"]["revision"].as_u64().unwrap().to_string();
+    let attempt = accepted["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let started = run_ok_at(
+        &fixture,
+        &root,
+        &peer_pane,
+        &[
+            "task",
+            "start",
+            "goal-task",
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &attempt,
+        ],
+        false,
+    );
+    assert_eq!(started["goal_schedule"]["armed"], true, "{started}");
+    let subscription = &started["goal_schedule"]["subscription"];
     assert_eq!(subscription["worker_id"], peer_id);
     assert_eq!(subscription["repeat_count"], 100);
     assert_eq!(subscription["goal_content"]["source"]["kind"], "board-task");
@@ -730,6 +779,11 @@ fn delegated_goal_dispatch_arms_peer_and_delivers_task_content() {
         .unwrap();
     assert_eq!(current["fired_count"], 1);
     fixture.restart_daemon();
+    eprintln!(
+        "TIMER_FIXTURE restarted_owned_daemon_pid={} root={}",
+        fixture.daemon.as_ref().unwrap().id(),
+        fixture.root.display()
+    );
     let retained = run_ok_at(
         &fixture,
         &root,
@@ -940,6 +994,13 @@ fn delegated_goal_ceo_updates_foreign_peer_and_other_peers_are_refused() {
 fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_enforced() {
     let _guard = TMUX_FIXTURE_LOCK.lock().unwrap();
     let (fixture, master_pane) = Fixture::isolated("goal-capacity");
+    eprintln!(
+        "TIMER_FIXTURE owned_test_pid={} owned_daemon_pid={} root={} socket={}",
+        std::process::id(),
+        fixture.daemon.as_ref().unwrap().id(),
+        fixture.root.display(),
+        fixture.host_state.join("server.sock").display()
+    );
     let root = fixture.root.canonicalize().unwrap();
     register_context(&fixture, &root, &master_pane, "capacity-master", false);
     run_ok_at(
@@ -1046,7 +1107,39 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
         "--long-horizon-repeat",
         "4",
     ];
-    let failed = run_error_at(&fixture, &root, &master_pane, &dispatch, false);
+    let dispatched = run_ok_at(&fixture, &root, &master_pane, &dispatch, false);
+    assert_eq!(dispatched["goal_schedule"]["armed"], false, "{dispatched}");
+    let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
+    let accepted = run_ok_at(
+        &fixture,
+        &root,
+        &peer_pane,
+        &[
+            "board",
+            "respond",
+            "capacity-task",
+            "--accept",
+            "--expected-revision",
+            &revision,
+        ],
+        false,
+    );
+    assert_eq!(accepted["goal_schedule"]["armed"], false, "{accepted}");
+    let revision = accepted["task"]["revision"].as_u64().unwrap().to_string();
+    let attempt = accepted["task"]["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let start = [
+        "task",
+        "start",
+        "capacity-task",
+        "--expected-revision",
+        &revision,
+        "--attempt",
+        &attempt,
+    ];
+    let failed = run_error_at(&fixture, &root, &peer_pane, &start, false);
     assert!(
         failed.contains("maximum 3 active subscriptions"),
         "{failed}"
@@ -1058,8 +1151,14 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
         .iter()
         .find(|task| task["id"] == "capacity-task")
         .unwrap();
-    for field in ["revision", "owner", "invited_peer", "long_horizon"] {
-        assert_eq!(task[field], published["task"][field], "{field}: {task}");
+    for field in [
+        "revision",
+        "owner",
+        "invited_peer",
+        "long_horizon",
+        "execute",
+    ] {
+        assert_eq!(task[field], accepted["task"][field], "{field}: {task}");
     }
     let status = run_ok_at(&fixture, &root, &peer_pane, &["notify", "status"], false);
     assert_eq!(status["subscriptions"], full["subscriptions"]);
@@ -1068,7 +1167,7 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
         .as_object()
         .unwrap()
         .values()
-        .any(|message| message["subject"] == "task-invitation:capacity-task"));
+        .any(|message| message["subject"] == "deadline:goal:task:capacity-task"));
     run_ok_at(
         &fixture,
         &root,
@@ -1085,28 +1184,9 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
         ],
         false,
     );
-    let dispatched = run_ok_at(&fixture, &root, &master_pane, &dispatch, false);
-    assert_eq!(dispatched["goal_schedule"]["armed"], true, "{dispatched}");
-    let revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
-    let accepted = run_ok_at(
-        &fixture,
-        &root,
-        &peer_pane,
-        &[
-            "board",
-            "respond",
-            "capacity-task",
-            "--accept",
-            "--expected-revision",
-            &revision,
-        ],
-        false,
-    );
-    assert_eq!(accepted["goal_schedule"]["subscription"]["repeat_count"], 4);
-    assert_eq!(
-        accepted["goal_schedule"]["subscription"]["id"],
-        dispatched["goal_schedule"]["subscription"]["id"]
-    );
+    let started = run_ok_at(&fixture, &root, &peer_pane, &start, false);
+    assert_eq!(started["goal_schedule"]["armed"], true, "{started}");
+    assert_eq!(started["goal_schedule"]["subscription"]["repeat_count"], 4);
     run_ok_at(
         &fixture,
         &root,
@@ -1128,7 +1208,7 @@ fn delegated_goal_capacity_failure_keeps_dispatch_unmodified_and_peer_scope_is_e
         .as_array()
         .unwrap()
         .iter()
-        .find(|sub| sub["id"] == accepted["goal_schedule"]["subscription"]["id"])
+        .find(|sub| sub["id"] == started["goal_schedule"]["subscription"]["id"])
         .unwrap();
     assert_eq!(subscription["status"], "cancelled");
 }
@@ -1315,7 +1395,9 @@ fn assert_no_daemon_tmux_input(trace: &Path, prior_commands: usize) -> usize {
         "the private daemon must use the traced tmux entry: {commands}"
     );
     assert!(
-        !commands.lines().any(|command| matches!(command, "paste-buffer" | "send-keys")),
+        !commands
+            .lines()
+            .any(|command| matches!(command, "paste-buffer" | "send-keys")),
         "offline delivery must submit neither text nor Enter: {commands}"
     );
     commands.lines().count()

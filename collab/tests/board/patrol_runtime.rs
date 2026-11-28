@@ -345,6 +345,50 @@ fn board_idle_patrol_runtime_requires_30m_continuous_idle() {
 }
 
 #[test]
+fn board_idle_patrol_runtime_typed_external_wait_is_quiet_across_two_windows() {
+    let mut fixture = AppFixture::new();
+    let alice = fixture.run_public(&["context"], THREAD_A);
+    let worker_id = alice["identity"]["worker_id"].as_str().unwrap().to_owned();
+    set_native_status(&fixture, THREAD_A, "active");
+    fixture.run_public(&["task", "register", "T1"], THREAD_A);
+    fixture.update_current_state(|state| {
+        state["tasks"]["T1"]["status"] = json!("waiting");
+        state["tasks"]["T1"]["wait"] = json!({
+            "waiter": state["tasks"]["T1"]["owner"].clone(),
+            "waiting_for": "external-resource",
+            "responsible_actor": "external-owner",
+            "reason": "external dependency",
+            "deadline_ms": i64::MAX,
+            "resume_on": ["resource_released"],
+            "escalation": "master"
+        });
+    });
+    set_native_idle(&fixture, THREAD_A);
+    let baseline = cue_baseline(&fixture, THREAD_A);
+
+    let status = fixture.run_public(&["notify", "status"], THREAD_A);
+    assert_eq!(
+        status["board_patrol"]["eligible_task_ids"],
+        json!([]),
+        "{status}"
+    );
+    advance_gate(&mut fixture, &alice, &[]);
+    thread::sleep(NEGATIVE_WAIT);
+    assert_no_new_cue(&fixture, THREAD_A, &worker_id, &baseline);
+    advance_gate(&mut fixture, &alice, &[]);
+    thread::sleep(NEGATIVE_WAIT);
+    assert_no_new_cue(&fixture, THREAD_A, &worker_id, &baseline);
+
+    let state = fixture.current_state();
+    assert_eq!(state["tasks"]["T1"]["status"], "waiting");
+    assert_eq!(
+        state["tasks"]["T1"]["wait"]["resume_on"],
+        json!(["resource_released"])
+    );
+    assert!(notice_ids(&state).is_empty());
+}
+
+#[test]
 fn board_idle_patrol_runtime_busy_carrier_gets_no_cue() {
     let mut fixture = AppFixture::new();
     let alice = fixture.run_public(&["context"], THREAD_A);

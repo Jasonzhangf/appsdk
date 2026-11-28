@@ -1442,6 +1442,50 @@ fn attempt_tmux_notification_with_retry(
             return NotificationAttempt::NotAttempted(reason.into());
         }
     }
+    let task_wake_ids: Vec<_> = batch
+        .iter()
+        .filter_map(|entry| {
+            timers::task_wake_goal(&state, &state.msgs[&entry.1]).map(|_| &entry.1)
+        })
+        .collect();
+    #[cfg(feature = "lifecycle-test-hooks")]
+    if transport.kind == TransportKind::AppServer && !task_wake_ids.is_empty() {
+        // Let the isolated fixture commit a public wait after batch selection.
+        // The fixture removes the socket before releasing this single dispatch.
+        let hook = server.host_paths.state_root().join("task-wake-test.sock");
+        if hook.exists() {
+            use std::io::{Read, Write};
+            drop(state);
+            drop(register_guard.take());
+            let pause = || -> std::io::Result<()> {
+                let mut stream = std::os::unix::net::UnixStream::connect(hook)?;
+                let timeout = Some(std::time::Duration::from_secs(15));
+                stream.set_read_timeout(timeout)?;
+                stream.set_write_timeout(timeout)?;
+                stream.write_all(first.1.as_bytes())?;
+                stream.shutdown(std::net::Shutdown::Write)?;
+                stream.read_exact(&mut [0])
+            };
+            if let Err(error) = pause() {
+                return NotificationAttempt::Rejected(format!("task wake test hook: {error}"));
+            }
+            register_guard = Some(server.register_gate.lock().unwrap());
+            state = server.state.lock().unwrap();
+        }
+    }
+    // Order task transitions against the final reservation and host input.
+    // A wait that already committed leaves this occurrence pending and does
+    // not record an attempt. Keep the existing delivery lock for submission.
+    let submission_ms = now_ms();
+    if task_wake_ids.iter().any(|id| {
+        state.msgs.get(*id).is_none_or(|message| {
+            timers::task_wake_goal(&state, message).is_none_or(|goal| {
+                !timers::task_goal_wake_allowed(&state, message, goal, submission_ms)
+            })
+        })
+    }) {
+        return NotificationAttempt::Deferred(None);
+    }
     let mut attempt_events = vec![Event::WakeAttempted {
         ids: batch.iter().map(|message| message.1.clone()).collect(),
         attempted_ms: now,

@@ -670,6 +670,12 @@ fn dispatch_gap_check_with_runtime(server: &Server, now: i64) {
         }
         return;
     }
+    let condition_key = dispatch_gap_condition_key(&master_id, &task_ids, &idle_peer_ids);
+    let same_condition = state
+        .master_wake
+        .last_dispatch_gap_notice_key
+        .as_deref()
+        == Some(condition_key.as_str());
     let cooldown_active = state.master_wake.last_dispatch_gap_notice_ms > 0
         && now.saturating_sub(state.master_wake.last_dispatch_gap_notice_ms)
             < DISPATCH_GAP_IDEMPOTENCE_MS;
@@ -679,7 +685,7 @@ fn dispatch_gap_check_with_runtime(server: &Server, now: i64) {
             && message.subject.as_deref() == Some("master-dispatch-gap")
             && matches!(message.state.as_str(), "pending" | "delivered")
     });
-    if cooldown_active || unconsumed_existing {
+    if cooldown_active || unconsumed_existing || same_condition {
         if crate::server::notification_state::record_dispatch_gap_condition(
             &mut state.master_wake,
             task_ids,
@@ -690,7 +696,6 @@ fn dispatch_gap_check_with_runtime(server: &Server, now: i64) {
         }
         return;
     }
-    let condition_key = dispatch_gap_condition_key(&master_id, &task_ids, &idle_peer_ids);
     let Some(subscription) = state
         .matching_subscription(&master_id, "direct-message", None, now)
         .cloned()
@@ -879,7 +884,7 @@ fn dispatch_gap_condition_key(
 
 fn dispatch_gap_body(task_ids: &[String], idle_peer_ids: &[String]) -> String {
     format!(
-        "Dispatch gap: {} admitted public ticket(s) still have an undispatched phase (waiting_assignment/queued) while {} direct peer(s) are typed idle. tasks={}; idle_peers={}. Use the existing board dispatch/invite entry to assign suitable work. This reminder does not dispatch, change owners, or change task status, and the same condition stays silent for {}ms.",
+        "Dispatch gap: {} admitted public ticket(s) still have an undispatched phase (waiting_assignment/queued) while {} direct peer(s) are typed idle. tasks={}; idle_peers={}. Use the existing board dispatch/invite entry to assign suitable work. If no actionable work remains or tasks are paused, close/cancel them and run `collab notify cancel --event master-idle` to stop patrol. This reminder is idempotent per state change and stays silent for at least {}ms.",
         task_ids.len(),
         idle_peer_ids.len(),
         task_ids.join(", "),
@@ -2528,8 +2533,16 @@ mod tests {
         super::dispatch_gap_check_at(&server, now + super::DISPATCH_GAP_IDEMPOTENCE_MS);
         assert_eq!(
             dispatch_gap_notice_count(&server),
+            1,
+            "unchanged dispatch-gap condition must remain idempotent even after cooldown"
+        );
+        // A state change (new undispatched ticket T2) after cooldown emits a fresh reminder.
+        seed_undispatched_public_ticket(&server, "T2", "master", true);
+        super::dispatch_gap_check_at(&server, now + super::DISPATCH_GAP_IDEMPOTENCE_MS);
+        assert_eq!(
+            dispatch_gap_notice_count(&server),
             2,
-            "once 600000ms elapses and prior reminder is consumed, the condition may remind again"
+            "changed condition after cooldown must remind once"
         );
         let state = server.state.lock().unwrap();
         assert_eq!(

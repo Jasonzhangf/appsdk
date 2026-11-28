@@ -2802,6 +2802,34 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         }
         operations
     };
+    let is_master_actor =
+        master.get("worker_id").and_then(serde_json::Value::as_str) == Some(worker_id.as_str());
+    let is_ceo_actor = role == "ceo";
+    if !cfg!(test) && (is_ceo_actor || is_master_actor) {
+        if let Some(rex_endpoint) = worker
+            .transport
+            .as_ref()
+            .and_then(|t| t.rex_endpoint.as_ref())
+        {
+            if let Err(err) = crate::client::adapters::rex::ensure_collab_session(rex_endpoint) {
+                crate::server::presence::append_log(
+                    &server.log_path(),
+                    &format!("REX_COLLAB_SESSION_ENSURE_WARN: {err}"),
+                );
+            }
+            if is_master_actor {
+                if let Err(err) = crate::client::adapters::rex::rename_window_to_project(
+                    rex_endpoint,
+                    &server.root,
+                ) {
+                    crate::server::presence::append_log(
+                        &server.log_path(),
+                        &format!("REX_TAB_RENAME_WARN: {err}"),
+                    );
+                }
+            }
+        }
+    }
     let peer_count = peers.len();
     Resp::data(json!({
         "schema_version": 1,

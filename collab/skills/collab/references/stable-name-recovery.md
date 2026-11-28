@@ -170,7 +170,7 @@ tm-iterm 只读 Collab identity map。禁止把转换出的 `entries`、布局�
 写入 `~/.collab/identity-map.json`。布局 manifest 与身份表有各自的唯一 owner。
 
 该固定位置 gate 作用于 tmux。Rex 使用当前 server/session/block，按唯一当前 block 续接。
-Rex session 与项目无关，tab 按项目命名；严禁 agent 修改或重命名 Rex session 名（禁止 `rex session rename`）。
+Rex session 默认名为 `collab`（Collab 只看 `collab` session），由 CEO 或第一个 manager（Jenny）检查并把所在 session 改名为 `collab`；Rex tab（window）由 Jenny 更新为当前项目目录名（`cwd` 末级目录）。peer 无权改 Rex session 名，也无权改 Rex tab 名。
 
 Desktop 和 DSH 使用同一身份表，只是绑定方式不同。Desktop 使用宿主 bridge 的
 当前 sessionID 和真实 caller 能力；DSH 使用 gateway 的当前 sessionID、endpoint

@@ -2455,3 +2455,132 @@ async fn cleanup_restore_session(
         },
     }
 }
+
+/// Ensure a Rex session labeled `collab` exists when CEO or the first manager
+/// (Jenny) binds in Rex. If no `collab` session exists yet, renames the
+/// caller's current Rex session to `collab`.
+pub(crate) fn ensure_collab_session(endpoint: &RexEndpoint) -> Result<bool, String> {
+    let cli = official_cli_path();
+    if !Path::new(&cli).exists() {
+        return Ok(false);
+    }
+    let list = std::process::Command::new(&cli)
+        .args(["-S", &endpoint.server, "session", "ls", "--json", "--autostart=false"])
+        .output()
+        .map_err(|e| format!("rex session ls failed: {e}"))?;
+    if !list.status.success() {
+        return Err(String::from_utf8_lossy(&list.stderr).trim().to_string());
+    }
+    let parsed: Value = serde_json::from_slice(&list.stdout)
+        .map_err(|e| format!("rex session ls malformed JSON: {e}"))?;
+    let has_collab = parsed
+        .get("sessions")
+        .and_then(Value::as_array)
+        .is_some_and(|sessions| {
+            sessions.iter().any(|s| {
+                s.get("label")
+                    .and_then(Value::as_str)
+                    .is_some_and(|l| l == "collab")
+            })
+        });
+    if has_collab {
+        return Ok(false);
+    }
+    let rename = std::process::Command::new(&cli)
+        .args([
+            "-S",
+            &endpoint.server,
+            "session",
+            "rename",
+            "--autostart=false",
+            &endpoint.session_id,
+            "collab",
+        ])
+        .output()
+        .map_err(|e| format!("rex session rename failed: {e}"))?;
+    if !rename.status.success() {
+        return Err(String::from_utf8_lossy(&rename.stderr).trim().to_string());
+    }
+    Ok(true)
+}
+
+/// Rename the Rex tab (window) containing `endpoint.block_id` to the project's
+/// directory basename (`cwd` last segment). Only Jenny (project master) may call this.
+pub(crate) fn rename_window_to_project(
+    endpoint: &RexEndpoint,
+    project_root: &Path,
+) -> Result<(), String> {
+    let cli = official_cli_path();
+    if !Path::new(&cli).exists() {
+        return Ok(());
+    }
+    let Some(project_name) = project_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(());
+    };
+    let mut child = std::process::Command::new(&cli)
+        .args([
+            "-S",
+            &endpoint.server,
+            "api",
+            "call",
+            "--autostart=false",
+            "-s",
+            &endpoint.session_id,
+            "session.list_blocks",
+            "-",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("rex session.list_blocks failed: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let payload = serde_json::json!({ "session_id": endpoint.session_id }).to_string();
+        let _ = stdin.write_all(payload.as_bytes());
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("rex session.list_blocks wait failed: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let blocks: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("rex session.list_blocks malformed JSON: {e}"))?;
+    let Some(window_id) = blocks
+        .get("blocks")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|b| {
+                b.get("block_id").and_then(Value::as_str) == Some(endpoint.block_id.as_str())
+            })
+        })
+        .and_then(|b| b.get("window_id").and_then(Value::as_str))
+        .map(str::to_owned)
+    else {
+        return Ok(());
+    };
+    let rename = std::process::Command::new(&cli)
+        .args([
+            "-S",
+            &endpoint.server,
+            "window",
+            "rename",
+            "--autostart=false",
+            "-s",
+            &endpoint.session_id,
+            &window_id,
+            project_name,
+        ])
+        .output()
+        .map_err(|e| format!("rex window rename failed: {e}"))?;
+    if !rename.status.success() {
+        return Err(String::from_utf8_lossy(&rename.stderr).trim().to_string());
+    }
+    Ok(())
+}

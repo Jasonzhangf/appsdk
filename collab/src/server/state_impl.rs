@@ -161,6 +161,9 @@ impl State {
         if task_status_is_terminal(&task.status) {
             return cleanup && owner(task);
         }
+        if task.status == "blocked" {
+            return false;
+        }
         if let Some(wait) = task.wait.as_ref().filter(|wait| {
             !wait.responsible_actor.is_empty()
                 && !wait.waiting_for.is_empty()

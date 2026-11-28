@@ -203,25 +203,12 @@ fn merge_follow_up(value: &mut serde_json::Value) {
     value["progress"] = json!("snapshot");
 }
 
-fn follow_up(record: &Record, reused: bool) -> serde_json::Value {
-    let mut value = json!({"subagent": record, "reused": reused});
-    merge_follow_up(&mut value);
-    value
-}
-
-fn can_reuse_existing(record: &Record) -> bool {
-    record.thread_id.is_some() && record.status != "failed"
-}
-
 pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 80
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-pub(crate) fn valid_runtime(runtime: &str) -> bool {
-    runtime == "codex"
 }
 
 fn notify(

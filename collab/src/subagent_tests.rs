@@ -726,27 +726,3 @@ fn other_notification_failure_retires_only_the_child_delivery_route() {
     );
     assert!(state.workers.contains_key(child_id));
 }
-
-#[test]
-fn failed_subagent_record_with_thread_id_is_not_reused() {
-    let mut record = Record {
-        id: "child-1".into(),
-        parent: "parent-1".into(),
-        peer: "peer-1".into(),
-        status: "failed".into(),
-        thread_id: Some("archived-child-thread".into()),
-        profile: None,
-        created_ms: 0,
-        ready_deadline_ms: 0,
-        last_message: None,
-        error: Some("cannot register child identity".into()),
-        probe_failures: vec![],
-        runtime: Some("codex".into()),
-        create_operation_id: None,
-        binding_id: None,
-    };
-
-    assert!(!can_reuse_existing(&record));
-    record.status = "starting".into();
-    assert!(can_reuse_existing(&record));
-}

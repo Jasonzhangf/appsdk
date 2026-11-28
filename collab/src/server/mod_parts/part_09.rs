@@ -1058,15 +1058,7 @@ fn commit_task_close_locked(
                 &closed.owner,
             ));
             if !continuation_events.is_empty() {
-                for event in &continuation_events {
-                    if let Event::WakeBound {
-                        message_id,
-                        subscription_id,
-                    } = event
-                    {
-                        notifications.push((message_id.clone(), subscription_id.clone()));
-                    }
-                }
+                notifications.extend(extract_wake_bindings(&continuation_events));
                 commit_task_close_events(server, st, control, &continuation_events)?;
             }
         }
@@ -1217,15 +1209,7 @@ fn release_dependents_of_closed_task_with_control(
             .matching_subscription(&waiter, "resource-released", Some(closed_id), now_ms())
             .or_else(|| st.matching_subscription(&waiter, "direct-message", None, now_ms()))
             .cloned();
-        let mut events = vec![
-            Event::TaskUpdated { task: waiter_task },
-            Event::MasterWakeSignal {
-                signal: state::MasterWakeSignal::TaskFreed {
-                    task_id: closed_id.to_owned(),
-                },
-                at_ms: now_ms(),
-            },
-        ];
+        let mut events = vec![Event::TaskUpdated { task: waiter_task }];
         if let Some(subscription) = subscription {
             let message_id = gen_msg_id();
             events.extend([

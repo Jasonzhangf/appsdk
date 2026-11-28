@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-dispatch-gap-reminder-migration",
-  "version": "0.1.0",
-  "description": "One dispatch-gap check reads the current master, public board tasks, direct one-layer peers, bindings and typed activity. It selects pending public tasks without an active invitation and direct peers that are online, idle, eligible for at least one task, and not managed children. It forms a sorted master+task+peer condition key, applies a 600000ms durable idempotence window, and delivers one direct-message reminder to the master or explicitly skips. A changed key is a new gap; resolving the gap clears the key. The reminder does not dispatch, change owners or change task status. A future auto-continuation queue must exclude peers with queued work; this graph does not invent that absent state.",
+  "version": "0.2.0",
+  "description": "One dispatch-gap check reads the current master, public board tickets with Execute phases, direct one-layer peers, bindings and typed activity. It selects admitted public tickets with WaitingAssignment/Queued Execute phases and direct peers that are online, idle, eligible for at least one task, not managed children, and holding no queued own work. It enforces a minimum 600000ms interval between durable reminder creations per master regardless of task/peer churn or transient gap clearing, reuses an unconsumed reminder, and writes a durable reminder for the master's next periodic patrol without immediate native steering or I/O.",
   "inputs": [
     {
       "id": "dispatch_gap_check_trigger",
@@ -13,7 +13,7 @@
       "id": "read_master_scope_facts",
       "operator": "appsdk.collab_master_dispatch.read_scope_facts",
       "operator_version": "1",
-      "description": "Read the current project master, public board tasks, direct one-layer peers, their bindings and transport, and typed presence/activity. Do not recurse into managed children or infer activity from task status, tmux text or stale history.",
+      "description": "Read the current project master, public board Execute phases and tasks, direct one-layer peers, their bindings and transport, and typed presence/activity. Do not recurse into managed children or infer activity from task status, tmux text or stale history.",
       "inputs": ["dispatch_gap_check_trigger"],
       "output": {
         "id": "master_scope_facts",
@@ -27,7 +27,7 @@
       "id": "classify_undispatched_work",
       "operator": "appsdk.collab_master_dispatch.classify_undispatched_work",
       "operator_version": "1",
-      "description": "Select only pending public tasks owned or created by the current master with no active invitation. An invited task belongs to board dispatch. Auto-continuation is the primary path for queued work, but its ticket queue is not on origin/main yet; this graph adds no fallback queue projection.",
+      "description": "Select only non-terminal public tickets owned or created by the current master whose Execute phase is WaitingAssignment or Queued with no active invitation. An invited task belongs to board dispatch.",
       "inputs": ["master_scope_facts"],
       "output": {
         "id": "undispatched_tasks",
@@ -41,7 +41,7 @@
       "id": "evaluate_idle_peers",
       "operator": "appsdk.collab_master_dispatch.evaluate_idle_peers",
       "operator_version": "1",
-      "description": "Reuse dispatch_eligible_worker_ids for stable-name, binding, managed-child, transport and executor-pin rules. Keep only direct peers that are Online and Idle and eligible for at least one selected task. Unknown, cold, offline, waiting_user and the master itself are not capacity. When auto-continuation lands, exclude peers with queued work here.",
+      "description": "Reuse dispatch_eligible_worker_ids for stable-name, binding, managed-child, transport and executor-pin rules. Keep only direct peers that are Online and Idle, eligible for at least one selected task, and hold no Queued Execute phase of their own. Unknown, cold, offline, waiting_user and the master itself are not capacity.",
       "inputs": ["undispatched_tasks"],
       "output": {
         "id": "dispatch_gap_condition",
@@ -55,7 +55,7 @@
       "id": "apply_idempotence_window",
       "operator": "appsdk.collab_master_dispatch.apply_window",
       "operator_version": "1",
-      "description": "If either set is empty, clear the condition key and return skip_no_gap. Otherwise form master plus sorted task IDs plus sorted peer IDs. Return skip_idempotent only when the key equals the last durable key and less than 600000ms has elapsed. A changed key or an elapsed window allows delivery.",
+      "description": "If either set is empty, clear only the active condition snapshot (preserving last_dispatch_gap_notice_ms) and return skip_no_gap. Otherwise return skip_idempotent if an unconsumed durable dispatch-gap reminder is already pending/delivered or if less than 600000ms has elapsed since the last durable reminder creation for this master regardless of task/peer set changes.",
       "inputs": ["dispatch_gap_condition"],
       "output": {
         "id": "reminder_decision",
@@ -69,7 +69,7 @@
       "id": "deliver_reminder_or_skip",
       "operator": "appsdk.collab_master_dispatch.deliver_or_skip",
       "operator_version": "1",
-      "description": "When the window allows and the master has a matching direct-message subscription, create one master-dispatch-gap message listing the tasks and idle peers. Skips create no message and never dispatch work, change task ownership or change peer activity.",
+      "description": "When allowed and the master has a matching direct-message subscription, prepare one durable master-dispatch-gap message for the master's next periodic patrol without immediate native steering or direct I/O during master reasoning.",
       "inputs": ["reminder_decision"],
       "output": {
         "id": "delivery_outcome",
@@ -83,7 +83,7 @@
       "id": "persist_reminder_outcome",
       "operator": "appsdk.collab_master_dispatch.persist_outcome",
       "operator_version": "1",
-      "description": "Commit the message, wake binding and MasterWakeUpdated together. Advance the key and last notice time only after durable success. On failure record the condition snapshot and delivery_failed without advancing the window. On gap resolution clear the condition and key. MasterWakeAccumulator is the only state owner.",
+      "description": "Commit the durable message, wake binding and MasterWakeUpdated together. Advance last_dispatch_gap_notice_ms on durable commit (separate from later periodic native delivery); on commit failure record delivery_failed without advancing the window. On gap resolution clear only the active condition snapshot.",
       "inputs": ["delivery_outcome"],
       "output": {
         "id": "persisted_dispatch_gap_state",
@@ -97,7 +97,7 @@
       "id": "emit_check_result",
       "operator": "appsdk.collab_master_dispatch.emit_result",
       "operator_version": "1",
-      "description": "Return triggered, skip_no_gap, skip_idempotent or delivery_failed together with the condition key, message ID, next window time and unresolved gap. Success, skip and failure reach the same exit.",
+      "description": "Return durable_admitted, skip_no_gap, skip_idempotent or durable_failed together with the condition key, message ID, next window time and unresolved gap. Success, skip and failure reach the same exit.",
       "inputs": ["persisted_dispatch_gap_state"],
       "output": {
         "id": "dispatch_gap_check_result",

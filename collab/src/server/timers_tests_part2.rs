@@ -2157,8 +2157,9 @@ use super::*;
         });
         server.commit(&[Event::TaskUpdated { task }]);
 
-        // A timeout is recorded while the live master is working. Its reason
-        // stays pending in the durable mailbox and no worker is notified.
+        // A timeout is recorded while the live master is working. Because master
+        // is periodic-first, wait-timeout stays durable in mailbox with zero
+        // non-periodic wake interruption until master's periodic schedule fires.
         tick_with_idle(&server, &|_| false);
         let (message_id, message) = {
             let state = server.state.lock().unwrap();
@@ -2182,14 +2183,14 @@ use super::*;
             assert!(message.body.contains("reason=resource_conflict"));
             assert!(message.body.contains("WAIT_TIMEOUT"));
             assert_eq!(message.state, "pending");
-            assert_eq!(message.wake_attempt_count, 1);
+            assert_eq!(message.wake_attempt_count, 0);
             assert_eq!(state.wake_bindings.get(message_id), Some(&subscription_id));
             assert!(!state.msgs.values().any(|message| message.to == "waiter"));
             (message_id.clone(), message.clone())
         };
 
         // A repeated tick observes the blocked task and cannot create a second
-        // scheduling reason or a second wake attempt during the retry window.
+        // scheduling reason or interrupt master before periodic patrol is due.
         tick_with_idle(&server, &|_| false);
         assert_eq!(wait_timeout_messages(&server.state.lock().unwrap()).len(), 1);
         let state = server.state.lock().unwrap();
@@ -2197,7 +2198,7 @@ use super::*;
         assert_eq!(state.msgs[&message_id].subject, message.subject);
         assert_eq!(state.msgs[&message_id].body, message.body);
         assert_eq!(state.msgs[&message_id].state, "pending");
-        assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
+        assert_eq!(state.msgs[&message_id].wake_attempt_count, 0);
         assert_eq!(wait_timeout_messages(&state).len(), 1);
         drop(state);
 
@@ -2212,8 +2213,107 @@ use super::*;
         assert_eq!(replayed_state.msgs[&message_id].subject, message.subject);
         assert_eq!(replayed_state.msgs[&message_id].body, message.body);
         assert_eq!(replayed_state.msgs[&message_id].state, "pending");
-        assert_eq!(replayed_state.msgs[&message_id].wake_attempt_count, 1);
+        assert_eq!(replayed_state.msgs[&message_id].wake_attempt_count, 0);
         drop(replayed_state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ticket_claim_explicit_notification_retries_via_timer_while_manual_explicit_stays_skipped() {
+        let (mut server, root) = test_server();
+        Arc::get_mut(&mut server).unwrap().config.notifications.mode = "immediate".into();
+        register(&server, "claim-worker");
+        register(&server, "manual-worker");
+        let claim_sub = subscribe(&server, "claim-worker", "direct-message", None, None);
+        let manual_sub = subscribe(&server, "manual-worker", "direct-message", None, None);
+        let now = now_ms();
+        let ticket_msg = Message {
+            id: "ticket-claim-retry-1".into(),
+            from: "daemon".into(),
+            to: "claim-worker".into(),
+            mtype: "notification".into(),
+            subject: Some("ticket-claimed:t1".into()),
+            body: "Ticket t1 claimed at attempt 1".into(),
+            in_reply_to: None,
+            created_ms: now,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        };
+        let manual_msg = Message {
+            id: "msg-explicit-manual-1".into(),
+            from: "master".into(),
+            to: "manual-worker".into(),
+            mtype: "notify".into(),
+            subject: Some("manual".into()),
+            body: "Do not retry".into(),
+            in_reply_to: None,
+            created_ms: now,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        };
+        server.commit(&[
+            Event::Sent { msg: ticket_msg },
+            Event::DeliveryMode {
+                msg_id: "ticket-claim-retry-1".into(),
+                mode: "explicit-notification".into(),
+                source_thread_id: None,
+            },
+            Event::WakeBound {
+                message_id: "ticket-claim-retry-1".into(),
+                subscription_id: claim_sub,
+            },
+            Event::Sent { msg: manual_msg },
+            Event::DeliveryMode {
+                msg_id: "msg-explicit-manual-1".into(),
+                mode: "explicit-notification".into(),
+                source_thread_id: None,
+            },
+            Event::WakeBound {
+                message_id: "msg-explicit-manual-1".into(),
+                subscription_id: manual_sub,
+            },
+        ]);
+
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                automatic_delivery_candidate(&state, &state.msgs["ticket-claim-retry-1"]),
+                "ticket-claim-* explicit notifications must qualify for timer delivery"
+            );
+            assert!(
+                !automatic_delivery_candidate(&state, &state.msgs["msg-explicit-manual-1"]),
+                "ordinary explicit notifications must stay excluded from timer delivery"
+            );
+        }
+
+        tick_with_deadline_wake_at(&server, now);
+
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["ticket-claim-retry-1"].wake_attempt_count, 1);
+        assert!(
+            state
+                .notification_delivery_accepted
+                .contains_key("ticket-claim-retry-1"),
+            "timer must deliver deferred ticket-claim-* wake to transport"
+        );
+        assert!(
+            !automatic_delivery_candidate(&state, &state.msgs["ticket-claim-retry-1"]),
+            "accepted ticket-claim-* notifications must leave the automatic candidate pool"
+        );
+        assert_eq!(state.msgs["msg-explicit-manual-1"].state, "pending");
+        assert_eq!(state.msgs["msg-explicit-manual-1"].wake_attempt_count, 0);
+        assert!(!state
+            .notification_delivery_accepted
+            .contains_key("msg-explicit-manual-1"));
+        drop(state);
+        tick_with_deadline_wake_at(&server, now + 10_000);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["ticket-claim-retry-1"].wake_attempt_count, 1);
+        drop(state);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -2427,22 +2527,29 @@ use super::*;
         register(&server, "batch-worker");
         let sub = subscribe(&server, "batch-worker", "direct-message", None, None);
 
-        // Queue 5 messages with unique IDs for batch-worker
+        // Queue 5 messages in one elapsed batch window for batch-worker.
+        let mut msg_ids = Vec::new();
         for i in 0..5 {
-            let _ = bind_message_with_id(&server, "batch-worker", &sub, &format!("msg-batch-{i}"));
+            msg_ids.push(bind_message_with_id(
+                &server,
+                "batch-worker",
+                &sub,
+                &format!("msg-batch-{i}"),
+            ));
         }
-        server
-            .state
-            .lock()
-            .unwrap()
-            .msgs
-            .get_mut("msg-batch-4")
-            .unwrap()
-            .body = "界".repeat(2_000);
+        {
+            let mut state = server.state.lock().unwrap();
+            for id in &msg_ids {
+                if let Some(m) = state.msgs.get_mut(id) {
+                    m.created_ms -= 120_000;
+                }
+            }
+            state.msgs.get_mut("msg-batch-4").unwrap().body = "界".repeat(2_000);
+        }
 
         let first_id = "msg-batch-0";
         let delivered_text = std::sync::Mutex::new(String::new());
-        assert!(!super::super::attempt_notification_with_default(
+        assert!(super::super::attempt_notification_with_default(
             &server,
             first_id,
             &sub,
@@ -2455,17 +2562,14 @@ use super::*;
 
         let text = delivered_text.lock().unwrap().clone();
         assert!(text.chars().count() <= 1024);
-        assert!(!text.contains("msg-batch-0"));
-        assert!(!text.contains("msg-batch-1"));
+        assert!(text.contains("msg-batch-0"));
+        assert!(text.contains("msg-batch-1"));
         assert!(text.contains("msg-batch-2"));
         assert!(text.contains("msg-batch-3"));
         assert!(text.contains("msg-batch-4"));
         assert!(!text.contains("message_ids="), "{text}");
-        assert!(text.contains("entries=msg-batch-2:"));
-        assert!(text.contains("msg-batch-3:"));
-        assert!(text.contains("msg-batch-4:"));
+        assert!(text.contains("entries=msg-batch-0:"));
         assert!(!text.contains("task_ids"), "{text}");
-        assert!(!text.contains("collab inbox"), "{text}");
 
         let state = server.state.lock().unwrap();
         let queued_count = state
@@ -2474,16 +2578,11 @@ use super::*;
             .filter(|m| m.to == "batch-worker" && m.state == "pending")
             .count();
         assert_eq!(queued_count, 5);
-        assert_eq!(state.msgs["msg-batch-0"].state, "pending");
-        assert_eq!(state.msgs["msg-batch-1"].state, "pending");
-        assert_eq!(state.msgs["msg-batch-0"].wake_attempt_count, 0);
-        assert_eq!(state.msgs["msg-batch-1"].wake_attempt_count, 0);
-        assert_eq!(state.msgs["msg-batch-2"].state, "pending");
-        assert_eq!(state.msgs["msg-batch-3"].state, "pending");
-        assert_eq!(state.msgs["msg-batch-4"].state, "pending");
-        assert_eq!(state.msgs["msg-batch-2"].wake_attempt_count, 1);
-        assert_eq!(state.msgs["msg-batch-3"].wake_attempt_count, 1);
-        assert_eq!(state.msgs["msg-batch-4"].wake_attempt_count, 1);
+        for i in 0..5 {
+            let id = format!("msg-batch-{i}");
+            assert_eq!(state.msgs[&id].state, "pending");
+            assert_eq!(state.msgs[&id].wake_attempt_count, 1);
+        }
         drop(state);
         assert!(!super::super::attempt_notification_with_default(
             &server,

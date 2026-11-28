@@ -416,7 +416,7 @@ pub(super) fn prepare_board_invitation_locked(
         },
         Event::DeliveryMode {
             msg_id: message_id.clone(),
-            mode: "explicit-notification".into(),
+            mode: "queued".into(),
             source_thread_id: None,
         },
     ];

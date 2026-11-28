@@ -115,67 +115,14 @@ fn unknown_workspace_view(project_root: Option<String>) -> serde_json::Value {
     })
 }
 
-fn live_idle_capacity_keys(
-    server: &Server,
-    state: &State,
-) -> (
-    std::collections::BTreeSet<String>,
-    std::collections::BTreeSet<String>,
-) {
-    let live_idle_subagents = state
-        .subagents
-        .values()
-        .filter(|record| record.status == "idle")
-        .filter(|record| {
-            state.workers.get(&record.peer).is_some_and(|worker| {
-                worker_presence_in_state(server, state, worker) == IdentityPresence::Present
-            })
-        })
-        .filter(|record| !board_peer_has_execution_reservation(state, &record.peer, None))
-        .map(|record| record.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    let live_idle_workers = state
-        .workers
-        .values()
-        .filter(|worker| {
-            worker_presence_in_state(server, state, worker) == IdentityPresence::Present
-        })
-        .filter(|worker| {
-            state
-                .keepalives
-                .get(&worker.id)
-                .is_some_and(|record| record.observed == "idle")
-        })
-        .filter(|worker| !board_peer_has_execution_reservation(state, &worker.id, None))
-        .map(|worker| worker.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    (live_idle_workers, live_idle_subagents)
-}
-
 pub(crate) fn project_master_wake_idle_capacity(
-    server: &Server,
+    _server: &Server,
     state: &State,
 ) -> crate::server::notification_state::MasterWakeAccumulator {
-    let (live_idle_workers, live_idle_subagents) = live_idle_capacity_keys(server, state);
-    let mut accumulator = state.master_wake.clone();
-    notification_state::retain_live_idle_workers(
-        &mut accumulator,
-        &live_idle_workers,
-        &live_idle_subagents,
-    );
-    accumulator
-}
-
-fn prune_master_wake_idle_capacity(server: &Server) {
-    let mut state = server.state.lock().unwrap();
-    let accumulator = project_master_wake_idle_capacity(server, &state);
-    if accumulator != state.master_wake {
-        server.commit_locked_reporting(&mut state, &[Event::MasterWakeUpdated { accumulator }]);
-    }
+    state.master_wake.clone()
 }
 
 fn handle_master_status(server: &Server) -> Resp {
-    prune_master_wake_idle_capacity(server);
     // The typed grant is the only authority source. A route, reducer or scope
     // failure is an explicit error; a transport observation is reported
     // separately and never removes the holder. The endpoint probe must run
@@ -2847,6 +2794,78 @@ fn task_update_locked_at_route(
     }
 }
 
+fn task_block_notice_events(
+    server: &Server,
+    st: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    route: Option<&RouteScope>,
+    recipient: &str,
+    subject: String,
+    body: String,
+    now: i64,
+) -> (Vec<Event>, Option<String>) {
+    if !st.workers.contains_key(recipient) {
+        return (Vec::new(), None);
+    }
+    let loaded_control;
+    let control = match control {
+        Some(control) => Some(control),
+        None => {
+            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
+                Ok(control) => {
+                    loaded_control = control;
+                    Some(&loaded_control)
+                }
+                Err(_) => None,
+            }
+        }
+    };
+    let message_id = format!("block-notice-{}", rand::random::<u128>());
+    let mut events = vec![
+        Event::Sent {
+            msg: Message {
+                id: message_id.clone(),
+                from: "daemon".into(),
+                to: recipient.to_owned(),
+                mtype: "notification".into(),
+                subject: Some(subject),
+                body,
+                in_reply_to: None,
+                created_ms: now,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        },
+        Event::DeliveryMode {
+            msg_id: message_id.clone(),
+            mode: "explicit-notification".into(),
+            source_thread_id: None,
+        },
+    ];
+    if let (Some(control), Some(route)) = (control, route) {
+        if let Ok(Some(slot)) =
+            control.current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)
+        {
+            events.push(Event::MailboxNameAddressed {
+                message_id: message_id.clone(),
+                address: name_mailbox::MailboxNameAddress {
+                    project_scope: route.project_scope_id.as_str().into(),
+                    name: slot.identity_key.name.clone(),
+                },
+            });
+        }
+    }
+    if let Some(subscription) = st.matching_subscription(recipient, "direct-message", None, now) {
+        events.push(Event::WakeBound {
+            message_id: message_id.clone(),
+            subscription_id: subscription.id.clone(),
+        });
+    }
+    (events, Some(message_id))
+}
+
 /// Record a member's business block application without changing the task
 /// status. A repeat application from the same owner refreshes the one pending
 /// request instead of stacking a second one.
@@ -2886,9 +2905,36 @@ fn task_block_apply_locked(
             decision_reason: None,
         },
     };
-    let events = [Event::TaskBlockRequestUpdated {
+    let mut events = vec![Event::TaskBlockRequestUpdated {
         request: request.clone(),
     }];
+    let route_scope = server_route_scope(server, st).ok().flatten();
+    let master = current_master_worker_id(st, route_scope.as_ref());
+    let supervisor_id = if master.as_deref() == Some(requester) {
+        current_ceo_worker_id(st)
+    } else {
+        master
+    };
+    let (notice_events, notice_message_id) = match supervisor_id {
+        Some(supervisor) if supervisor != requester => {
+            let reason_text = request.reason.as_deref().unwrap_or("none");
+            task_block_notice_events(
+                server,
+                st,
+                control,
+                route_scope.as_ref(),
+                &supervisor,
+                format!("block-requested:{}", task.id),
+                format!(
+                    "Task {} block requested by {} (revision={}): {}. Decide with collab task update {} --blocker-action approve|reject.",
+                    task.id, requester, revision, reason_text, task.id
+                ),
+                now,
+            )
+        }
+        _ => (Vec::new(), None),
+    };
+    events.extend(notice_events);
     let commit = match control {
         Some(control) => server.commit_locked_checked_with_control(st, &events, control),
         None => server.commit_locked_checked(st, &events),
@@ -2901,7 +2947,12 @@ fn task_block_apply_locked(
         "status": task.status,
         "owner": task.owner,
         "block_request": request,
-        "notification": "none",
+        "notification": if notice_message_id.is_some() {
+            "block-approval-requested"
+        } else {
+            "none"
+        },
+        "notification_message_id": notice_message_id,
         "next_action": "business block pending supervisor decision",
     }))
 }
@@ -3010,6 +3061,37 @@ fn task_block_decide_locked(
             task: updated_task.clone(),
         });
     }
+    let decision_label = if decision == "approve" {
+        "approved"
+    } else {
+        "rejected"
+    };
+    let decision_reason_text = request
+        .decision_reason
+        .as_deref()
+        .unwrap_or("none");
+    let (decision_events, decision_message_id) = task_block_notice_events(
+        server,
+        st,
+        control,
+        route_scope.as_ref(),
+        &request.requester,
+        format!("block-{decision_label}:{}", updated_task.id),
+        format!(
+            "Task {} block request was {} by {} (reason={}). Next action: {}",
+            updated_task.id,
+            decision_label,
+            worker_id,
+            decision_reason_text,
+            if decision == "approve" {
+                "task is blocked; resume only after the blocker is resolved"
+            } else {
+                "block request rejected; continue work or send a new application"
+            }
+        ),
+        now,
+    );
+    events.extend(decision_events);
     let mut continuation_message_id = None;
     let commit = match control {
         Some(control) => {
@@ -3078,10 +3160,13 @@ fn task_block_decide_locked(
         "block_request": request,
         "notification": if continuation_message_id.is_some() {
             "auto-ticket-continuation"
+        } else if decision_message_id.is_some() {
+            "block-decision"
         } else {
             "none"
         },
-        "notification_message_id": continuation_message_id,
+        "notification_message_id": decision_message_id,
+        "continuation_notification_message_id": continuation_message_id,
         "next_action": if decision == "approve" {
             "task is blocked; resume only after the blocker is resolved"
         } else {
@@ -3090,14 +3175,18 @@ fn task_block_decide_locked(
     }))
 }
 
+fn current_ceo_worker_id(st: &State) -> Option<String> {
+    st.ceo_grant.as_ref().and_then(|grant| {
+        st.name_occupancy(&grant.workspace, &grant.name)
+            .map(|occupancy| occupancy.worker_id.clone())
+    })
+}
+
 /// Whether the caller is the worker currently holding the durable CEO grant.
 /// Mirrors the holder resolution the CEO owner uses, without inventing a
 /// second authority source.
 fn is_current_ceo_holder(st: &State, worker_id: &str) -> bool {
-    st.ceo_grant.as_ref().is_some_and(|grant| {
-        st.name_occupancy(&grant.workspace, &grant.name)
-            .is_some_and(|occupancy| occupancy.worker_id == worker_id)
-    })
+    current_ceo_worker_id(st).as_deref() == Some(worker_id)
 }
 
 fn stale_worker_views(
@@ -3294,14 +3383,19 @@ fn handle_task_deliver_with_intent(
     worktree: Option<String>,
     no_candidate: bool,
 ) -> Resp {
-    let mut st = server.state.lock().unwrap();
-    handle_task_deliver_with_intent_locked(
-        server, &mut st, None, worker_id, token, task_id, evidence, attempt, worktree, no_candidate,
-    )
+    let (response, claim_wakes) = {
+        let mut st = server.state.lock().unwrap();
+        handle_task_deliver_with_intent_result_locked(
+            server, &mut st, None, worker_id, token, task_id, evidence, attempt, worktree,
+            no_candidate,
+        )
+    };
+    deliver_wake_bindings(server, &claim_wakes);
+    response
 }
 
 #[allow(clippy::too_many_arguments)]
-fn handle_task_deliver_with_intent_locked(
+fn handle_task_deliver_with_intent_result_locked(
     server: &Server,
     st: &mut State,
     control: Option<&binding_slot::BindingControlSet>,
@@ -3312,26 +3406,29 @@ fn handle_task_deliver_with_intent_locked(
     attempt: Option<u64>,
     worktree: Option<String>,
     no_candidate: bool,
-) -> Resp {
+) -> (Resp, Vec<(String, String)>) {
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
-        return Resp::err(format!("worker {} not registered", worker_id));
+        return (Resp::err(format!("worker {} not registered", worker_id)), Vec::new());
     };
     if worker.token != token {
-        return Resp::err("token mismatch: identity does not own this worker_id");
+        return (Resp::err("token mismatch: identity does not own this worker_id"), Vec::new());
     }
     let Some(mut task) = st.tasks.get(&task_id).cloned() else {
-        return Resp::err(format!("task {} not found", task_id));
+        return (Resp::err(format!("task {} not found", task_id)), Vec::new());
     };
     if let Err(error) =
         task_owner_gate_maybe_with_control(server, st, control, &task_id, &worker_id)
     {
-        return error;
+        return (error, Vec::new());
     }
     if !task_delivery_allowed(&task.status) {
-        return Resp::err(format!(
-            "task {} must be owned and working, verifying, reviewed, or rework before delivery (current: {})",
-            task_id, task.status
-        ));
+        return (
+            Resp::err(format!(
+                "task {} must be owned and working, verifying, reviewed, or rework before delivery (current: {})",
+                task_id, task.status
+            )),
+            Vec::new(),
+        );
     }
     // A pending business block application is an unresolved claim on this
     // task. Delivery must not silently erase it; the supervisor has to decide
@@ -3341,7 +3438,10 @@ fn handle_task_deliver_with_intent_locked(
         .get(&task_id)
         .is_some_and(|request| request.state == TaskBlockRequestState::Pending)
     {
-        return Resp::err_data("TASK_BLOCK_PENDING_APPROVAL", json!({"task_id": task_id}));
+        return (
+            Resp::err_data("TASK_BLOCK_PENDING_APPROVAL", json!({"task_id": task_id})),
+            Vec::new(),
+        );
     }
     let executor = match control {
         Some(control) => server_route_scope(server, st)
@@ -3353,7 +3453,7 @@ fn handle_task_deliver_with_intent_locked(
         None => work_executor_gate(server, st, &task_id, &worker_id),
     };
     if let Err(error) = executor {
-        return error;
+        return (error, Vec::new());
     }
 
     let ticket_result_event = match board_ticket_result_event(
@@ -3365,27 +3465,33 @@ fn handle_task_deliver_with_intent_locked(
         attempt,
     ) {
         Ok(event) => event,
-        Err(error) => return error,
+        Err(error) => return (error, Vec::new()),
     };
 
     let Some(evidence) = evidence.filter(|value| !value.trim().is_empty()) else {
-        return Resp::err("task deliver requires non-empty --evidence");
+        return (Resp::err("task deliver requires non-empty --evidence"), Vec::new());
     };
     let worktree = if no_candidate {
         if worktree.is_some() {
-            return Resp::err("task deliver --no-candidate cannot be combined with --worktree");
+            return (
+                Resp::err("task deliver --no-candidate cannot be combined with --worktree"),
+                Vec::new(),
+            );
         }
         None
     } else {
         let Some(worktree) = worktree.filter(|value| !value.trim().is_empty()) else {
-            return Resp::err("task deliver requires non-empty --worktree");
+            return (Resp::err("task deliver requires non-empty --worktree"), Vec::new());
         };
         if task
             .worktree_path
             .as_deref()
             .is_some_and(|registered| registered != worktree)
         {
-            return Resp::err("task deliver --worktree must match the registered task worktree");
+            return (
+                Resp::err("task deliver --worktree must match the registered task worktree"),
+                Vec::new(),
+            );
         }
         Some(worktree)
     };
@@ -3451,6 +3557,7 @@ fn handle_task_deliver_with_intent_locked(
             }
         }
     }
+    let claim_wakes = extract_wake_bindings(&events);
     events.extend([
         Event::TaskUpdated { task: task.clone() },
         Event::TaskLifecycleUpdated {
@@ -3466,20 +3573,26 @@ fn handle_task_deliver_with_intent_locked(
         None => server.commit_locked(st, &events),
     };
     if let Err(error) = commit {
-        return Resp::err(format!("TASK_DELIVER_DURABILITY_FAILED: {error}"));
+        return (
+            Resp::err(format!("TASK_DELIVER_DURABILITY_FAILED: {error}")),
+            Vec::new(),
+        );
     }
 
-    Resp::data(json!({
-        "delivered": task.id,
-        "status": task.status,
-        "evidence": evidence,
-        "worktree": worktree,
-        "delivery_kind": delivery_kind.as_str(),
-        "notification": "none",
-        "delivery_complete": false,
-        "next_action": task.next_step,
-        "identity": {"worker_id": worker.id, "kind": "peer"},
-    }))
+    (
+        Resp::data(json!({
+            "delivered": task.id,
+            "status": task.status,
+            "evidence": evidence,
+            "worktree": worktree,
+            "delivery_kind": delivery_kind.as_str(),
+            "notification": "none",
+            "delivery_complete": false,
+            "next_action": task.next_step,
+            "identity": {"worker_id": worker.id, "kind": "peer"},
+        })),
+        claim_wakes,
+    )
 }
 
 fn task_integration_authorized(

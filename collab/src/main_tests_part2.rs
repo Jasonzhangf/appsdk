@@ -1,4 +1,5 @@
 use super::*;
+use crate::proto::Resp;
 
 #[test]
 fn context_collector_never_derives_a_socket_from_the_tmux_environment() {

@@ -384,13 +384,6 @@ impl State {
                     }
                 }
                 self.subagents.insert(subagent.id.clone(), subagent.clone());
-                if subagent.status == "closed" {
-                    let id = format!("subagent:{}", subagent.id);
-                    self.master_wake.idle_workers.retain(|worker| worker != &id);
-                    self.master_wake
-                        .newly_idle_workers
-                        .retain(|worker| worker != &id);
-                }
             }
             Event::SubagentSnapshotCaptured {
                 subagent_id,
@@ -479,10 +472,6 @@ impl State {
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
                 self.goal_idle_wake.remove(worker_id);
-                self.master_wake.idle_workers.retain(|id| id != worker_id);
-                self.master_wake
-                    .newly_idle_workers
-                    .retain(|id| id != worker_id);
             }
             Event::WorkerClosed {
                 worker_id,
@@ -503,10 +492,6 @@ impl State {
                 );
                 self.workers.remove(worker_id);
                 self.keepalives.remove(worker_id);
-                self.master_wake.idle_workers.retain(|id| id != worker_id);
-                self.master_wake
-                    .newly_idle_workers
-                    .retain(|id| id != worker_id);
             }
             Event::ResponsibilityFenceSet { fence } => {
                 // `closing` is the only phase B23-F writes. `partial` and
@@ -724,27 +709,20 @@ impl State {
                 resume_on_reconnect,
             } => {
                 let failed_master_wake = self.msgs.get(message_id).is_some_and(|message| {
-                    if message.from != "collab-server"
-                        || !crate::server::notification_state::is_master_wake_notice(
+                    message.from == "collab-server"
+                        && crate::server::notification_state::is_master_wake_notice(
                             &message.mtype,
                             message.subject.as_deref(),
                         )
-                    {
-                        return false;
-                    }
-                    // Idle-batch subjects are generated only for the current
-                    // master; they do not need a timer/master-idle binding.
-                    if message.mtype != "notification" {
-                        return true;
-                    }
-                    self.wake_bindings
-                        .get(message_id)
-                        .and_then(|subscription_id| {
-                            self.notification_subscriptions.get(subscription_id)
-                        })
-                        .is_some_and(|subscription| {
-                            subscription_affects_master_wake(self, subscription)
-                        })
+                        && self
+                            .wake_bindings
+                            .get(message_id)
+                            .and_then(|subscription_id| {
+                                self.notification_subscriptions.get(subscription_id)
+                            })
+                            .is_some_and(|subscription| {
+                                subscription_affects_master_wake(self, subscription)
+                            })
                 });
                 if failed_master_wake {
                     crate::server::notification_state::mark_master_wake_delivery_failed(

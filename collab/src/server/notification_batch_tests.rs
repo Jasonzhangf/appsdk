@@ -1011,8 +1011,13 @@ fn desktop_connect_failure_preserves_retry_proof_for_the_entire_batch() {
     for id in ["batch-a", "batch-b"] {
         queue_message(&server, "recipient", &subscription, id, now);
     }
+    assert!(matches!(
+        attempt_notification_detailed_with_at(&server, "batch-a", &subscription, now),
+        NotificationAttempt::Deferred
+    ));
     assert!(
-        !attempt_notification_detailed_with_at(&server, "batch-a", &subscription, now).accepted()
+        !attempt_notification_detailed_with_at(&server, "batch-a", &subscription, now + 120_000)
+            .accepted()
     );
     {
         let state = server.state.lock().unwrap();
@@ -1025,14 +1030,22 @@ fn desktop_connect_failure_preserves_retry_proof_for_the_entire_batch() {
         .unwrap()
         .appserver_notification_sink =
         Arc::new(|_, _, _, _, _, _| Ok(serde_json::json!({"accepted": true})));
-    for id in ["batch-a", "batch-b"] {
-        assert!(
-            attempt_notification_detailed_with_at(&server, id, &subscription, now + 1).accepted()
-        );
-    }
+    assert!(attempt_notification_detailed_with_at(
+        &server,
+        "batch-a",
+        &subscription,
+        now + 240_000
+    )
+    .accepted());
     let state = server.state.lock().unwrap();
     for id in ["batch-a", "batch-b"] {
-        assert_eq!(state.msgs[id].wake_attempt_count, 2);
+        assert_eq!(
+            state.msgs[id].wake_attempt_count,
+            2,
+            "{id}: msgs={:?}, failures={:?}",
+            state.msgs,
+            state.notification_delivery_failures
+        );
         assert!(!notification_reconnect_pending(&state, &state.msgs[id]));
         assert!(state.notification_delivery_accepted.contains_key(id));
     }
@@ -1343,6 +1356,12 @@ fn queued_appserver_wake_drains_through_the_existing_timer_once() {
     });
 
     timers::tick_with_idle_at(&server, now + 1, &|_| false);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "queued wake must wait for the 120s coalescing window"
+    );
+
+    timers::tick_with_idle_at(&server, now + 120_000, &|_| false);
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
@@ -1357,7 +1376,7 @@ fn queued_appserver_wake_drains_through_the_existing_timer_once() {
         .contains_key("queued-appserver"));
     drop(state);
 
-    timers::tick_with_idle_at(&server, now + 2, &|_| false);
+    timers::tick_with_idle_at(&server, now + 120_001, &|_| false);
     assert_eq!(
         calls.lock().unwrap().len(),
         1,
@@ -3699,8 +3718,16 @@ fn native_notifications_do_not_wait_for_batch_window() {
         }
         let now = now_ms();
         queue_message(&server, "recipient", &subscription, "new-native", now);
-        let attempt =
-            attempt_notification_detailed_with_at(&server, "new-native", &subscription, now);
+        assert!(matches!(
+            attempt_notification_detailed_with_at(&server, "new-native", &subscription, now),
+            NotificationAttempt::Deferred
+        ));
+        let attempt = attempt_notification_detailed_with_at(
+            &server,
+            "new-native",
+            &subscription,
+            now + 120_000,
+        );
         assert!(attempt.accepted(), "{kind:?}: {attempt:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4330,28 +4357,23 @@ fn four_notice_batch_uses_the_original_window_start_after_capping() {
             Ok(serde_json::json!({"accepted": true}))
         });
     }
-    assert!(matches!(
-        attempt_notification_detailed_with_at(
-            &server,
-            "backlog-0",
-            &subscription_id,
-            window_start + 120_000,
-        ),
-        NotificationAttempt::Deferred
-    ));
+    assert!(attempt_notification_detailed_with_at(
+        &server,
+        "backlog-0",
+        &subscription_id,
+        window_start + 120_000,
+    )
+    .accepted());
     let text = delivered.lock().unwrap().join("\n");
-    assert!(!text.contains("backlog-0"));
+    assert!(text.contains("backlog-0"));
     assert!(text.contains("backlog-1"));
     assert!(text.contains("backlog-2"));
     assert!(text.contains("backlog-3"));
     let state = server.state.lock().unwrap();
-    assert_eq!(state.msgs["backlog-0"].state, "pending");
-    assert_eq!(state.msgs["backlog-1"].state, "pending");
-    assert_eq!(state.msgs["backlog-1"].wake_attempt_count, 1);
-    assert_eq!(state.msgs["backlog-2"].state, "pending");
-    assert_eq!(state.msgs["backlog-2"].wake_attempt_count, 1);
-    assert_eq!(state.msgs["backlog-3"].state, "pending");
-    assert_eq!(state.msgs["backlog-3"].wake_attempt_count, 1);
+    for id in ["backlog-0", "backlog-1", "backlog-2", "backlog-3"] {
+        assert_eq!(state.msgs[id].state, "pending");
+        assert_eq!(state.msgs[id].wake_attempt_count, 1);
+    }
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -4590,4 +4612,55 @@ fn retarget_same_target_transport_lost_preserves_schedule_and_terminal_states() 
     assert_eq!(subscription.fired_count, 1);
     assert_eq!(subscription.expires_ms, 20_000);
     assert_eq!(subscription.updated_ms, now);
+}
+
+#[test]
+fn queued_rex_notice_maps_to_daemon_live_closure_after_batch_window() {
+    let (mut server, root) = test_server();
+    let _presence = RexCliFixture::new(&root, "normal");
+    let route = seed_rex_route(&server);
+    let transport = rex_transport("agent-rex", "rex-server", "rex-session", "block-a");
+    let sub_id = register_rex_worker(&server, "rex-peer", &transport);
+    seed_current_rex_bindings(&server, &route, &[("Bob", "rex-peer", &transport)]);
+    let observed = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let observed_calls = observed.clone();
+    Arc::get_mut(&mut server)
+        .expect("unique test server")
+        .appserver_notification_sink = Arc::new(move |_, _, _, message_id, _, mode| {
+        observed_calls
+            .lock()
+            .unwrap()
+            .push((message_id.to_owned(), mode.to_owned()));
+        Ok(serde_json::json!({ "accepted": true }))
+    });
+    let t0 = server.state.lock().unwrap().workers["rex-peer"].registered_ms + 1_000;
+    queue_message(&server, "rex-peer", &sub_id, "rex-queued-1", t0);
+    server.commit(&[Event::DeliveryMode {
+        msg_id: "rex-queued-1".into(),
+        mode: "queued".into(),
+        source_thread_id: None,
+    }]);
+
+    assert!(matches!(
+        attempt_notification_detailed_with_at(&server, "rex-queued-1", &sub_id, t0),
+        NotificationAttempt::Deferred
+    ));
+    assert!(observed.lock().unwrap().is_empty());
+
+    timers::tick_with_idle_at(&server, t0 + 120_000, &|_| true);
+    let calls = observed.lock().unwrap();
+    assert_eq!(
+        calls.as_slice(),
+        &[("rex-queued-1".to_owned(), DAEMON_LIVE_CLOSURE_MODE.to_owned())]
+    );
+    let state = server.state.lock().unwrap();
+    assert!(state
+        .notification_delivery_accepted
+        .contains_key("rex-queued-1"));
+    assert!(!state
+        .notification_delivery_failures
+        .contains_key("rex-queued-1"));
+    drop(calls);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
 }

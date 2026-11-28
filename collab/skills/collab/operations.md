@@ -1160,9 +1160,7 @@ terminal pollution and storms. Each batch has one attempt; the default window
 is 120 seconds. Policy changes take effect through user-managed runtime
 activation, not task reset.
 
-Explicit `collab sendmessage` is immediate. Idle, progress, delivery, bug, and
-worker-idle notices are auto-merged by the daemon in the 120-second batch
-window; they are not repeated as heartbeat storms.
+Explicit manual `collab sendmessage` is immediate for ordinary peers. Automatic board dispatches, event notices, and queued wakes are auto-merged by the daemon over the full 120-second batch window across transports; master, patrol, and memory roles consume queued events on their periodic patrol schedule instead of on edge interrupts.
 
 Do not retry a failed send automatically. Return its exact error and durable
 status. Never call a transport command directly; the server owns transport
@@ -1408,8 +1406,9 @@ uncancelled board task receives a board-idle wake on fresh online+idle under
 [board-idle-patrol.md](references/board-idle-patrol.md), through the realtime
 event when connected and the 15-minute check otherwise. A peer with no unclosed
 task or with its patrol cancelled is not polled. Do not invent a polling
-interval, cron job, or retry loop. Existing subscriptions, master wake, and one
-worker-idle fact remain unchanged.
+interval, cron job, or retry loop. Existing subscriptions and periodic master
+patrol remain unchanged; ordinary peer idle transitions no longer push
+`worker-idle` notifications to master.
 
 ## Common command card
 
@@ -1516,18 +1515,15 @@ it only asks the recipient to read the original reply requirement. A worker
 acts on an explicit dispatch, a bounded direct-message lease, or its own open
 task state;
 it does not depend on a wake to make progress. Unknown/absent produces
-no transport input. On each `working` -> `idle` transition, a worker sends one
-idempotent worker-idle fact to the current master. Before stopping, it follows
+no transport input. Idle transitions do not report to `master`; instead,
+keepalive tracks activity locally and `board-idle` / queued ticket continuation
+drives eligible peers automatically. Before stopping, a worker follows
 the board queue and blocker checks above; it continues any eligible work.
-If nothing can proceed, it stops and does not keep knocking. Idle, progress,
-delivery, bug, and worker-idle notices are
-auto-merged; explicit `collab sendmessage` remains immediate. Master idle
-reminders are level-triggered: within the same master idle episode, each
-reminder attempt consumes the shared episode-local budget, up to three
-attempts. An observed change to `working` ends that episode; after three
-consecutive attempts without an observed `working` change, the episode stops.
-Worker-idle facts do not count toward this budget, and there is no
-scheduling-turn counter or automatic rearm.
+If nothing can proceed, it stops and does not keep knocking. Automatic event
+and dispatch notices are auto-merged over the 120-second batch window; explicit
+manual `collab sendmessage` remains immediate for ordinary peers. Standing
+`project-patrol` wakes `master` periodically via non-steering queued submission
+(or idle-gated delivery on non-queueable transports).
 
 Legacy managed records do not receive child-targeted liveness work or new
 assignments. Their historical `subagent-status` facts remain diagnostic input.
@@ -1806,15 +1802,13 @@ When dispatch itself needs a plan, use [independent planning](#无可用执行-p
   master pulls authorized open bugs in priority order (P0 > P1 > P2) and
   assigns each authorized issue to an eligible task owner.
 
-**Worker->Master idle fact and master long-horizon wake**:
-When a worker transitions from `working` to `idle`, it emits one idempotent
-worker-idle fact to the current master. Master and each ordinary peer own their
-own goal deadlines; only the current master owns master-idle project patrol. A
-managed one-shot subworker has no independent goal. A worker has direct-message
-wake and, while holding an unclosed, uncancelled board task, the `board-idle`
-patrol wake described in
-[board-idle-patrol.md](references/board-idle-patrol.md). On an idle fact,
-master must:
+**Periodic patrol and peer auto-driving**:
+Ordinary peer `working` -> `idle` transitions do not report to master; idle
+peers with open work continue automatically via `board-idle` patrol and
+queued ticket claiming. Master, patrol, and memory roles wake primarily on
+their due periodic schedule and inspect capacity via `collab who` / `collab board show`.
+Master and each ordinary peer own their own goal deadlines; only the current
+master owns standing project patrol. On a due patrol wake, master must:
 1. Check the active task graph for unblocked downstream tasks and offer them
    peer-first through the public board;
 2. If the main graph is clear, pull the highest-priority open issue from the

@@ -23,7 +23,7 @@ mod subagent;
 
 use clap::Parser;
 use identity::{Identity, RuntimeIdentity};
-use proto::{Req, Resp, TransportKind};
+use proto::{Req, TransportKind};
 use scope::Scope;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -163,104 +163,6 @@ fn require_cli_mailbox_consumer(identity: &Identity) -> anyhow::Result<()> {
         );
     }
     Ok(())
-}
-
-fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::Result<bool> {
-    let runtime = ident
-        .runtime
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("identity has no registered runtime binding"))?;
-    // A missing transport cannot be reused, but it is a normal legacy shape
-    // rather than an error: report "not reusable" so the caller re-registers.
-    let Some(transport) = ident.transport.as_ref() else {
-        return Ok(false);
-    };
-    if transport.kind == TransportKind::Tmux || runtime.native_thread_id.is_some() {
-        let host_facts = host_runtime::host_runtime_facts();
-        let (session, thread) = if let Some(agy_session) = host_facts.agy_session_id {
-            (Some(agy_session), None)
-        } else {
-            (
-                std::env::var("CODEX_SESSION_ID").ok(),
-                std::env::var("CODEX_THREAD_ID").ok(),
-            )
-        };
-        let Some(session) = session else {
-            return Ok(false);
-        };
-        {
-            let persisted_thread = runtime
-                .native_thread_id
-                .as_ref()
-                .map(crate::identity::NativeThreadId::as_str);
-            let persisted_session = runtime
-                .session_id
-                .as_ref()
-                .map(crate::identity::SessionId::as_str);
-            if thread
-                .as_deref()
-                .is_some_and(|thread| persisted_thread != Some(thread))
-                || persisted_session != Some(session.as_str())
-            {
-                return Ok(false);
-            }
-        }
-    }
-    let host_paths = scope.host_paths()?;
-    let scope_root = std::fs::canonicalize(&scope.root)?;
-    if ident
-        .project_scope
-        .as_ref()
-        .is_none_or(|project_scope| project_scope.as_str() != scope_root.to_string_lossy())
-    {
-        return Ok(false);
-    }
-    Ok(
-        scope::canonical_route_for_identity(&host_paths, &scope.root, &runtime.appserver_id)
-            .is_ok_and(|route| route.root == scope_root),
-    )
-    .and_then(|file_says_reusable| {
-        if !file_says_reusable {
-            return Ok(false);
-        }
-        // The route declaration on disk is not the live truth: after a daemon
-        // restart or re-registration the running daemon may hold no route for
-        // this address even though the file still lists one.  Reuse is only
-        // valid when the live daemon resolves the same session/thread.
-        match ident.transport.as_ref() {
-            Some(transport) if transport.kind == crate::proto::TransportKind::Tmux => {
-                let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
-                    return Ok(false);
-                };
-                Ok(client::resolve_route(&scope.sock_path(), endpoint).is_ok())
-            }
-            Some(transport) if transport.kind == crate::proto::TransportKind::AppServer => {
-                let (Some(session), Some(thread)) = (
-                    runtime
-                        .session_id
-                        .as_ref()
-                        .map(crate::identity::SessionId::as_str),
-                    runtime
-                        .native_thread_id
-                        .as_ref()
-                        .map(crate::identity::NativeThreadId::as_str),
-                ) else {
-                    return Ok(false);
-                };
-                if transport.thread_id.as_deref() != Some(thread)
-                    || transport.session_id.as_deref() != Some(session)
-                {
-                    return Ok(false);
-                }
-                // The persisted route file is not live truth: after a daemon
-                // restart or re-registration the running daemon may hold no
-                // route for this address. Reuse is only valid when the live
-                // daemon resolves the same session/thread.
-                Ok(client::resolve_native_route(&scope.sock_path(), session, thread).is_ok())
-            }
-            _ => Ok(false),
-        }
-    })
 }
 
 pub(crate) fn runtime_for_request<'a>(ident: &'a Identity) -> anyhow::Result<&'a RuntimeIdentity> {
@@ -2801,10 +2703,6 @@ mod federation_entry_tests {
         assert_eq!(operation_id.as_deref(), Some("operation-recovery-1"));
     }
 }
-
-// keep Resp referenced so the type stays part of the public surface for tests
-#[allow(dead_code)]
-fn _unused(_r: Resp) {}
 
 #[cfg(test)]
 #[path = "main_tests.rs"]

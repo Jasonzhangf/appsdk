@@ -596,3 +596,72 @@ fn context_scope_isolation_and_manager_brief_are_public() {
         "a non-CEO peer must not see the master-owned block request: {peer_context}"
     );
 }
+
+#[test]
+fn block_application_and_decision_notify_supervisor_and_requester() {
+    let (fixture, master, peer, _ceo) = setup_block();
+    publish_claim(&fixture, "approval-notify");
+
+    let applied = fixture.run_public(
+        &[
+            "task",
+            "block",
+            "approval-notify",
+            "--next",
+            "waiting on upstream API schema",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(applied["notification"], "block-approval-requested", "{applied}");
+    let request_msg_id = applied["notification_message_id"]
+        .as_str()
+        .expect("block apply emits supervisor notice")
+        .to_owned();
+    let after_apply = fixture.current_state();
+    let request_msg = &after_apply["msgs"][&request_msg_id];
+    assert_eq!(request_msg["to"], master, "{request_msg}");
+    assert_eq!(
+        request_msg["subject"], "block-requested:approval-notify",
+        "{request_msg}"
+    );
+    assert_eq!(request_msg["wake_attempt_count"], 1, "{request_msg}");
+    assert!(
+        after_apply["notification_delivery_accepted"]
+            .get(&request_msg_id)
+            .is_some(),
+        "supervisor must receive block approval request wake: {after_apply}"
+    );
+
+    let decided = fixture.run_public(
+        &[
+            "task",
+            "update",
+            "approval-notify",
+            "--blocker-action",
+            "reject",
+            "--decision-reason",
+            "proceed with mocked fixture first",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(decided["block_request"]["state"], "rejected", "{decided}");
+    assert_ne!(decided["notification"], "none", "{decided}");
+    let decision_msg_id = decided["notification_message_id"]
+        .as_str()
+        .expect("block decision emits requester notice")
+        .to_owned();
+    let after_decide = fixture.current_state();
+    let decision_msg = &after_decide["msgs"][&decision_msg_id];
+    assert_eq!(decision_msg["to"], peer, "{decision_msg}");
+    assert_eq!(
+        decision_msg["subject"], "block-rejected:approval-notify",
+        "{decision_msg}"
+    );
+    assert_eq!(decision_msg["wake_attempt_count"], 1, "{decision_msg}");
+    assert!(
+        after_decide["notification_delivery_accepted"]
+            .get(&decision_msg_id)
+            .is_some(),
+        "requester must receive block decision wake: {after_decide}"
+    );
+}

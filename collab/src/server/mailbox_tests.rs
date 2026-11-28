@@ -1,7 +1,7 @@
 //! Tests for the mailbox projection and batching helpers.
 use super::*;
 use crate::server::current_state;
-use crate::server::state::{now_ms, Event, Message};
+use crate::server::state::{now_ms, Message};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -150,16 +150,25 @@ fn msg(id: &str) -> Message {
 }
 
 #[test]
-fn batch_selection_is_bounded_and_returns_overflow_count() {
-    let candidates = (0..5)
+fn batch_selection_keeps_complete_window_without_stranding() {
+    let mut candidates = (0..5)
         .map(|index| {
             let id = format!("m{index}");
             let text = notification_text(&msg(&id)).unwrap();
-            (index, id, "sub".into(), "direct-message".into(), text)
+            (index * 1_000, id, "sub".into(), "direct-message".into(), text)
         })
         .collect::<Vec<_>>();
+    // A message at exact window boundary (120_000) belongs to the next window.
+    candidates.push((
+        120_000,
+        "m_boundary".into(),
+        "sub".into(),
+        "direct-message".into(),
+        notification_text(&msg("m_boundary")).unwrap(),
+    ));
     let (batch, remaining) = select_batch(candidates, 120_000, 0);
-    assert_eq!(batch.len(), 3);
-    assert_eq!(remaining, 2);
-    assert!(batch.first().is_some_and(|item| item.1 == "m2"));
+    assert_eq!(batch.len(), 5);
+    assert_eq!(remaining, 0);
+    assert_eq!(batch.first().map(|item| item.1.as_str()), Some("m0"));
+    assert!(!batch.iter().any(|item| item.1 == "m_boundary"));
 }

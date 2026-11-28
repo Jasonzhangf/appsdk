@@ -1371,20 +1371,22 @@ fn unclosed_task_with_retired_owner_is_visible_without_an_assignee() {
     std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
     let before = fixture.current_state();
     fixture.start_daemon();
-    // The timer owns unavailable-name reflow. Let that current episode settle
-    // before measuring whether the Board reader changes the assignment.
+    // The timer owns unavailable-name reflow, and protected masters hold
+    // routine queued notices durably without immediate wake.
     let deadline = Instant::now() + Duration::from_secs(5);
     let assignment = loop {
-        let assignment = fixture.current_state()["task_assignments"]["orphaned-open-task"].clone();
-        if matches!(
-            assignment["reflow"]["delivery"].as_str(),
-            Some("delivered" | "failed")
-        ) {
+        let state = fixture.current_state();
+        let assignment = state["task_assignments"]["orphaned-open-task"].clone();
+        if let Some(msg_id) = assignment["reflow"]["message_id"].as_str() {
+            assert_eq!(assignment["reflow"]["delivery"], "pending");
+            assert_eq!(state["msgs"][msg_id]["state"], "pending");
+            assert_eq!(state["delivery_modes"][msg_id], "queued");
+            assert_eq!(state["msgs"][msg_id]["wake_attempt_count"], 0);
             break assignment;
         }
         assert!(
             Instant::now() < deadline,
-            "retired-owner reflow did not settle: {assignment}"
+            "retired-owner reflow did not queue durable notice: {assignment}"
         );
         thread::sleep(Duration::from_millis(20));
     };
@@ -3593,7 +3595,7 @@ fn one_shot_decline_stale_and_duplicate_accept_preserve_single_transfer() {
 
 #[test]
 fn one_shot_native_wake_failure_keeps_durable_invitation_and_ownership() {
-    let (fixture, master, peer) = setup();
+    let (mut fixture, master, peer) = setup();
     publish_one_shot(&fixture, "one-shot-native-failure");
     let peer_session = activate_peer(&fixture, &peer);
     let goals_before = goal_subscriptions(&fixture.current_state());
@@ -3605,7 +3607,7 @@ fn one_shot_native_wake_failure_keeps_durable_invitation_and_ownership() {
         .unwrap()
         .reject_input = true;
 
-    let (success, failed) = parse_public_response(fixture.command_public(
+    let (success, invited) = parse_public_response(fixture.command_public(
         &[
             "board",
             "invite",
@@ -3618,26 +3620,37 @@ fn one_shot_native_wake_failure_keeps_durable_invitation_and_ownership() {
         ],
         THREAD_A,
     ));
-    assert!(!success);
-    assert!(failed["error"]
-        .as_str()
-        .unwrap()
-        .starts_with("APPSERVER_NOTIFICATION_REJECTED:"));
-    assert_eq!(failed["durable"], true);
-    assert_eq!(failed["notification"], "subscribed-not-sent");
-    assert_eq!(failed["failure"], "notification_delivery_failed");
-    assert_eq!(failed["repair_required"], true);
-    assert_eq!(failed["invitation_kind"], "one-shot");
-    assert_eq!(failed["task"]["owner"], master);
-    assert_eq!(failed["task"]["status"], "invited");
-    assert_eq!(failed["goal_schedule"]["armed"], false);
-    assert!(failed["goal_schedule"]["subscription"].is_null());
+    assert!(success, "{invited}");
+    assert_eq!(invited["durable"], true);
+    assert_eq!(invited["notification"], "queued");
+    assert_eq!(invited["invitation_kind"], "one-shot");
+    assert_eq!(invited["task"]["owner"], master);
+    assert_eq!(invited["task"]["status"], "invited");
+    assert_eq!(invited["goal_schedule"]["armed"], false);
+    assert!(invited["goal_schedule"]["subscription"].is_null());
 
-    let message_id = failed["msg_id"].as_str().unwrap();
-    let state = fixture.current_state();
-    assert_eq!(state["msgs"][message_id]["state"], "pending");
-    assert!(state["notification_delivery_failures"][message_id].is_object());
-    assert!(state["notification_delivery_accepted"][message_id].is_null());
+    let message_id = invited["msg_id"].as_str().unwrap().to_owned();
+    // Advance past the 120s coalescing window so the timer attempts native
+    // delivery against the rejecting peer session and records the failure.
+    fixture.update_current_state(|state| {
+        let created = state["msgs"][&message_id]["created_ms"].as_i64().unwrap();
+        state["msgs"][&message_id]["created_ms"] = json!(created - 120_000);
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let state = loop {
+        let state = fixture.current_state();
+        if state["notification_delivery_failures"][&message_id].is_object() {
+            break state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "one-shot invitation failure was not recorded for {message_id}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(state["msgs"][&message_id]["state"], "pending");
+    assert_eq!(state["msgs"][&message_id]["wake_attempt_count"], 1);
+    assert!(state["notification_delivery_accepted"][&message_id].is_null());
     assert_eq!(goal_subscriptions(&state), goals_before);
     let received = fixture.run_public(&["recv", "--timeout", "1"], THREAD_B);
     assert!(received["messages"]

@@ -375,6 +375,24 @@ pub(crate) enum CeoCmd {
         #[arg(long)]
         project: Option<std::path::PathBuf>,
     },
+    /// List all local and remote managed projects with summary and peer status counts
+    Projects {
+        /// Limit output to one registered project
+        #[arg(long)]
+        project: Option<std::path::PathBuf>,
+    },
+    /// Set or update basic project metadata (name and summary) for CEO reporting
+    ProjectInfo {
+        /// Target registered project; defaults to current directory
+        #[arg(long)]
+        project: Option<std::path::PathBuf>,
+        /// Short project name used in local.<project>.<name> labels
+        #[arg(long)]
+        name: Option<String>,
+        /// Concise summary of the project's purpose and current focus
+        #[arg(long)]
+        summary: Option<String>,
+    },
     /// Acknowledge a prepared CEO report batch after the report was visibly output
     ReportAck {
         /// Exact batch ID returned by `collab ceo progress`

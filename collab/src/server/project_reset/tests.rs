@@ -639,6 +639,7 @@ fn project_reset_clears_only_owned_channel_defaults_and_message_control() {
             platform_message_id: "platform-1".into(),
             reply_route: "qqbot://u1/session".into(),
             recipient_address: "project-a.Bob".into(),
+            quoted_platform_message_id: None,
             attachments: Vec::new(),
         },
     });

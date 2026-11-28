@@ -452,7 +452,29 @@ pub(crate) fn channel_inbound_commit_with_state(
             Ok(control) => control,
             Err(error) => return Resp::err(error),
         };
-    let (worker_id, recipient_address, body_after_address) = if let Some(grant) = ceo_grant {
+    let is_quoted = envelope.quoted_platform_message_id.is_some();
+    let quoted_resolution = envelope
+        .quoted_platform_message_id
+        .as_deref()
+        .and_then(|quoted_id| resolve_quoted_target(target_state, quoted_id));
+    let active_merge_target = if !is_quoted {
+        active_merge_window(
+            target_state,
+            &envelope.source_channel,
+            &envelope.channel_instance,
+            &envelope.external_conversation,
+            now_ms(),
+        )
+        .map(|window| (window.first_worker_id.clone(), window.first_target_address.clone()))
+    } else {
+        None
+    };
+
+    let (worker_id, recipient_address, body_after_address) = if let Some((quoted_worker, quoted_addr)) = quoted_resolution {
+        (quoted_worker, quoted_addr, intent.body.clone())
+    } else if let Some((merge_worker, merge_addr)) = active_merge_target {
+        (merge_worker, merge_addr, intent.body.clone())
+    } else if let Some(grant) = ceo_grant {
         let worker_id = match resolve_ceo_holder_from_grant(target_state, &control, &route, grant) {
             Ok(worker_id) => worker_id,
             Err(error) => return Resp::err(error),
@@ -540,6 +562,51 @@ fn channel_inbound_commit_locked(
         let (error, data) = handoff_unresolved_recipient(&to);
         return Resp::err_data(error, data);
     }
+    let env_ref = channel_envelope.as_ref().expect("channel envelope supplied");
+    let now = now_ms();
+    let is_quoted = env_ref.quoted_platform_message_id.is_some();
+    let conv_key = crate::server::conversation_default::conversation_default_key(
+        &env_ref.source_channel,
+        &env_ref.channel_instance,
+        &env_ref.external_conversation,
+    );
+    let active_window = if !is_quoted {
+        active_merge_window(
+            st,
+            &env_ref.source_channel,
+            &env_ref.channel_instance,
+            &env_ref.external_conversation,
+            now,
+        )
+        .cloned()
+    } else {
+        None
+    };
+    if let Some(window) = active_window.as_ref() {
+        if st
+            .msgs
+            .get(&window.last_message_id)
+            .is_some_and(|message| message.state == "pending")
+        {
+            if let Err(error) = server.commit_locked(
+                st,
+                &[Event::ChannelInboundMessageMerged {
+                    message_id: window.last_message_id.clone(),
+                    appended_body: body,
+                    platform_event_key: key,
+                }],
+            ) {
+                return Resp::err(format!("SEND_DURABILITY_FAILED: {error}"));
+            }
+            return Resp::data(json!({
+                "msg_id": window.last_message_id,
+                "to": to,
+                "merged": true,
+                "channel": env_ref.source_channel,
+                "platform_message_id": env_ref.platform_message_id,
+            }));
+        }
+    }
     let msg = Message {
         id: gen_msg_id(),
         from,
@@ -548,7 +615,7 @@ fn channel_inbound_commit_locked(
         subject: Some(subject),
         body,
         in_reply_to: None,
-        created_ms: now_ms(),
+        created_ms: now,
         state: "pending".into(),
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
@@ -556,7 +623,7 @@ fn channel_inbound_commit_locked(
     };
     let mid = msg.id.clone();
     let subscription = st
-        .matching_subscription(&to, "direct-message", None, now_ms())
+        .matching_subscription(&to, "direct-message", None, now)
         .cloned();
     let mut events = vec![
         Event::Sent { msg },
@@ -567,11 +634,23 @@ fn channel_inbound_commit_locked(
         },
     ];
     let envelope = channel_envelope.expect("channel envelope supplied");
+    let first_target_address = envelope.recipient_address.clone();
     events.push(Event::ChannelEnvelopeRecorded {
         message_id: mid.clone(),
         idempotency_key: key,
         envelope,
     });
+    if !is_quoted && active_window.is_none() {
+        events.push(Event::ChannelInboundMergeWindowUpdated {
+            conversation_key: conv_key,
+            window: crate::server::channel_envelope::ChannelInboundMergeWindow {
+                first_target_address,
+                first_worker_id: to.clone(),
+                started_ms: now,
+                last_message_id: mid.clone(),
+            },
+        });
+    }
     if let Some(subscription) = &subscription {
         events.push(Event::WakeBound {
             message_id: mid.clone(),

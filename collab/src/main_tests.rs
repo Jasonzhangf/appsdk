@@ -1372,6 +1372,7 @@ mod qqbot_lifecycle_tests {
             platform_message_id: "platform-msg-1".into(),
             reply_route: "qqbot://u1/session".into(),
             recipient_address: "project.Bob".into(),
+            quoted_platform_message_id: None,
             attachments: Vec::new(),
         };
         state.apply(&Event::ChannelEnvelopeRecorded {
@@ -1458,6 +1459,7 @@ mod qqbot_lifecycle_tests {
                 platform_message_id: "platform-msg-1".into(),
                 reply_route: "qqbot://u1/session".into(),
                 recipient_address: "project.Bob".into(),
+                quoted_platform_message_id: None,
                 attachments: Vec::new(),
             },
         });

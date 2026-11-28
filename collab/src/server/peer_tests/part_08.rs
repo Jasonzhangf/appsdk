@@ -940,6 +940,7 @@ fn qqbot_inbound_duplicate_platform_event_commits_one_message() {
         platform_message_id: "platform-msg-1".into(),
         reply_route: "qqbot://u1/session".into(),
         recipient_address: "agent".into(),
+        quoted_platform_message_id: None,
         attachments: Vec::new(),
     };
     let first = handle_channel_inbound(
@@ -952,6 +953,13 @@ fn qqbot_inbound_duplicate_platform_event_commits_one_message() {
     );
     assert!(first.ok, "{first:?}");
     let first_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    // Expire the 30s merge window so this test isolates body-dedup vs platform_event_id.
+    server
+        .state
+        .lock()
+        .unwrap()
+        .channel_inbound_merge_windows
+        .clear();
     let second = handle_channel_inbound(
         &server,
         "external:qqbot".into(),
@@ -997,11 +1005,19 @@ fn qqbot_same_text_with_different_platform_events_commits_separate_messages() {
             platform_message_id: "event-a".into(),
             reply_route: "qqbot://u1/session".into(),
             recipient_address: "agent".into(),
+            quoted_platform_message_id: None,
             attachments: Vec::new(),
         },
     );
     assert!(first.ok, "{first:?}");
     let first_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    // Expire the 30s merge window so this test isolates body-dedup vs platform_event_id.
+    server
+        .state
+        .lock()
+        .unwrap()
+        .channel_inbound_merge_windows
+        .clear();
     let second = handle_channel_inbound(
         &server,
         "external:qqbot".into(),
@@ -1016,6 +1032,7 @@ fn qqbot_same_text_with_different_platform_events_commits_separate_messages() {
             platform_message_id: "event-b".into(),
             reply_route: "qqbot://u1/session".into(),
             recipient_address: "agent".into(),
+            quoted_platform_message_id: None,
             attachments: Vec::new(),
         },
     );
@@ -1066,11 +1083,19 @@ fn qqbot_same_text_from_different_conversations_keeps_each_reply_route() {
             platform_message_id: "event-1".into(),
             reply_route: "qqbot://u1/session".into(),
             recipient_address: "agent".into(),
+            quoted_platform_message_id: None,
             attachments: Vec::new(),
         },
     );
     assert!(first.ok, "{first:?}");
     let first_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    // Expire the 30s merge window so this test isolates body-dedup vs platform_event_id.
+    server
+        .state
+        .lock()
+        .unwrap()
+        .channel_inbound_merge_windows
+        .clear();
     let second = handle_channel_inbound(
         &server,
         "external:qqbot".into(),
@@ -1085,6 +1110,7 @@ fn qqbot_same_text_from_different_conversations_keeps_each_reply_route() {
             platform_message_id: "event-2".into(),
             reply_route: "qqbot://u2/session".into(),
             recipient_address: "agent".into(),
+            quoted_platform_message_id: None,
             attachments: Vec::new(),
         },
     );
@@ -1162,6 +1188,7 @@ fn qqbot_reply_uses_original_route_after_default_switch_and_rejects_third_party(
         platform_message_id: "platform-msg-reply".into(),
         reply_route: "qqbot://u1/session".into(),
         recipient_address: "agent".into(),
+        quoted_platform_message_id: None,
         attachments: Vec::new(),
     };
     let inbound = handle_channel_inbound(
@@ -1817,6 +1844,7 @@ fn routing_envelope(conversation: &str, msg_id: &str) -> crate::server::channel_
         platform_message_id: msg_id.into(),
         reply_route: format!("qqbot://{conversation}"),
         recipient_address: String::new(),
+        quoted_platform_message_id: None,
         attachments: Vec::new(),
     }
 }
@@ -2281,6 +2309,128 @@ fn qqbot_two_channel_instances_with_same_conversation_switch_independently_and_r
         .target_address,
         "Bob"
     );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_quote_reply_routes_to_quoted_outbound_sender_and_bypasses_merge() {
+    let (server, root) = routing_fixture(&[("alice-id", "t-alice"), ("bob-id", "t-bob")]);
+    routing_seat(&server, "Alice", "alice-id");
+    routing_seat(&server, "Bob", "bob-id");
+    routing_set_default(&server, "u1:session", "Alice");
+
+    // Seed an outbound message from Bob and its recorded platform delivery id.
+    let outbound_id = "msg-bob-outbound".to_string();
+    let outbound_msg = Message {
+        id: outbound_id.clone(),
+        from: "bob-id".into(),
+        to: "qqbot://c2c/u1".into(),
+        mtype: "reply".into(),
+        subject: Some("QQBot outbound".into()),
+        body: "Bob says hi".into(),
+        in_reply_to: None,
+        created_ms: now_ms(),
+        state: "delivered".into(),
+        wake_attempt_count: 0,
+        last_wake_attempt_ms: 0,
+        retry_attempted: false,
+    };
+    let delivery_result = crate::server::channel_delivery::ChannelDeliveryResult {
+        message_id: outbound_id.clone(),
+        channel_instance: "qqbot@host".into(),
+        status: crate::server::channel_delivery::ChannelDeliveryStatus::Accepted,
+        platform_message_id: Some("qq-out-bob-1".into()),
+        error: None,
+        platform_timestamp: None,
+        platform_ref_idx: None,
+        updated_ms: now_ms(),
+    };
+    server.commit(&[
+        Event::Sent { msg: outbound_msg },
+        Event::ChannelDeliveryResultRecorded {
+            result: delivery_result,
+        },
+    ]);
+
+    // First inbound goes to default (Alice), opening a 30s merge window.
+    let first = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        "hello alice".into(),
+        routing_envelope("u1:session", "qq-in-1"),
+    );
+    assert!(first.ok, "{first:?}");
+    let first_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    assert_eq!(server.state.lock().unwrap().msgs[&first_id].to, "alice-id");
+
+    // Second inbound quotes Bob's outbound message: must route to Bob and NOT merge into Alice's message.
+    let mut quoted_env = routing_envelope("u1:session", "qq-in-2");
+    quoted_env.quoted_platform_message_id = Some("qq-out-bob-1".into());
+    let second = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        "replying to bob".into(),
+        quoted_env,
+    );
+    assert!(second.ok, "{second:?}");
+    let second_id = second.data["msg_id"].as_str().unwrap().to_owned();
+    assert_ne!(second_id, first_id, "quoted reply must not merge");
+    assert_eq!(
+        second.data.get("merged").and_then(|v| v.as_bool()),
+        None,
+        "quoted reply must not be marked merged"
+    );
+    let st = server.state.lock().unwrap();
+    assert_eq!(st.msgs[&second_id].to, "bob-id");
+    assert!(st.msgs[&second_id].body.contains("replying to bob"));
+    assert!(!st.msgs[&first_id].body.contains("replying to bob"));
+    drop(st);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn qqbot_inbound_within_30s_merges_into_first_target_unless_quoted() {
+    let (server, root) = routing_fixture(&[("alice-id", "t-alice"), ("bob-id", "t-bob")]);
+    routing_seat(&server, "Alice", "alice-id");
+    routing_seat(&server, "Bob", "bob-id");
+    routing_set_default(&server, "u1:session", "Alice");
+
+    let first = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        "part one".into(),
+        routing_envelope("u1:session", "qq-merge-1"),
+    );
+    assert!(first.ok, "{first:?}");
+    let first_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    assert_eq!(server.state.lock().unwrap().msgs[&first_id].to, "alice-id");
+
+    // Change default to Bob mid-window; a non-quoted follow-up within 30s still merges into Alice's first message.
+    routing_set_default(&server, "u1:session", "Bob");
+
+    let second = handle_channel_inbound(
+        &server,
+        "external:qqbot".into(),
+        String::new(),
+        "QQBot inbound".into(),
+        "part two".into(),
+        routing_envelope("u1:session", "qq-merge-2"),
+    );
+    assert!(second.ok, "{second:?}");
+    assert_eq!(second.data["merged"].as_bool(), Some(true));
+    assert_eq!(second.data["msg_id"].as_str(), Some(first_id.as_str()));
+
+    let st = server.state.lock().unwrap();
+    assert_eq!(st.msgs[&first_id].to, "alice-id");
+    assert!(st.msgs[&first_id].body.contains("part one"));
+    assert!(st.msgs[&first_id].body.contains("part two"));
+    drop(st);
     std::fs::remove_dir_all(root).ok();
 }
 

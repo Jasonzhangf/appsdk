@@ -94,6 +94,7 @@ pub enum ReviewRouteGroup {
 /// The caller supplies stable name order. `participated` means the stable name
 /// or its current actor participated in the subject, so the route must exclude
 /// it even after a session or role change.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewCandidate {
     pub slot_name: String,
@@ -116,6 +117,7 @@ pub fn priority_rank(priority: &str) -> u8 {
 /// independent peer. The first group with any eligible receiver wins; busy
 /// capacity never lowers the group. Within the chosen group, the shortest
 /// queue wins and equal watermarks rotate.
+#[cfg(test)]
 pub fn select_review_route<'a>(
     candidates: &'a [ReviewCandidate],
     queue_len: impl Fn(&str) -> usize,

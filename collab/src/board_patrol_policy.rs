@@ -32,6 +32,9 @@ pub const BOARD_PATROL_TASK_OWNER_REQUIRED: &str = "BOARD_PATROL_TASK_OWNER_REQU
 pub enum PatrolTriggerMode {
     /// A genuine host or connection event, or a newly claimed task while idle.
     RealtimeEvent,
+    /// An ordinary peer that was observed working just stopped in idle with an
+    /// eligible task, so it must wake immediately without waiting 30 minutes.
+    ImmediateWorkingToIdle,
     /// The 15-minute fallback poll.
     PeriodicPoll,
 }
@@ -275,6 +278,22 @@ pub fn evaluate_board_patrol(
                 }
             } else {
                 PatrolDecision::NotDueYet { gate }
+            }
+        }
+        PatrolTriggerMode::ImmediateWorkingToIdle => {
+            if is_busy {
+                return PatrolDecision::SkipBusy { gate };
+            }
+            if !is_positively_idle {
+                return PatrolDecision::SkipUnknown { gate };
+            }
+            gate.last_wake_ms = now_ms;
+            gate.last_realtime_idle_since_ms = idle_since_ms;
+            gate.last_wake_tasks = eligible_tasks.to_vec();
+            gate.next_due_ms = now_ms + BOARD_IDLE_PATROL_INTERVAL_MS;
+            PatrolDecision::WakeDue {
+                tasks: eligible_tasks.to_vec(),
+                gate,
             }
         }
     }

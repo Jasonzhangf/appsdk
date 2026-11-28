@@ -196,13 +196,13 @@ const RESTART_REPLAY_PENDING_MODE: &str = "restart-replay-pending";
 
 type AppServerCandidateCheck =
     dyn Fn(&crate::proto::AppServerCandidate) -> Result<SelectedTransport, String> + Send + Sync;
-const GUARDED_NATIVE_OPERATION_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(15);
+const GUARDED_NATIVE_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NotificationDispatchContext {
     pub explicit: bool,
     pub guarded_one_shot: bool,
     pub guarded_goal: bool,
+    pub expected_agent_kind: Option<crate::host_runtime::AgentKind>,
 }
 type TmuxNotificationSink = dyn Fn(
         &SelectedTransport,
@@ -254,7 +254,10 @@ fn default_tmux_notification_sink() -> Arc<TmuxNotificationSink> {
                 .map_err(|error| format!("ADAPTER_ROUTE_UNAVAILABLE: {error}"))?
                 .is_empty()
             {
-                return Err(format!("{} the current tmux session has no iTerm2 pane", crate::client::adapters::tmux::DELIVERY_NOT_ATTACHED));
+                return Err(format!(
+                    "{} the current tmux session has no iTerm2 pane",
+                    crate::client::adapters::tmux::DELIVERY_NOT_ATTACHED
+                ));
             }
             crate::client::adapters::tmux::notify(endpoint, message_id, body)
         },
@@ -393,17 +396,30 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                     Ok(receipt)
                 }
                 TransportKind::Rex => {
-                    let notification = crate::client::adapters::rex::notify(transport, body, Some(mode));
+                    let notification = crate::client::adapters::rex::notify_for_agent(
+                        transport,
+                        body,
+                        Some(mode),
+                        context.expected_agent_kind,
+                    );
                     let result = if context.guarded_goal {
                         // This one bounded submission holds project state.
                         // Drive its CLI I/O on the calling blocking thread so
                         // it never depends on daemon workers waiting for state.
-                        tokio::runtime::Builder::new_current_thread().enable_all().build()
-                            .map_err(|error| format!("REX_UNKNOWN: cannot drive guarded Rex input: {error}"))?
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|error| {
+                                format!("REX_UNKNOWN: cannot drive guarded Rex input: {error}")
+                            })?
                             .block_on(notification)
                     } else {
                         tokio::runtime::Handle::try_current()
-                            .map_err(|error| format!("REX_UNKNOWN: Tokio runtime unavailable for Rex sink: {error}"))?
+                            .map_err(|error| {
+                                format!(
+                                    "REX_UNKNOWN: Tokio runtime unavailable for Rex sink: {error}"
+                                )
+                            })?
                             .block_on(notification)
                     };
                     let receipt = result.map_err(|error| error.to_string())?;
@@ -449,7 +465,9 @@ fn notification_sink(server: &Server) -> &Arc<TmuxNotificationSink> {
 
 fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
     Arc::new(|transport, thread_id| match transport.kind {
-        TransportKind::DesktopBridge => crate::client::adapters::desktop_bridge::read_thread_status(transport, thread_id),
+        TransportKind::DesktopBridge => {
+            crate::client::adapters::desktop_bridge::read_thread_status(transport, thread_id)
+        }
         // A tmux transport has no App Server endpoint to query, so this oracle
         // refuses it. The pane is an address, never a liveness credential: a
         // caller must not read presence out of a pane probe.
@@ -461,7 +479,8 @@ fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
                 .map_err(|error| error.to_string())
         }
         TransportKind::Rex => Err(
-            "REX_ENDPOINT_NOT_QUERYABLE: a rex transport has no App Server thread status".to_owned(),
+            "REX_ENDPOINT_NOT_QUERYABLE: a rex transport has no App Server thread status"
+                .to_owned(),
         ),
         TransportKind::Dsh => {
             let endpoint = transport.endpoint.as_deref().ok_or_else(|| {
@@ -493,7 +512,8 @@ fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
 }
 
 pub(crate) fn default_appserver_thread_archive() -> Arc<AppServerThreadArchive> {
-    Arc::new(|transport, _thread_id| match transport.kind {
+    Arc::new(|transport, _thread_id| {
+        match transport.kind {
         TransportKind::DesktopBridge | TransportKind::Tmux | TransportKind::AppServer => {
             Err("TRANSPORT_UNSUPPORTED: tmux has no Codex thread archive operation".into())
         }
@@ -507,6 +527,7 @@ pub(crate) fn default_appserver_thread_archive() -> Arc<AppServerThreadArchive> 
             "TRANSPORT_UNSUPPORTED: a rex agent's lifecycle is owned by the Rex server, not by collab"
                 .into(),
         ),
+    }
     })
 }
 
@@ -546,7 +567,6 @@ fn app_scope_storage_path(root: &Path, app_scope: &str) -> PathBuf {
     )
 }
 
-
 #[cfg(test)]
 const DIRECT_MESSAGE_WAKE_COOLDOWN_MS: i64 = 60_000;
 
@@ -561,7 +581,7 @@ pub(crate) enum NotificationAttempt {
     StaleAccepted,
     ReceiptUnconfirmed(String),
     Consumed,
-    Deferred(Option<String>),
+    Deferred,
     NotAttempted(String),
     Rejected(String),
 }
@@ -810,7 +830,10 @@ pub(crate) fn layerfs_branch_head(project: &str, branch: &str) -> Result<String,
 /// Confirm a LayerFS task branch still exists in its project. Used to verify
 /// close state without ever touching a local Git worktree or branch.
 pub(crate) fn layerfs_branch_exists(project: &str, branch: &str) -> Result<bool, String> {
-    let value = run_layerfs_json(project, &["project", "list_branches", "--page-size", "1000"])?;
+    let value = run_layerfs_json(
+        project,
+        &["project", "list_branches", "--page-size", "1000"],
+    )?;
     Ok(value
         .get("items")
         .and_then(|items| items.as_array())

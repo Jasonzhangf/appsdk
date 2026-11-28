@@ -405,13 +405,18 @@ impl ProjectRuntimeManager {
         operation(&control, &mut state)
     }
 
-    fn tick_name_stewardship(&self, runtime: &Server, now: i64) -> Result<(), String> {
+    fn tick_name_stewardship(&self, runtime: &Arc<Server>, now: i64) -> Result<(), String> {
         let wakes = self.with_current_state(runtime, |control, state| {
             name_stewardship::tick_locked(runtime, state, control, now)
         })?;
         for (id, subscription) in wakes {
             if let Some(subscription) = subscription {
-                let _ = attempt_notification_detailed_with_at(runtime, &id, &subscription, now);
+                let _ = attempt_notification_detailed_with_rex_recovery(
+                    runtime,
+                    &id,
+                    &subscription,
+                    now,
+                );
             }
         }
         Ok(())
@@ -455,6 +460,17 @@ impl ProjectRuntimeManager {
             }
             if value.host.profile.is_none() {
                 value.host.profile = previous.host.profile.clone();
+            }
+            if value.rex_layout.is_none()
+                && value.binding.session_id == previous.binding.session_id
+                && value.host.profile == previous.host.profile
+                && value.transport.as_ref().and_then(|transport| transport.rex_endpoint.as_ref())
+                    == previous
+                        .transport
+                        .as_ref()
+                        .and_then(|transport| transport.rex_endpoint.as_ref())
+            {
+                value.rex_layout = previous.rex_layout.clone();
             }
             if value.invocation_cwd == key.project_scope.as_str() {
                 value.invocation_cwd = previous.invocation_cwd.clone();
@@ -882,6 +898,18 @@ impl ProjectRuntimeManager {
             value.invocation_cwd = anchor.cwd.clone();
         }
         Self::prepare_control_value(&control, &key, &mut value)?;
+        if value.rex_layout.is_some() && value.host.profile.as_deref().is_none_or(str::is_empty) {
+            return Err(
+                "REX_LAYOUT_PROFILE_REQUIRED: Rex layout persistence requires the typed Codex profile"
+                    .into(),
+            );
+        }
+        if value.rex_layout.is_some() && value.binding.session_id.is_none() {
+            return Err(
+                "REX_LAYOUT_SESSION_REQUIRED: Rex layout persistence requires the agent session"
+                    .into(),
+            );
+        }
         let route = binding.route_scope();
         let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref()
             == Some(binding.agent_id.as_str());

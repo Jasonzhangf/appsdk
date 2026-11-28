@@ -53,7 +53,7 @@ operation controls base reception.
 Per-task `board-idle` patrol cancellation and re-arming use
 `collab notify cancel --event board-idle` and
 `collab notify subscribe --event board-idle`, with the owner scope documented in
-[board-idle-patrol.md](board-idle-patrol.md). Do not substitute a general
+[board-idle-patrol.md](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation). Do not substitute a general
 unsubscribe, goal cancellation or task closure for them, and do not cancel base
 `direct-message` reception. These entry points exist in the current source and
 passed this round's isolated public CLI/native and finite-timer compatibility
@@ -64,13 +64,21 @@ relying on them.
 
 ## Patrol duties and finite schedules
 
-The user-confirmed board idle patrol contract is maintained in
-[board-idle-patrol.md](board-idle-patrol.md). It requires master default arming,
+The user-confirmed board idle patrol contract and authoritative wake/cancellation
+table are maintained in
+[board-idle-patrol.md](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation). It requires master default arming,
 real-time idle notification where connected, a 15-minute check otherwise,
 busy-skip, and owner cancellation of board patrol only. A peer with no unclosed
 board task, or with that task's patrol cancelled, has no board-idle polling.
 The running daemon's `methods` and `status` responses remain the runtime
 authority for which parts are active.
+
+For a delivered patrol wake, non-DSH peers consume the unread batch with
+`collab recv --timeout 0`; DSH peers process native delivery and do not run
+`recv` or `ack`. Apply the subject-specific action and cancellation event in
+the authoritative table. `board-idle-patrol` maps to task-scoped `board-idle`,
+`project-patrol` maps to `master-idle`, and `master-dispatch-gap` is a
+non-cancellable scheduling notice.
 
 A registration or dispatch reminder is not a schedule. It requires the role to
 reconcile its existing scope on the next authorized activation. Do not create
@@ -144,7 +152,7 @@ Up to three active subscriptions exist per agent.
   silently. No command or interface closes the base `direct-message` lease; a
   finite owned goal schedule ends with `appsdk goal cancel`, and task-owned
   schedules end with task closure. Per-task `board-idle` cancellation follows
-  [board-idle-patrol.md](board-idle-patrol.md).
+  [board-idle-patrol.md](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation).
 - Direct-message leases are owner-scoped and reusable until expiry. Resource
   subscriptions are exact-subject and one-shot. Generic deadline subscriptions
   consume their explicit finite occurrence count; `goal:` deadlines remain
@@ -170,21 +178,26 @@ Up to three active subscriptions exist per agent.
   consumes the batch without a follow-up ACK; DSH gateway owns consumption.
   Explicit ACK is for already-delivered recovery, never discarding unread content.
   Messages remain safely buffered in the durable mailbox.
-- The bound subscription event policy supplies the automatic retry window: the
-  default `direct-message` batch window is 120 seconds, while an event configured
-  as `immediate` has a zero retry delay. At dispatch, include eligible unsent
-  messages for the recipient, capped at 3 previews per batch knock. Excess
-  messages remain in the inbox with `[+N more pending in inbox]`. When unacked
-  notifications reach the throttle cap, the batch preview appends an
-  `[ACK REQUIRED: ...]` notice. Combine previews into the selected transport
-  operation and reserve attempts before sending. Failed, absent, unknown, or uncertain
-  ordinary delivery remains pending; automatic eligibility still respects the
-  bound event window and the lifetime attempt cap. Explicit notification
-  delivery is never an automatic timer candidate; a later explicit operation
-  must be used when the failure proves submission did not occur. An ambiguous
-  post-submit transport outcome is not automatically retried for that
-  message: the mailbox entry remains durable, and the recipient should run
-  `collab recv`; send a new message if another wake is needed. The send error
+- The bound subscription event policy supplies the coalescing collection window:
+  automatic and `queued` dispatches share a fixed 120-second `[t0, t0 + 120_000)`
+  collection window across transports before firing one combined wake, while
+  explicit manual `send` (`explicit-notification`), due periodic/deadline
+  triggers, and auto-claim `ticket-claim-*` wakes run immediately. Protected
+  periodic-first roles (`master`, `patrol`, `memory`) defer non-scheduled system
+  events until their periodic patrol is due and fold pending mailbox events into
+  that periodic wake without mid-turn steering. At dispatch, include all eligible
+  messages in the closed window for the recipient together (no 3-preview batch
+  cap stranding). When unacked notifications reach the throttle cap, the batch
+  preview appends an `[ACK REQUIRED: ...]` notice. Combine previews into the
+  selected transport operation and reserve attempts before sending. Failed, absent,
+  unknown, or uncertain ordinary delivery remains pending; automatic eligibility
+  still respects the bound event window and the lifetime attempt cap. Explicit
+  notification delivery is never an automatic timer candidate (except `ticket-claim-*`
+  continuation); a later explicit operation must be used when the failure proves
+  submission did not occur. An ambiguous post-submit transport outcome is not
+  automatically retried for that message: the mailbox entry remains durable, and
+  the recipient should run `collab recv`; send a new message if another wake is
+  needed. The send error
   includes the durable message ID and states this recovery path.
 - P0 urgency is explicit: only a typed goal/deadline interrupt is marked P0. A blocked
   task, wait-timeout, or scheduling blocker is P1 operational work and must not be

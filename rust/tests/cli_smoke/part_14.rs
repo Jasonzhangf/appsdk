@@ -1587,3 +1587,164 @@ fn guidance_event_ledger_reports_bad_line_number() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn project_memory_get_reports_resolved_and_stale_canonical_source_references() {
+    let root = temp_root("project-memory-stale-ref");
+    let memory_home = temp_root("project-memory-stale-ref-home");
+    fs::create_dir_all(root.join("memory")).unwrap();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+    fs::write(
+        root.join("docs/guide.md"),
+        "# Guide\n\n## Task execution operations\n\nOps\n\n## Task execution contract\n\nContract\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("memory/path.jsonl"),
+        concat!(
+            r#"{"id":"canonical-nav","category":"path","title":"Canonical nav","content":"See docs/guide.md#task-execution-operations","tags":["nav"],"source_refs":["docs/guide.md#task-execution-contract","docs/guide.md#task-execution-operations"]}"#,
+            "\n",
+            r#"{"id":"abstract-ref","category":"knowledge","title":"Abstract ref","content":"No file ref","tags":["ref"],"source_refs":["guide/node"]}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let indexed = run_memory(&root, &["index"], &memory_home);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let positive = run_memory(&root, &["get", "canonical-nav"], &memory_home);
+    assert!(positive.status.success());
+    let positive_json: Value = serde_json::from_slice(&positive.stdout).unwrap();
+    assert_eq!(positive_json["navigation_status"], "resolved");
+    assert_eq!(
+        positive_json["stale_references"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        positive_json["matches"][0]["source_navigation"]["resolved_refs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let abstract_only = run_memory(&root, &["get", "abstract-ref"], &memory_home);
+    assert!(abstract_only.status.success());
+    let abstract_json: Value = serde_json::from_slice(&abstract_only.stdout).unwrap();
+    assert!(abstract_json.get("navigation_status").is_none());
+    assert!(abstract_json.get("stale_references").is_none());
+
+    fs::write(
+        root.join("docs/guide.md"),
+        "# Guide\n\n   ## Task execution contract\n\n    ## Task execution operations\n\n```markdown\n## Task execution operations\n```\n\n~~~\n## Task execution operations\n~~~\n",
+    )
+    .unwrap();
+    let indented_or_fenced = run_memory(&root, &["get", "canonical-nav"], &memory_home);
+    assert!(indented_or_fenced.status.success());
+    let indented_or_fenced_json: Value =
+        serde_json::from_slice(&indented_or_fenced.stdout).unwrap();
+    assert_eq!(
+        indented_or_fenced_json["navigation_status"],
+        "stale-reference"
+    );
+    assert_eq!(
+        indented_or_fenced_json["stale_references"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        indented_or_fenced_json["stale_references"][0]["diagnostic"],
+        "stale-reference"
+    );
+    assert_eq!(
+        indented_or_fenced_json["stale_references"][0]["ref"],
+        "docs/guide.md#task-execution-operations"
+    );
+    assert_eq!(
+        indented_or_fenced_json["stale_references"][0]["reason"],
+        "missing target anchor"
+    );
+
+    fs::write(
+        root.join("docs/guide.md"),
+        "# Guide\n\n    ```\n## Task execution contract\n\n````markdown\n```\n## Task execution operations\n````\n",
+    )
+    .unwrap();
+    let nested_and_indented_fence = run_memory(&root, &["get", "canonical-nav"], &memory_home);
+    assert!(nested_and_indented_fence.status.success());
+    let nested_and_indented_fence_json: Value =
+        serde_json::from_slice(&nested_and_indented_fence.stdout).unwrap();
+    assert_eq!(
+        nested_and_indented_fence_json["navigation_status"],
+        "stale-reference"
+    );
+    assert_eq!(
+        nested_and_indented_fence_json["matches"][0]["source_navigation"]["resolved_refs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        nested_and_indented_fence_json["matches"][0]["source_navigation"]["resolved_refs"][0]
+            ["ref"],
+        "docs/guide.md#task-execution-contract"
+    );
+    assert_eq!(
+        nested_and_indented_fence_json["stale_references"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        nested_and_indented_fence_json["stale_references"][0]["ref"],
+        "docs/guide.md#task-execution-operations"
+    );
+
+    fs::write(root.join("docs/guide.md"), "# Guide\n\n## Only operations\n").unwrap();
+    let missing_anchor = run_memory(&root, &["get", "canonical-nav"], &memory_home);
+    assert!(missing_anchor.status.success());
+    let missing_anchor_json: Value = serde_json::from_slice(&missing_anchor.stdout).unwrap();
+    assert_eq!(missing_anchor_json["navigation_status"], "stale-reference");
+    assert_eq!(
+        missing_anchor_json["stale_references"][0]["diagnostic"],
+        "stale-reference"
+    );
+    assert_eq!(
+        missing_anchor_json["stale_references"][0]["id"],
+        "canonical-nav"
+    );
+    assert_eq!(
+        missing_anchor_json["stale_references"][0]["reason"],
+        "missing target anchor"
+    );
+
+    fs::remove_file(root.join("docs/guide.md")).unwrap();
+    let missing_file = run_memory(&root, &["get", "canonical-nav"], &memory_home);
+    assert!(missing_file.status.success());
+    let missing_file_json: Value = serde_json::from_slice(&missing_file.stdout).unwrap();
+    assert_eq!(missing_file_json["navigation_status"], "stale-reference");
+    let stale = missing_file_json["stale_references"].as_array().unwrap();
+    assert_eq!(stale.len(), 2);
+    assert!(stale.iter().all(|item| {
+        item["diagnostic"] == "stale-reference"
+            && item["id"] == "canonical-nav"
+            && item["path"] == "docs/guide.md"
+            && item["reason"] == "missing target file"
+    }));
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+}

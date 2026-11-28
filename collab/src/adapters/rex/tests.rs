@@ -7,23 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-const ONLINE_AGENT_PREFLIGHT: [&str; 4] = [
+const SUBMISSION_CALLS: [&str; 7] = [
     "server.status",
     "com.superlogical.terminal.process",
-    "com.superlogical.terminal.pwd",
     "com.superlogical.terminal.program_status",
-];
-const SUBMISSION_CALLS: [&str; 11] = [
-    ONLINE_AGENT_PREFLIGHT[0],
-    ONLINE_AGENT_PREFLIGHT[1],
-    ONLINE_AGENT_PREFLIGHT[2],
-    ONLINE_AGENT_PREFLIGHT[3],
-    "server.status",
     "com.superlogical.terminal.write",
-    ONLINE_AGENT_PREFLIGHT[0],
-    ONLINE_AGENT_PREFLIGHT[1],
-    ONLINE_AGENT_PREFLIGHT[2],
-    ONLINE_AGENT_PREFLIGHT[3],
+    "com.superlogical.terminal.process",
+    "com.superlogical.terminal.program_status",
     "send-key",
 ];
 
@@ -46,6 +36,7 @@ fn endpoint() -> RexEndpoint {
         host_id: Some("host-fixture".into()),
         instance_id: "instance-fixture".into(),
         cwd: "/tmp/rex-fixture-cwd".into(),
+        layout_association: None,
     }
 }
 
@@ -121,6 +112,10 @@ impl TestEnv {
         Self::with_owner(scenario, 4242, "codex")
     }
 
+    fn online_agy(scenario: &str) -> Self {
+        Self::with_owner(scenario, 4242, "agy")
+    }
+
     fn exited_agent(scenario: &str) -> Self {
         Self::with_owner(scenario, 4243, "zsh")
     }
@@ -134,6 +129,9 @@ impl Drop for TestEnv {
         std::env::remove_var("REXPRIMITIVE_SCENARIO");
         std::env::remove_var("COLLAB_TEST_REX_OWNER_PID");
         std::env::remove_var("COLLAB_TEST_REX_OWNER_NAME");
+        std::env::remove_var("COLLAB_TEST_REX_OWNER_ARGV0");
+        std::env::remove_var("COLLAB_TEST_REX_OWNER_APP");
+        std::env::remove_var("COLLAB_TEST_REX_OWNER_STATE");
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -144,6 +142,7 @@ fn method(call: &Value) -> String {
         "server.status",
         "session.list",
         "session.list_blocks",
+        "session.view",
         "com.superlogical.terminal.write",
         "com.superlogical.terminal.process",
         "com.superlogical.terminal.pwd",
@@ -196,18 +195,18 @@ async fn notify_writes_exact_body_then_sends_one_enter_to_the_same_target() {
         calls.iter().map(method).collect::<Vec<_>>(),
         SUBMISSION_CALLS
     );
-    let write_ns = calls[5]["monotonic_ns"].as_u64().unwrap();
+    let writes: Vec<&Value> = calls
+        .iter()
+        .filter(|call| method(call) == "com.superlogical.terminal.write")
+        .collect();
+    assert_eq!(writes.len(), 1, "notification must not retry the write");
+    let write_ns = writes[0]["monotonic_ns"].as_u64().unwrap();
     let enter_ns = calls.last().unwrap()["monotonic_ns"].as_u64().unwrap();
     assert!(
         Duration::from_nanos(enter_ns - write_ns) >= Duration::from_millis(100),
         "Enter arrived only {} ms after the text write",
         (enter_ns - write_ns) / 1_000_000
     );
-    let writes: Vec<&Value> = calls
-        .iter()
-        .filter(|call| method(call) == "com.superlogical.terminal.write")
-        .collect();
-    assert_eq!(writes.len(), 1, "notification must not retry the write");
     let request: Value =
         serde_json::from_str(writes[0]["stdin"].as_str().unwrap()).expect("write JSON");
     assert_eq!(request["args"]["data"], text);
@@ -250,7 +249,7 @@ async fn notify_refuses_input_when_the_rex_block_has_no_current_agent() {
     assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
     assert_eq!(error.stage, RexInputStage::BeforeWrite);
     assert!(error.detail.contains("RECIPIENT_NOT_ONLINE"));
-    assert!(error.detail.contains("foreground is not Codex"));
+    assert!(error.detail.contains("foreground is not a supported agent"));
     let calls = env.calls();
     assert!(
         calls.iter().any(|call| {
@@ -271,12 +270,49 @@ async fn notify_refuses_input_when_the_rex_block_has_no_current_agent() {
 }
 
 #[tokio::test]
+async fn notify_refuses_input_when_foreground_agent_is_blocked_or_error() {
+    let _guard = fixture_guard().await;
+    for state in ["blocked", "error"] {
+        let env = TestEnv::online_agent("normal");
+        std::env::set_var("COLLAB_TEST_REX_OWNER_STATE", state);
+        let error = notify(&selected_transport(), "must not enter", Some("immediate"))
+            .await
+            .expect_err("blocked or errored foreground agent must not receive input");
+        assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
+        assert_eq!(error.stage, RexInputStage::BeforeWrite);
+        assert!(error.detail.contains("REX_EXECUTION_UNVERIFIED"));
+        assert!(error.detail.contains("refusing terminal input"));
+        assert!(error.detail.contains(state));
+        let calls = env.calls();
+        assert!(
+            !calls.iter().any(|call| {
+                matches!(
+                    method(call).as_str(),
+                    "com.superlogical.terminal.write" | "send-key"
+                )
+            }),
+            "blocked/errored Agent ({state}) must receive zero terminal input: {calls:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn notify_deadline_during_settle_skips_enter() {
     let _guard = fixture_guard().await;
     let env = TestEnv::new("normal");
     let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
-    let owner = RexProgramStatusOwner { pid: 4242, name: "codex".into() };
-    let error = send_enter_until(&endpoint(), &owner, deadline).await.unwrap_err();
+    let owner = RexProgramStatusOwner {
+        pid: 4242,
+        name: "codex".into(),
+    };
+    let error = send_enter_until(
+        &endpoint(),
+        crate::host_runtime::AgentKind::Codex,
+        &owner,
+        deadline,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error.class, NotificationDeliveryClass::Unknown);
     assert!(env.calls().is_empty());
 }
@@ -289,11 +325,18 @@ async fn notify_skips_enter_when_the_rex_foreground_changes_after_write() {
         .await
         .unwrap_err();
     assert_eq!(error.class, NotificationDeliveryClass::Unknown);
-    assert_eq!(error.stage, RexInputStage::WriteQueued { bytes_written: 11 });
+    assert_eq!(
+        error.stage,
+        RexInputStage::WriteQueued { bytes_written: 11 }
+    );
     assert!(error.detail.contains("foreground Codex changed"));
-    assert_eq!(env.calls().iter().filter(|call| {
-        method(call) == "com.superlogical.terminal.write"
-    }).count(), 1);
+    assert_eq!(
+        env.calls()
+            .iter()
+            .filter(|call| { method(call) == "com.superlogical.terminal.write" })
+            .count(),
+        1
+    );
     assert!(!env.calls().iter().any(|call| method(call) == "send-key"));
 }
 
@@ -486,6 +529,64 @@ async fn argv_stdin_and_environment_are_exact() {
 }
 
 #[tokio::test]
+async fn session_view_captures_one_tab_restore_layout() {
+    let _fixture = fixture_guard().await;
+    let env = TestEnv::new("normal");
+    let transport = verify_restorable_candidate(&candidate(), "agent-session")
+        .await
+        .expect("verify Rex candidate with one-window layout");
+    let layout = transport
+        .rex_endpoint
+        .as_ref()
+        .and_then(|endpoint| endpoint.layout_association.as_ref())
+        .expect("verified Rex target captures its layout association");
+    assert_eq!(layout.session_id, endpoint().session_id);
+    assert_eq!(layout.window_id, "window-fixture");
+    assert_eq!(layout.window_index, 0);
+    assert_eq!(layout.block_id, endpoint().block_id);
+    assert_eq!(layout.block_label, "fixture");
+    assert_eq!(layout.block_flavor, "com.superlogical.terminal.shell");
+    assert_eq!(
+        layout.layout.block_id.as_deref(),
+        Some(endpoint().block_id.as_str())
+    );
+    assert!(env
+        .calls()
+        .iter()
+        .any(|call| method(call) == "session.view"));
+}
+
+#[tokio::test]
+async fn session_view_absence_and_ambiguity_fail_before_publication() {
+    let _fixture = fixture_guard().await;
+    for scenario in [
+        "layout_block_missing",
+        "layout_block_duplicate",
+        "layout_malformed",
+    ] {
+        let env = TestEnv::new(scenario);
+        let error = verify_restorable_candidate(&candidate(), "agent-session")
+            .await
+            .expect_err("unverifiable Rex layout must not publish");
+        assert_eq!(error.class, NotificationDeliveryClass::KnownNotDelivered);
+        assert_eq!(error.operation, "session.view");
+        assert!(
+            error.detail.contains("REX_LAYOUT_"),
+            "{scenario}: unexpected error {error}"
+        );
+        assert!(
+            env.calls().iter().all(|call| {
+                !matches!(
+                    method(call).as_str(),
+                    "com.superlogical.terminal.write" | "send-key"
+                )
+            }),
+            "layout refusal must not write terminal input"
+        );
+    }
+}
+
+#[tokio::test]
 async fn old_rex_targets_are_rejected_before_write() {
     let _fixture = fixture_guard().await;
     {
@@ -613,14 +714,7 @@ async fn write_unknown_and_short_write_never_enter() {
         let calls = env.calls();
         assert_eq!(
             calls.iter().map(method).collect::<Vec<_>>(),
-            [
-                ONLINE_AGENT_PREFLIGHT[0],
-                ONLINE_AGENT_PREFLIGHT[1],
-                ONLINE_AGENT_PREFLIGHT[2],
-                ONLINE_AGENT_PREFLIGHT[3],
-                "server.status",
-                "com.superlogical.terminal.write",
-            ]
+            &SUBMISSION_CALLS[..4]
         );
     }
 }
@@ -638,14 +732,7 @@ async fn typed_native_rejections_keep_exact_code() {
         assert_eq!(error.stage, RexInputStage::BeforeWrite);
         assert_eq!(
             env.calls().iter().map(method).collect::<Vec<_>>(),
-            [
-                ONLINE_AGENT_PREFLIGHT[0],
-                ONLINE_AGENT_PREFLIGHT[1],
-                ONLINE_AGENT_PREFLIGHT[2],
-                ONLINE_AGENT_PREFLIGHT[3],
-                "server.status",
-                "com.superlogical.terminal.write",
-            ]
+            &SUBMISSION_CALLS[..4]
         );
     }
     {
@@ -1229,6 +1316,49 @@ impl Drop for WhoamiEnv {
     fn drop(&mut self) {
         set_test_cli(None);
         let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[tokio::test]
+async fn notify_supports_agy_and_auto_updated_binary_via_argv0_while_rejecting_wrong_agent_kind() {
+    let _guard = fixture_guard().await;
+    {
+        let _env = TestEnv::online_agy("normal");
+        let receipt = notify_for_agent(
+            &selected_transport(),
+            "hello agy",
+            Some("immediate"),
+            Some(crate::host_runtime::AgentKind::Antigravity),
+        )
+        .await
+        .expect("live agy Rex foreground must accept notification");
+        let value: Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(value["enter_accepted"], true);
+    }
+    {
+        let _env = TestEnv::with_owner("normal", 4242, "agy.1795769233322723000.old");
+        std::env::set_var("COLLAB_TEST_REX_OWNER_ARGV0", "agy");
+        let receipt = notify_for_agent(
+            &selected_transport(),
+            "hello updated agy",
+            Some("immediate"),
+            Some(crate::host_runtime::AgentKind::Antigravity),
+        )
+        .await
+        .expect("auto-updated agy binary must match via argv0/base");
+        let value: Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(value["enter_accepted"], true);
+
+        let mismatch = notify_for_agent(
+            &selected_transport(),
+            "wrong target",
+            Some("immediate"),
+            Some(crate::host_runtime::AgentKind::Codex),
+        )
+        .await
+        .expect_err("expected Codex must refuse an Antigravity foreground");
+        assert_eq!(mismatch.class, NotificationDeliveryClass::KnownNotDelivered);
+        assert!(mismatch.detail.contains("RECIPIENT_NOT_ONLINE"));
     }
 }
 

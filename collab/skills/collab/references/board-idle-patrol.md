@@ -3,6 +3,38 @@
 状态：2026-10-25 用户确认的设计契约。安装版本、源码状态和 live 行为分别验收；
 不要把读到本文件当作 runtime 修复，也不要把源码提交当作安装完成。
 
+## Table C: Patrol wakes and cancellation
+
+This table is authoritative for patrol subjects, wake handling and cancellation.
+Process the delivered message according to the host before selecting a subject
+branch. A specific error or rejected cancellation takes precedence over the
+generic continue-work rows.
+
+| IF observed condition | actor | THEN exact CLI action | parameter source | required result / next branch |
+| --- | --- | --- | --- | --- |
+| Non-DSH host has an unread `COLLAB_NOTIFY` | delivered-message owner | `collab recv --timeout 0` | current mailbox and selected non-DSH binding | Read the full message, then apply its exact subject row below. Do not add an ACK. |
+| DSH host receives an unread `COLLAB_NOTIFY` | gateway-delivered message owner | Process the native full message; use `collab inbox` only for read-only inspection | current DSH gateway delivery | Do not run `collab recv` or `collab ack`. Then apply the exact subject row below. |
+| Subject is `board-idle-patrol` | referenced task owner | `collab task status '<id>'`, then `collab board show` | `<id>` and owner from the wake or current Board | Continue an actionable owned task or eligible queue item. |
+| Subject is `project-patrol` and current caller is Jenny | current project master | `collab board show`, then `collab who`; for any `unknown` peer, run `collab worker snapshot '<worker-id>' --capture --lines 80` | current project Board and live membership | Dispatch ready work before routine inspection; use `collab worker status '<worker-id>'` for a specific capacity gap; capture every `unknown` peer to determine its real state and record/execute an action item. Handle all in-scope issues yourself without escalating to CEO. |
+| Subject is `master-dispatch-gap` and current caller is Jenny | current project master | `collab board show`, then `collab who` | current project Board and live membership | Revalidate the reported capacity/dispatch gap and use the existing authorized dispatch or invitation entry. This is a non-cancellable scheduling notice. |
+| The referenced task has no executable action and only an evidenced external dependency remains | task owner | `collab notify cancel --event board-idle --task-id '<id>' --reason '<reason>' --resume-condition '<resume-condition>'`, then `collab notify status` | `<id>` from the task, `<reason>` and `<resume-condition>` from current evidence | Read the task's cancellation state. Cancellation preserves the task, resources and direct messages. |
+| The task's recorded recovery signal arrives and automatic continuation is needed again | task owner | `collab notify subscribe --event board-idle --task-id '<id>'`, then `collab notify status` | `<id>` from the existing task | Read `board_patrol`; the same task-scoped subscription is active again. |
+| Jenny has no actionable project work and current project-cancellation eligibility is satisfied | current project master | `collab notify cancel --event master-idle --reason '<reason>' --resume-condition '<resume-condition>'`, then `collab notify status` | current project progress and task state | Read `project_patrol`; the original project subscription is `cancelled`. |
+| Project cancellation is rejected | current project master | Read the exact result and listed blocking task IDs; advance those tasks or record missing progress through the existing authorized path | cancellation receipt | Preserve the rejection. Retry cancellation only after the named eligibility gap has observable evidence. |
+| Explicit project-patrol rearm is authorized and needed | current project master | `collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <repeat-count> --ttl-seconds <ttl-seconds>`, then `collab notify status` | `<repeat-count>` is the existing authorized delivery count; `<ttl-seconds>` is the authorized lifetime in seconds; current project selects the subscription | Read `project_patrol`; reuse the existing subscription record. |
+
+The message subject and cancellation event are different namespaces:
+
+- `board-idle-patrol` is a wake subject. Its cancellation and rearm event is
+  `board-idle` with the exact task ID.
+- `project-patrol` is the project-patrol subject. Its cancellation and rearm
+  event is `master-idle`.
+- `master-dispatch-gap` is a scheduling notice with no cancellation event. Do
+  not issue `collab notify cancel --event master-dispatch-gap`.
+- Cancellation does not close a task, approve a blocker, release resources or
+  disable direct-message reception. Message acceptance, consumption and task
+  progress remain separate receipts.
+
 `collab notify cancel --event board-idle`、`collab notify subscribe --event board-idle`
 与 `collab notify status` 的 board-idle 入口已在当前源码实现。本轮隔离公开入口/native
 与有限 timer 兼容验收已通过；这不等于生产 daemon 启用或生产 peer 消费或恢复推理
@@ -81,26 +113,30 @@ Rex 只读当前 Rex block，tmux 只读当前 tmux pane。先看当前输出和
 ## 非 live peer 的主动核实流程
 
 `collab who` 或 `collab worker status` 返回 `identity-mismatch`、`cold`、`offline`、
-`unknown` 或 `presence=missing`，且该 peer 仍在派发候选或仍持有未关闭任务的，由当前
-master 按有界流程主动核实。这类 peer 不当作 idle 容量，也不长期滞留在派发队列。
-新注册 peer 显示 `unknown` 时，master 当轮先主动核实。注册成功与观测到当前活动是
-两个回执。同一异常在后续巡检复用已有回执，仅在状态或绑定出现新证据时重新判断。
+`unknown`（含 `REX_SERVICE_CHANGED`）或 `presence=missing`，且该 peer 仍在派发候选或仍持有未关闭任务的，
+由当前 master 在自己 scope 内当轮主动核实并闭环处理（不需要找 CEO）。这类 peer 不当作 idle 容量，
+也不得只记录“仍为 unknown，待执行 collab context”后跨轮空等。
 
-1. 主动核实：用 `collab worker status <id>` 查看该 peer 的状态、绑定和缺项。对 Rex
-   或 Codex TUI/tmux peer 运行 `collab worker snapshot <id> --capture --lines 80`，检查实际
-   返回的状态及终端内容。Rex 使用现有绑定的 block，禁止 split、新开窗口或写入终端。
-   若 capture 因 Rex server 不可达或实例变化被拒绝，保留原错，等原会话恢复后再核实。
-   Capture 只提供观察证据，派发容量以核实后的当前状态为准。仍需 peer 补事实时，向该
-   稳定名字发一次请求，要求其在自己原会话运行 `collab context` 并交回真实回执。
-   `identity-mismatch` 沿同一入口修复，保留已有身份及任务。
-2. 有界等待：对方未响应时使用最长 15 分钟的有界等待（`board-idle` 兜底 tick 即
-   `900000` 毫秒），保留原回执。等待期间只停依赖该 peer 的动作，其余 ready 工作继续派发。
-3. 终判：到期运行一次 `collab worker status <id>` 做最终状态核实。仍为
-   `identity-mismatch`/`cold`/`offline`/`unknown`/`missing` 且无真实回执的判为当前
-   不可用，从派发队列排除；已恢复 `online` 的按优先级放入派发队列，用
+1. Capture 检查确定实际状态：先用 `collab worker status <id>` 查看该 peer 的状态、绑定和缺项，
+   并对 Rex 或 Codex TUI/tmux peer 必须执行 `collab worker snapshot <id> --capture --lines 80`
+   （无 pane capture 的宿主则查相应只读状态入口），读取实际终端输出以确定 agent 的真实状态：
+   - 终端仍在执行 / 提示待命 / 卡在某一步 / 刚恢复服务：确定其实际进展或卡点；
+   - 会话已退出、崩溃、block 不存在或 capture 因 server/实例不可达失败：保留原错并明确判定该会话当前不可达或已失效。
+   Rex 使用现有绑定的 block，禁止 split、新开窗口或写入终端。
+2. 确定下一步并落盘 Action Item：根据 capture 确定的真实状态，master 当轮必须给出并执行具体
+   **action item**（写明负责人、具体动作、预期产物/完成证据），写入对应任务/记录：
+   - 会话仍存活但状态未刷新（如 `REX_SERVICE_CHANGED`）：向该 peer 发送一次定向请求
+     要求其在原会话运行 `collab context` 并交回真实回执，或按实际终端卡点指令推进；
+   - 会话已退出、崩溃、不可达或超过 15 分钟有界等待仍无回执：立即将其未关闭任务改派给
+     live idle peer 或独立 `codex exec --profile gcm` worker，将该 peer 从派发队列排除并记录清理/恢复条件；
+   - 整个过程属于 master 自身职责范围，自行完成核实、恢复或改派，不向 CEO 求助或例行汇报。
+3. 有界等待：仅在 capture 显示会话仍存活且已发出定向核实请求时，使用最长 15 分钟的有界等待
+   （`board-idle` 兜底 tick 即 `900000` 毫秒），保留原回执。等待期间只停依赖该 peer 的动作，其余 ready 工作继续派发。
+4. 终判：到期运行一次 `collab worker status <id>`（必要时再做一次 capture）做最终状态核实。仍为
+   `identity-mismatch`/`cold`/`offline`/`unknown`/`missing` 且无真实回执的判为当前不可用，
+   从派发队列排除并改派未关闭任务；已恢复 `online` 的按优先级放入派发队列，用
    `collab board publish --executor <peer>` 入队或 `collab board dispatch`/`invite` 派单。
-   若离线或未知影响未关闭任务的交付，当前 master 在原任务记录影响和处置安排。
-4. 移除：确认不可用、且不再持有未关闭任务、未交付内容或受保护资源时，尝试
+5. 移除：确认不可用、且不再持有未关闭任务、未交付内容或受保护资源时，尝试
    `collab worker close <id> --reason '<auditable reason>'` 显式退休该 peer。
    `worker close` 需要可证明的 lifecycle target；`identity-mismatch`、`cold`、
    `offline`、`missing` 目标通常返回 `PEER_LIFECYCLE_TARGET_UNPROVEN`。此时不得强删，
@@ -108,7 +144,7 @@ master 按有界流程主动核实。这类 peer 不当作 idle 容量，也不�
    仍持有未关闭责任、dirty/active/shared/unknown 资源或身份冲突的同样不得强删。
    无论能否退休，先把 peer 从派发队列排除并记录 owner 与恢复条件；移除只针对本
    owner 有权处置的 peer，不动他人资源，也不操作 daemon 或 tmux 生命周期。
-5. 记录：每步记录真实时间、命令、回执与判定，分开记录核实尝试、投递、消费和终判结果；
+6. 记录：每步记录真实时间、命令、capture 结论、判定和 action item，分开记录核实尝试、投递、消费和终判结果；
    不得以发消息或超时代替状态核实，也不得把等待写成已完成核实。
 
 ## Peer 何时与如何取消
@@ -192,7 +228,7 @@ collab notify status
 
 ```text
 collab notify cancel --event master-idle [--reason <text>] [--resume-condition <text>]
-collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <n> --ttl-seconds <n>
+collab notify subscribe --event master-idle --subject project-patrol --every-ms 1500000 --repeat-count <repeat-count> --ttl-seconds <ttl-seconds>
 collab notify status
 ```
 
@@ -246,11 +282,15 @@ Jenny 只在提醒到达时检查下列事实，不自行造一条手写唤醒�
    当前任务者），再读取当前项目未关闭 board 任务与 owner，结合按任务取消状态得出
    待巡检和待派集合；Planner/Reviewer 缺位按角色后备继续，不空等。
 2. 读取每个 owner 的当前宿主状态；busy 跳过，cold、offline、unknown 不进入派发
-   容量。未响应 peer 使用最长 15 分钟有界等待，到期再核对；可用者进入派发队列，
-   仍不可用者从当前派发队列排除并记录 owner 与恢复条件，不因此停工。
+   容量。对任何 `unknown` peer（含 `REX_SERVICE_CHANGED`），当轮必须先执行
+   `collab worker snapshot <id> --capture --lines 80` 确定其真实状态，再落盘并执行具体
+   action item（恢复、改派或排除）；不得只写“仍为 unknown”后空等。
 3. 对正态 idle 且仍有未取消任务的 owner，daemon 会产出继续提醒；Jenny 核对任务与
    取消入口，不重复 arm，也不覆盖 peer 的取消。
-4. 存在 CEO 且本项目有实质进展或阻塞变化时，向 CEO 回报项目进度。
+4. 自己 scope 内的事项（peer 核实与恢复、`unknown` 排查与改派、任务调度、常规阻塞、
+   资源清理和日常巡检）由 master 自行处理，不需要也不得找 CEO。只有在存在全局 CEO 且
+   发生超出本 master 权限的阻塞（需跨项目协调或用户拍板）或重大里程碑实质进展时，才按
+   规则向 CEO 回报；无实质新进展的巡检直接继续推进，不提及也不联系 CEO。
 5. busy 跳过不补发；unknown 不产生传输输入；无未关闭任务时不发 board idle 提醒。
 
 ## CEO 进度回报与用户报告边界

@@ -3,6 +3,9 @@ pub(crate) struct IsolatedTmux {
     owner_root: PathBuf,
     pane_command: String,
     sessions: RefCell<Vec<String>>,
+    server_pid: RefCell<Option<(u32, String)>>,
+    pane_pids: RefCell<Vec<(u32, String)>>,
+    cleanup_errors: RefCell<Vec<String>>,
 }
 
 const FIXTURE_PANE_READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,7 +40,7 @@ impl IsolatedTmux {
                 "-d",
                 "-P",
                 "-F",
-                "#{session_id}",
+                "#{session_id}|#{pane_id}|#{pane_pid}|#{pid}",
                 "-c",
                 root.to_str().unwrap(),
                 "-s",
@@ -52,6 +55,18 @@ impl IsolatedTmux {
             "start isolated tmux: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let fixture = Self {
+            socket: socket.clone(),
+            owner_root: root.to_path_buf(),
+            pane_command: pane_command.into(),
+            sessions: RefCell::new(Vec::new()),
+            server_pid: RefCell::new(None),
+            pane_pids: RefCell::new(Vec::new()),
+            cleanup_errors: RefCell::new(Vec::new()),
+        };
+        // Record ownership as soon as the first session exists. A later split
+        // or readiness check may fail before endpoints() is called.
+        fixture.record_allocation(&String::from_utf8(output.stdout).unwrap());
         if spare_pane {
             let split = with_tmux(|tmux| {
                 tmux.args([
@@ -59,6 +74,9 @@ impl IsolatedTmux {
                     socket.to_str().unwrap(),
                     "split-window",
                     "-d",
+                    "-P",
+                    "-F",
+                    "#{session_id}|#{pane_id}|#{pane_pid}|#{pid}",
                     "-c",
                     root.to_str().unwrap(),
                     "-t",
@@ -73,16 +91,15 @@ impl IsolatedTmux {
                 "split isolated tmux: {}",
                 String::from_utf8_lossy(&split.stderr)
             );
+            fixture.record_allocation(&String::from_utf8(split.stdout).unwrap());
+            let endpoints = fixture.endpoints();
+            for endpoint in endpoints {
+                fixture.record_server(endpoint.server_pid);
+                fixture.record_process(endpoint.pane_pid);
+                fixture.record_fixture_processes(&endpoint);
+            }
         }
-        Self {
-            socket,
-            owner_root: root.to_path_buf(),
-            pane_command: pane_command.into(),
-            sessions: RefCell::new(vec![String::from_utf8(output.stdout)
-                .unwrap()
-                .trim()
-                .to_owned()]),
-        }
+        fixture
     }
 
     pub(crate) fn endpoints(&self) -> Vec<crate::proto::TmuxEndpoint> {
@@ -98,15 +115,19 @@ impl IsolatedTmux {
             .output()
             .unwrap()
         });
-        assert!(panes.status.success());
-        String::from_utf8(panes.stdout)
+        assert!(
+            panes.status.success(),
+            "list isolated tmux panes: {}",
+            String::from_utf8_lossy(&panes.stderr)
+        );
+        let endpoints = String::from_utf8(panes.stdout)
             .unwrap()
             .lines()
             .map(|pane_id| {
                 let fields = self
                     .wait_for_pane_cwd(pane_id, &self.owner_root)
                     .unwrap_or_else(|error| panic!("{error}"));
-                crate::proto::TmuxEndpoint {
+                let endpoint = crate::proto::TmuxEndpoint {
                     socket_path: self.socket.to_string_lossy().into_owned(),
                     server_pid: fields[0].parse().unwrap(),
                     tmux_session_id: fields[1].clone(),
@@ -114,13 +135,43 @@ impl IsolatedTmux {
                     pane_pid: fields[3].parse().unwrap(),
                     codex_session_id: None,
                     codex_thread_id: None,
-                }
+                };
+                self.record_process(endpoint.pane_pid);
+                self.record_server(endpoint.server_pid);
+                endpoint
             })
-            .collect()
+            .collect::<Vec<_>>();
+        for endpoint in &endpoints {
+            self.record_fixture_processes(endpoint);
+        }
+        endpoints
     }
 
     pub(crate) fn add_session(&self) -> crate::proto::TmuxEndpoint {
         self.add_session_at(&self.owner_root)
+    }
+
+    pub(crate) fn register_session(&self, session: &str) {
+        {
+            let mut sessions = self.sessions.borrow_mut();
+            if !sessions.iter().any(|owned| owned == session) {
+                sessions.push(session.to_owned());
+            }
+        }
+        let output = self.display_message(session);
+        assert!(
+            output.status.success(),
+            "register allocated tmux session {session}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let fields = stdout.trim_end().split('|').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 5, "allocated tmux session metadata: {stdout:?}");
+        assert_eq!(fields[1], session, "registered session identity changed");
+        self.record_server(fields[0].parse().expect("allocated server PID"));
+        let pane_pid = fields[3].parse().expect("allocated pane PID");
+        self.record_process(pane_pid);
+        self.record_descendants(pane_pid);
     }
 
     pub(crate) fn add_session_at(&self, root: &Path) -> crate::proto::TmuxEndpoint {
@@ -138,7 +189,7 @@ impl IsolatedTmux {
                 "-d",
                 "-P",
                 "-F",
-                "#{session_id}\t#{pane_id}",
+                "#{session_id}|#{pane_id}|#{pane_pid}|#{pid}",
                 "-c",
                 root.to_str().unwrap(),
                 "-s",
@@ -153,19 +204,18 @@ impl IsolatedTmux {
             "add isolated tmux session: {}",
             String::from_utf8_lossy(&created.stderr)
         );
-        self.sessions.borrow_mut().push(session.clone());
-        let created_fields = String::from_utf8(created.stdout)
-            .unwrap()
+        let created_text = String::from_utf8(created.stdout).unwrap();
+        self.record_allocation(&created_text);
+        let created_fields = created_text
             .trim_end()
-            .split('\t')
+            .split('|')
             .map(str::to_owned)
             .collect::<Vec<_>>();
         assert_eq!(
             created_fields.len(),
-            2,
+            4,
             "inspect created isolated tmux session: {created_fields:?}"
         );
-        *self.sessions.borrow_mut().last_mut().unwrap() = created_fields[0].clone();
         let fields = self
             .wait_for_pane_cwd(&created_fields[1], root)
             .unwrap_or_else(|error| panic!("{error}"));
@@ -178,7 +228,7 @@ impl IsolatedTmux {
             "readiness queried a different tmux pane"
         );
 
-        crate::proto::TmuxEndpoint {
+        let endpoint = crate::proto::TmuxEndpoint {
             socket_path: self.socket.to_string_lossy().into_owned(),
             server_pid: fields[0].parse().unwrap(),
             tmux_session_id: fields[1].clone(),
@@ -186,7 +236,168 @@ impl IsolatedTmux {
             pane_pid: fields[3].parse().unwrap(),
             codex_session_id: None,
             codex_thread_id: None,
+        };
+        self.record_process(endpoint.pane_pid);
+        self.record_fixture_processes(&endpoint);
+        endpoint
+    }
+
+    fn record_allocation(&self, allocation: &str) {
+        let fields = allocation.trim_end().split('|').collect::<Vec<_>>();
+        if let Some(session) = fields.first().filter(|session| !session.is_empty()) {
+            let mut sessions = self.sessions.borrow_mut();
+            if !sessions.iter().any(|owned| owned == session) {
+                sessions.push((*session).to_owned());
+            }
         }
+        assert_eq!(fields.len(), 4, "tmux allocation metadata: {allocation:?}");
+        self.record_server(fields[3].parse().expect("allocated server PID"));
+        let pane_pid = fields[2].parse().expect("allocated pane PID");
+        self.record_process(pane_pid);
+        self.record_descendants(pane_pid);
+    }
+
+    fn record_server(&self, pid: u32) {
+        if let Some(start_id) = process_start_identity(pid) {
+            *self.server_pid.borrow_mut() = Some((pid, start_id));
+        }
+    }
+
+    fn record_process(&self, pid: u32) {
+        if pid == 0 {
+            return;
+        }
+        let Some(start_id) = process_start_identity(pid) else {
+            return;
+        };
+        let mut processes = self.pane_pids.borrow_mut();
+        if !processes.iter().any(|(existing, _)| *existing == pid) {
+            processes.push((pid, start_id));
+        }
+    }
+
+    fn record_process_from_pane(&self, pane_id: &str) {
+        let output = self.display_message(pane_id);
+        if !output.status.success() {
+            return;
+        }
+        if let Ok(text) = String::from_utf8(output.stdout) {
+            if let Some(pid) = text.trim_end().split('|').nth(3).and_then(|value| value.parse().ok()) {
+                self.record_process(pid);
+                self.record_descendants(pid);
+            }
+        }
+    }
+
+    fn record_fixture_processes(&self, endpoint: &crate::proto::TmuxEndpoint) {
+        self.record_descendants(endpoint.pane_pid);
+    }
+
+    fn record_descendants(&self, parent: u32) {
+        let identity = self.pane_pids.borrow().iter()
+            .find(|(pid, _)| *pid == parent).cloned();
+        let Some((_, start)) = identity else { return; };
+        if !process_identity_matches(parent, &start) {
+            return;
+        }
+        let children = match Command::new("pgrep").args(["-P", &parent.to_string()]).output() {
+            Ok(output) => output,
+            Err(error) => {
+                self.cleanup_errors.borrow_mut().push(format!(
+                    "inspect descendants of owned PID {parent}: {error}"
+                ));
+                return;
+            }
+        };
+        if !children.status.success() && children.status.code() != Some(1) {
+            self.cleanup_errors.borrow_mut().push(format!(
+                "inspect descendants of owned PID {parent}: {}",
+                String::from_utf8_lossy(&children.stderr)
+            ));
+            return;
+        }
+        if !process_identity_matches(parent, &start) {
+            return;
+        }
+        for child in String::from_utf8_lossy(&children.stdout).lines() {
+            if let Ok(pid) = child.trim().parse() {
+                let Some(start_id) = process_start_identity(pid) else { continue; };
+                if self.process_descends_from(pid, parent)
+                    && process_identity_matches(parent, &start)
+                    && process_identity_matches(pid, &start_id)
+                {
+                    self.record_process(pid);
+                    self.record_descendants(pid);
+                }
+            }
+        }
+    }
+
+    fn process_descends_from(&self, pid: u32, root: u32) -> bool {
+        let mut current = pid;
+        for _ in 0..64 {
+            if current == root {
+                return true;
+            }
+            let output = match Command::new("ps")
+                .args(["-o", "ppid=", "-p", &current.to_string()])
+                .output()
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    self.cleanup_errors.borrow_mut().push(format!(
+                        "inspect ancestry of fixture PID {current}: {error}"
+                    ));
+                    return false;
+                }
+            };
+            if !output.status.success() {
+                return false;
+            }
+            let Ok(parent) = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>() else {
+                return false;
+            };
+            if parent == 0 || parent == current {
+                return false;
+            }
+            current = parent;
+        }
+        false
+    }
+
+    fn terminate_processes(&self, owned: &[(u32, String)]) {
+        for (pid, start_id) in owned.iter().rev() {
+            terminate_fixture_pid(*pid, start_id, libc::SIGTERM);
+            // Keep the parent alive while it reaps its child before signaling
+            // that parent. Signaling the whole tree together can orphan it.
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline && process_identity_matches(*pid, start_id) {
+                std::thread::sleep(FIXTURE_PANE_READY_POLL);
+            }
+            if process_identity_matches(*pid, start_id) {
+                terminate_fixture_pid(*pid, start_id, libc::SIGKILL);
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline && process_identity_matches(*pid, start_id) {
+                std::thread::sleep(FIXTURE_PANE_READY_POLL);
+            }
+        }
+        for (pid, start_id) in owned {
+            if process_identity_matches(*pid, start_id) {
+                self.cleanup_errors
+                    .borrow_mut()
+                    .push(format!("owned fixture PID {pid} survived teardown"));
+            }
+        }
+    }
+
+    fn terminate_owned_processes(&self) {
+        let parents = self.pane_pids.borrow().clone();
+        for (pid, _) in parents {
+            self.record_descendants(pid);
+        }
+        let owned = self.pane_pids.borrow().clone();
+        self.terminate_processes(&owned);
     }
 
     fn wait_for_pane_cwd(
@@ -225,10 +436,10 @@ impl IsolatedTmux {
             })?;
             let fields = stdout
                 .trim_end()
-                .split('\t')
+                .split('|')
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            if fields.len() != 5 {
+            if fields.len() != 5 || fields.iter().any(|field| field.is_empty()) {
                 return Err(format!(
                     "inspect isolated tmux session returned {} fields: root={} socket={} target={} stdout={:?}",
                     fields.len(),
@@ -270,7 +481,7 @@ impl IsolatedTmux {
                 "-p",
                 "-t",
                 target,
-                "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}",
+                "#{pid}|#{session_id}|#{pane_id}|#{pane_pid}|#{pane_current_path}",
             ])
             .output()
             .unwrap()
@@ -278,6 +489,22 @@ impl IsolatedTmux {
     }
 
     fn kill_pane(&self, pane_id: &str) {
+        self.record_process_from_pane(pane_id);
+        if let Some(endpoint) = self
+            .endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.pane_id == pane_id)
+        {
+            self.record_fixture_processes(&endpoint);
+            let owned = self
+                .pane_pids
+                .borrow()
+                .iter()
+                .filter(|(pid, _)| self.process_descends_from(*pid, endpoint.pane_pid))
+                .cloned()
+                .collect::<Vec<_>>();
+            self.terminate_processes(&owned);
+        }
         let output = with_tmux(|tmux| {
             tmux.args([
                 "-S",
@@ -289,17 +516,37 @@ impl IsolatedTmux {
             .output()
             .unwrap()
         });
-        assert!(
-            output.status.success(),
-            "kill test-owned tmux pane {pane_id}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        if !output.status.success() {
+            let listed = with_tmux(|tmux| {
+                tmux.args([
+                    "-S",
+                    self.socket.to_str().unwrap(),
+                    "list-panes",
+                    "-a",
+                    "-F",
+                    "#{pane_id}",
+                ])
+                .output()
+            });
+            let still_listed = listed.as_ref().is_ok_and(|out| {
+                out.status.success()
+                    && String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .any(|line| line == pane_id)
+            });
+            assert!(
+                !still_listed,
+                "kill test-owned tmux pane {pane_id}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     fn close_owned_sessions(&self) {
+        self.terminate_owned_processes();
         let sessions = self.sessions.borrow_mut().drain(..).collect::<Vec<_>>();
         for session in sessions {
-            let _ = with_tmux(|tmux| {
+            let output = with_tmux(|tmux| {
                 tmux.args([
                     "-S",
                     self.socket.to_str().unwrap(),
@@ -309,7 +556,81 @@ impl IsolatedTmux {
                 ])
                 .output()
             });
+            if output.as_ref().is_ok_and(|output| !output.status.success()) {
+                let listed = with_tmux(|tmux| {
+                    tmux.args([
+                        "-S",
+                        self.socket.to_str().unwrap(),
+                        "list-sessions",
+                        "-F",
+                        "#{session_id}",
+                    ])
+                    .output()
+                    .unwrap()
+                });
+                let still_listed = listed.status.success()
+                    && String::from_utf8_lossy(&listed.stdout)
+                        .lines()
+                        .any(|line| line == session);
+                if still_listed {
+                    self.cleanup_errors.borrow_mut().push(format!(
+                        "close owned tmux session {session}: {}",
+                        String::from_utf8_lossy(&output.as_ref().unwrap().stderr)
+                    ));
+                }
+            }
         }
+        if let Some((pid, start_id)) = self.server_pid.borrow().clone() {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while process_identity_matches(pid, &start_id) && Instant::now() < deadline {
+                std::thread::sleep(FIXTURE_PANE_READY_POLL);
+            }
+            if process_identity_matches(pid, &start_id) {
+                self.cleanup_errors
+                    .borrow_mut()
+                    .push(format!("private tmux server PID {pid} survived session teardown"));
+            }
+        }
+        let server_alive = self
+            .server_pid
+            .borrow()
+            .as_ref()
+            .is_some_and(|(pid, start)| process_identity_matches(*pid, start));
+        if self.socket.exists() && !server_alive {
+            if let Err(error) = std::fs::remove_file(&self.socket) {
+                if self.socket.exists() {
+                    self.cleanup_errors.borrow_mut().push(format!(
+                        "remove stale private tmux socket {}: {error}",
+                        self.socket.display()
+                    ));
+                }
+            }
+        }
+        if self.socket.exists() {
+            self.cleanup_errors.borrow_mut().push(format!(
+                "private tmux socket {} survived natural server exit",
+                self.socket.display()
+            ));
+        }
+    }
+}
+
+fn process_start_identity(pid: u32) -> Option<String> {
+    crate::host_runtime::exact_process_start_id(pid)
+        .ok()
+        .flatten()
+}
+
+fn process_identity_matches(pid: u32, expected: &str) -> bool {
+    process_start_identity(pid).as_deref() == Some(expected)
+}
+
+fn terminate_fixture_pid(pid: u32, expected_start_id: &str, signal: libc::c_int) {
+    if !process_identity_matches(pid, expected_start_id) {
+        return;
+    }
+    unsafe {
+        libc::kill(pid as libc::pid_t, signal);
     }
 }
 
@@ -328,12 +649,373 @@ thread_local! {
 impl Drop for IsolatedTmux {
     fn drop(&mut self) {
         self.close_owned_sessions();
-        let _ = std::fs::remove_file(&self.socket);
+        if self.socket.exists()
+            && !self
+                .server_pid
+                .borrow()
+                .as_ref()
+                .is_some_and(|(pid, start)| process_identity_matches(*pid, start))
+        {
+            let _ = std::fs::remove_file(&self.socket);
+        }
+        if !std::thread::panicking() && !self.cleanup_errors.borrow().is_empty() {
+            panic!("isolated tmux cleanup failed: {}", self.cleanup_errors.borrow().join("; "));
+        }
+    }
+}
+
+struct TestTmuxFixtureScope {
+    root: Option<PathBuf>,
+}
+
+impl TestTmuxFixtureScope {
+    fn enter() -> Self {
+        clear_test_tmux_pools();
+        Self { root: None }
+    }
+
+    fn for_root(root: &Path) -> Self {
+        let mut scope = Self::enter();
+        scope.root = Some(root.to_owned());
+        scope
+    }
+}
+
+impl Drop for TestTmuxFixtureScope {
+    fn drop(&mut self) {
+        clear_test_tmux_pools();
+        if let Some(root) = &self.root {
+            assert!(REGISTERED_TEST_TMUX.with(|fixture| fixture.borrow().is_none()));
+            assert!(ONLINE_TEST_TMUX.with(|fixture| fixture.borrow().is_none()));
+            std::fs::remove_dir_all(root).expect("remove root after pooled tmux cleanup");
+        }
+    }
+}
+
+fn clear_test_tmux_pools() {
+    let registered = REGISTERED_TEST_TMUX.with(|fixture| fixture.borrow_mut().take());
+    let online = ONLINE_TEST_TMUX.with(|fixture| fixture.borrow_mut().take());
+    drop((registered, online));
+}
+
+#[test]
+fn isolated_tmux_scope_releases_both_pools_before_root_removal() {
+    for unwind in [false, true] {
+        let (server, root) = test_server();
+        let mut resources = Vec::new();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _scope = TestTmuxFixtureScope::for_root(&root);
+            assert!(register(&server, "scope-offline", "%scope-offline").ok);
+            assert!(register_online(&server, "scope-online", "%scope-online").ok);
+            for pool in [&REGISTERED_TEST_TMUX, &ONLINE_TEST_TMUX] {
+                pool.with(|fixture| {
+                    let fixture = fixture.borrow();
+                    let tmux = &fixture.as_ref().expect("both pools allocated").0;
+                    resources.push((
+                        tmux.socket.clone(),
+                        tmux.pane_pids.borrow().clone(),
+                        tmux.server_pid.borrow().clone().unwrap(),
+                    ));
+                });
+            }
+            assert!(root.exists(), "root must remain available during the test");
+            if unwind {
+                std::panic::panic_any("exercise both-pool root teardown");
+            }
+        }));
+        if unwind {
+            let payload = caught.expect_err("test body must unwind");
+            assert_eq!(payload.downcast_ref::<&str>(), Some(&"exercise both-pool root teardown"));
+        } else {
+            caught.expect("normal return must clean up");
+        }
+        assert!(REGISTERED_TEST_TMUX.with(|fixture| fixture.borrow().is_none()));
+        assert!(ONLINE_TEST_TMUX.with(|fixture| fixture.borrow().is_none()));
+        assert!(!root.exists(), "guard must remove its root on return and unwind");
+        for (socket, processes, (server_pid, server_start)) in resources {
+            assert!(!socket.exists(), "pooled socket survived: {}", socket.display());
+            assert!(!process_identity_matches(server_pid, &server_start), "pooled server survived");
+            for (pid, start) in processes {
+                assert!(!process_identity_matches(pid, &start), "pooled process survived: {pid}");
+            }
+        }
     }
 }
 
 #[test]
+fn isolated_tmux_teardown_reaps_foreground_processes() {
+    let _scope = TestTmuxFixtureScope::enter();
+    let (server, root) = test_server();
+    let tmux = IsolatedTmux::start_online(&root);
+    let endpoint = tmux.endpoints().remove(0);
+    wait_for_online_fixture(&endpoint);
+    let pid_deadline = std::time::Instant::now() + FIXTURE_PANE_READY_TIMEOUT;
+    let foreground_pid_file = loop {
+        if let Some(found) = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("codex.pid-"))
+            })
+        {
+            break found;
+        }
+        assert!(
+            std::time::Instant::now() < pid_deadline,
+            "foreground fixture pid file"
+        );
+        std::thread::sleep(FIXTURE_PANE_READY_POLL);
+    };
+    let foreground_pid = std::fs::read_to_string(foreground_pid_file)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    let server_pid = endpoint.server_pid;
+    let socket = tmux.socket.clone();
+
+    drop(tmux);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while (crate::host_runtime::exact_process_start_id(foreground_pid).unwrap().is_some()
+        || crate::host_runtime::exact_process_start_id(server_pid).unwrap().is_some()
+        || socket.exists())
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(FIXTURE_PANE_READY_POLL);
+    }
+    assert_eq!(
+        crate::host_runtime::exact_process_start_id(foreground_pid).unwrap(),
+        None,
+        "foreground fixture process survived teardown: pid={foreground_pid}"
+    );
+    assert_eq!(
+        crate::host_runtime::exact_process_start_id(server_pid).unwrap(),
+        None,
+        "private tmux server survived teardown: pid={server_pid}"
+    );
+    assert!(!socket.exists(), "private tmux socket survived teardown");
+    drop(server);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn isolated_tmux_teardown_reaps_descendant_and_ignores_foreign_pid_file() {
+    let _scope = TestTmuxFixtureScope::enter();
+    let (server, root) = test_server();
+    let sentinel_root = root.with_extension("descendant-sentinel");
+    std::fs::create_dir_all(&sentinel_root).unwrap();
+    let sentinel = IsolatedTmux::start_single(&sentinel_root);
+    let sentinel_endpoint = sentinel.endpoints().remove(0);
+    let sentinel_start = process_start_identity(sentinel_endpoint.pane_pid).unwrap();
+    std::fs::write(root.join("codex.pid-foreign"), sentinel_endpoint.pane_pid.to_string()).unwrap();
+    let tmux = IsolatedTmux::start_with_spare_pane(
+        &root,
+        false,
+        "sleep 60 & child=$!; printf '%s\\n' \"$child\" > codex.pid-child; wait \"$child\"",
+    );
+    let endpoint = tmux.endpoints().remove(0);
+    let deadline = Instant::now() + FIXTURE_PANE_READY_TIMEOUT;
+    let child = loop {
+        if let Some(pid) = std::fs::read_to_string(root.join("codex.pid-child"))
+            .ok().and_then(|text| text.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "descendant PID file was not created");
+        std::thread::sleep(FIXTURE_PANE_READY_POLL);
+    };
+    assert_ne!(child, endpoint.pane_pid, "fixture must have a distinct descendant");
+    tmux.record_fixture_processes(&endpoint);
+    let processes = tmux.pane_pids.borrow().clone();
+    assert!(processes.iter().any(|(pid, _)| *pid == child), "descendant not recorded");
+    assert!(!processes.iter().any(|(pid, _)| *pid == sentinel_endpoint.pane_pid));
+    let socket = tmux.socket.clone();
+    let (server_pid, server_start) = tmux.server_pid.borrow().clone().unwrap();
+    drop(tmux);
+    for (pid, start) in processes {
+        assert!(!process_identity_matches(pid, &start), "owned process survived: {pid}");
+    }
+    assert!(!process_identity_matches(server_pid, &server_start), "private server survived");
+    assert!(!socket.exists(), "private socket survived");
+    assert!(process_identity_matches(sentinel_endpoint.pane_pid, &sentinel_start));
+    assert!(sentinel_root.exists(), "foreign root was removed");
+    assert_eq!(sentinel.endpoints()[0].pane_id, sentinel_endpoint.pane_id);
+    drop(sentinel);
+    std::fs::remove_dir_all(sentinel_root).unwrap();
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn isolated_tmux_scope_cleans_pooled_fixtures_on_unwind() {
+    let (server, root) = test_server();
+    let sentinel_root = root.with_extension("sentinel");
+    std::fs::create_dir_all(&sentinel_root).unwrap();
+    let sentinel = IsolatedTmux::start_single(&sentinel_root);
+    let sentinel_endpoint = sentinel.endpoints().remove(0);
+    let sentinel_pid = sentinel_endpoint.pane_pid;
+    let sentinel_start = process_start_identity(sentinel_pid).expect("sentinel start identity");
+    let mut captured = None;
+    let panic_payload = "fixture unwind after setup";
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _scope = TestTmuxFixtureScope::enter();
+        register(&server, "unwind-peer", "thread-unwind-peer");
+        let facts = REGISTERED_TEST_TMUX.with(|fixture| {
+            let fixture = fixture.borrow();
+            let tmux = &fixture.as_ref().expect("registered fixture").0;
+            let endpoints = tmux.endpoints();
+            let sessions = tmux.sessions.borrow().clone();
+            let processes = tmux.pane_pids.borrow().clone();
+            let server = tmux.server_pid.borrow().clone().expect("recorded fixture server");
+            assert_eq!(endpoints.len(), 2, "spare pane must exist before unwind");
+            assert!(processes.len() >= 2, "both pane leaders must be recorded");
+            assert!(!sessions.is_empty(), "fixture session must exist before unwind");
+            (tmux.socket.clone(), sessions, processes, server)
+        });
+        assert!(facts.0.exists(), "fixture socket is missing before unwind");
+        captured = Some(facts);
+        std::panic::panic_any(panic_payload);
+    }));
+    let payload = caught.expect_err("test body must unwind");
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&panic_payload));
+    let (socket, sessions, processes, (server_pid, server_start)) = captured.unwrap();
+    assert_eq!(
+        REGISTERED_TEST_TMUX.with(|fixture| fixture.borrow().is_some()),
+        false,
+        "pooled fixture survived a test unwind"
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while (processes.iter().any(|(pid, start)| process_identity_matches(*pid, start))
+        || process_identity_matches(server_pid, &server_start)
+        || socket.exists())
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(FIXTURE_PANE_READY_POLL);
+    }
+    for (pid, start) in processes {
+        assert!(
+            !process_identity_matches(pid, &start),
+            "fixture process survived unwind: pid={pid}"
+        );
+    }
+    assert!(
+        !process_identity_matches(server_pid, &server_start),
+        "fixture server survived unwind: pid={server_pid}"
+    );
+    assert!(!socket.exists(), "fixture socket survived unwind");
+    let listed = Command::new("tmux")
+        .args(["-S", socket.to_str().unwrap(), "list-sessions", "-F", "#{session_id}"])
+        .output()
+        .unwrap();
+    assert!(!listed.status.success(), "fixture sessions survived unwind: {sessions:?}");
+    assert!(
+        process_identity_matches(sentinel_pid, &sentinel_start),
+        "unrelated sentinel died during fixture cleanup: pid={sentinel_pid}"
+    );
+    assert!(sentinel.socket.exists(), "unrelated sentinel socket was removed");
+    assert!(sentinel_root.exists(), "unrelated sentinel root was removed");
+    assert_eq!(sentinel.endpoints()[0].pane_id, sentinel_endpoint.pane_id);
+    drop(sentinel);
+    std::fs::remove_dir_all(sentinel_root).unwrap();
+    drop(server);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn isolated_tmux_partial_setup_failure_releases_resources() {
+    let _scope = TestTmuxFixtureScope::enter();
+    let root = std::env::temp_dir().join(format!(
+        "collab-peer-partial-setup-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let socket = std::env::temp_dir().join(format!("ctmux-partial-{}.sock", std::process::id()));
+    let owner = IsolatedTmux {
+        socket: socket.clone(),
+        owner_root: root.clone(),
+        pane_command: "sleep 60".into(),
+        sessions: RefCell::new(Vec::new()),
+        server_pid: RefCell::new(None),
+        pane_pids: RefCell::new(Vec::new()),
+        cleanup_errors: RefCell::new(Vec::new()),
+    };
+    let output = with_tmux(|tmux| {
+        tmux.args([
+            "-S",
+            socket.to_str().unwrap(),
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}|#{pane_id}|#{pane_pid}|#{pid}",
+            "-c",
+            root.to_str().unwrap(),
+            "-s",
+            "partial-setup",
+            "sleep 60",
+        ])
+        .output()
+        .unwrap()
+    });
+    assert!(output.status.success(), "partial setup session creation failed");
+    owner.record_allocation(&String::from_utf8(output.stdout).unwrap());
+    let split = with_tmux(|tmux| {
+        tmux.args([
+            "-S",
+            socket.to_str().unwrap(),
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}|#{pane_id}|#{pane_pid}|#{pid}",
+            "-c",
+            root.to_str().unwrap(),
+            "-t",
+            "partial-setup:0",
+            "sleep 60",
+        ])
+        .output()
+        .unwrap()
+    });
+    assert!(split.status.success(), "partial setup spare allocation failed");
+    owner.record_allocation(&String::from_utf8(split.stdout).unwrap());
+    let error = owner
+        .wait_for_pane_cwd("partial-setup:0", &root.join("missing-readiness-root"))
+        .unwrap_err();
+    assert!(error.contains("canonicalize fixture root"), "{error}");
+    let processes = owner.pane_pids.borrow().clone();
+    let (server_pid, server_start) = owner.server_pid.borrow().clone().unwrap();
+    assert!(processes.len() >= 2, "spare allocation must be recorded before failure");
+    drop(owner);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while (processes.iter().any(|(pid, start)| process_identity_matches(*pid, start))
+        || process_identity_matches(server_pid, &server_start)
+        || socket.exists())
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(FIXTURE_PANE_READY_POLL);
+    }
+    for (pid, start) in processes {
+        assert!(
+            !process_identity_matches(pid, &start),
+            "partial setup process survived cleanup: pid={pid}"
+        );
+    }
+    assert!(
+        !process_identity_matches(server_pid, &server_start),
+        "partial setup server survived cleanup: pid={server_pid}"
+    );
+    assert!(!socket.exists(), "partial setup socket survived cleanup");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn isolated_tmux_readiness_rejects_a_persistent_cwd_mismatch() {
+    let _scope = TestTmuxFixtureScope::enter();
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let id = SEQ.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
@@ -364,6 +1046,7 @@ fn isolated_tmux_readiness_rejects_a_persistent_cwd_mismatch() {
 
 #[test]
 fn isolated_tmux_readiness_exposes_query_errors() {
+    let _scope = TestTmuxFixtureScope::enter();
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let id = SEQ.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
@@ -386,6 +1069,7 @@ fn isolated_tmux_readiness_exposes_query_errors() {
 
 #[test]
 fn real_pane_cwd_is_rejected_by_the_production_registration_gate() {
+    let _scope = TestTmuxFixtureScope::enter();
     let (server, root) = test_server();
     let other = root.with_file_name(format!(
         "{}-other",

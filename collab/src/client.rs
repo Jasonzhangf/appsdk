@@ -90,19 +90,6 @@ pub fn stale_socket_error(error: &io::Error) -> bool {
     ) || error.raw_os_error() == Some(libc::EOPNOTSUPP)
 }
 
-/// Probe the daemon for the identity-context cwd protocol capability without
-/// mutating state. An older daemon answers a context-free Ping but omits the
-/// capability; the caller must then keep the legacy request shape.
-pub fn supports_identity_context_cwd(sock: &Path) -> bool {
-    let Ok(value): Result<serde_json::Value, _> = call(sock, &Req::Ping) else {
-        return false;
-    };
-    value
-        .get("protocol_version")
-        .and_then(serde_json::Value::as_str)
-        == Some(crate::proto::IDENTITY_CONTEXT_CWD_PROTOCOL)
-}
-
 /// Round-trip one request without changing daemon state.
 ///
 /// The caller must have an already-running daemon. In particular, this path
@@ -592,6 +579,25 @@ pub fn replace_unresponsive_daemon(
     if failed_connection_status(sock, &error) != DaemonAvailability::Unknown {
         return Ok(None);
     }
+    stop_verified_held_daemon(sock, pid_path)
+}
+
+/// Stop an already-held daemon verified against the host writer lock, owner
+/// publication, and PID file before restarting on the current binary.
+pub fn replace_running_daemon(
+    sock: &Path,
+    pid_path: &Path,
+) -> anyhow::Result<Option<ReplacedDaemon>> {
+    if !alive(sock) {
+        return Ok(None);
+    }
+    stop_verified_held_daemon(sock, pid_path)
+}
+
+fn stop_verified_held_daemon(
+    sock: &Path,
+    pid_path: &Path,
+) -> anyhow::Result<Option<ReplacedDaemon>> {
     let server_dir = sock
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid collab server socket path"))?;

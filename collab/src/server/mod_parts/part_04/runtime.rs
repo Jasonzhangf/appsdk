@@ -1164,7 +1164,7 @@ impl ProjectRuntimeManager {
         task_id: String,
         blocking_task_id: String,
     ) -> Result<Resp, Resp> {
-        self.with_current_task_state_response(
+        let response = self.with_current_task_state_response(
             runtime,
             context,
             &worker_id,
@@ -1180,7 +1180,9 @@ impl ProjectRuntimeManager {
                     blocking_task_id.clone(),
                 ))
             },
-        )
+        )?;
+        deliver_board_auto_notice(runtime, &response);
+        Ok(response)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1196,13 +1198,14 @@ impl ProjectRuntimeManager {
         worktree: Option<String>,
         no_candidate: bool,
     ) -> Result<Resp, Resp> {
-        self.with_current_task_state_response(
+        let mut claim_wakes = Vec::new();
+        let response = self.with_current_task_state_response(
             runtime,
             context,
             &worker_id,
             &token,
             |control, state, _| {
-                Ok(handle_task_deliver_with_intent_locked(
+                let (resp, wakes) = handle_task_deliver_with_intent_result_locked(
                     runtime,
                     state,
                     Some(control),
@@ -1213,9 +1216,13 @@ impl ProjectRuntimeManager {
                     attempt,
                     worktree.clone(),
                     no_candidate,
-                ))
+                );
+                claim_wakes = wakes;
+                Ok(resp)
             },
-        )
+        )?;
+        deliver_wake_bindings(runtime, &claim_wakes);
+        Ok(response)
     }
 
     #[allow(clippy::too_many_arguments)]

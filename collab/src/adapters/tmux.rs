@@ -1,4 +1,4 @@
-use crate::proto::{TmuxCandidate, TmuxEndpoint, TmuxPaneAnchor};
+use crate::proto::{TmuxCandidate, TmuxEndpoint};
 use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 use std::path::Path;
@@ -230,16 +230,6 @@ pub fn candidate_from_env() -> Result<TmuxCandidate, String> {
         .ok_or_else(|| "TMUX_OBSERVATION_INVALID: cwd is not UTF-8".to_owned())?
         .to_owned();
     Ok(TmuxCandidate { endpoint, cwd })
-}
-
-/// Compatibility wrapper for the remaining pane-anchor consumers. The socket
-/// path comes from the live observed endpoint, never from the `TMUX` value.
-pub fn anchor_from_env() -> Result<TmuxPaneAnchor, String> {
-    let candidate = candidate_from_env()?;
-    Ok(TmuxPaneAnchor {
-        socket_path: candidate.endpoint.socket_path,
-        pane_id: candidate.endpoint.pane_id,
-    })
 }
 
 fn validate_socket_path(path: &str) -> Result<(), String> {
@@ -1534,7 +1524,7 @@ pub(crate) mod tests {
                     "-p",
                     "-t",
                     "collab-test:0.0",
-                    "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
+                    "#{pid}|#{session_id}|#{pane_id}|#{pane_pid}",
                 ])
                 .output()
                 .expect("query isolated tmux pane");
@@ -1544,7 +1534,7 @@ pub(crate) mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             let line = String::from_utf8(output.stdout).unwrap();
-            let mut fields = line.trim_end().split('\t');
+            let mut fields = line.trim_end().split('|');
             TmuxEndpoint {
                 socket_path: self.socket.to_string_lossy().into_owned(),
                 server_pid: fields.next().unwrap().parse().unwrap_or_else(|error| {

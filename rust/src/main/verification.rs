@@ -391,18 +391,9 @@ pub(super) fn assert_ordinary_init_canonical_project_main_tree(root: &Path, fres
 }
 
 pub(super) fn assert_mutation_worktree(root: &Path) {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            root.to_str().unwrap_or("."),
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "HEAD",
-        ])
-        .output()
+    let branch = crate::primitives::git_current_branch(root)
         .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
-    if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "main" {
+    if branch.as_deref() == Some("main") {
         fail("MAIN_WORKTREE_MUTATION_FORBIDDEN");
     }
 }
@@ -679,7 +670,13 @@ pub(super) fn deployment_receipt_time(
     record_time(&evidence, evidence_id)
 }
 
+#[cfg(test)]
+pub(super) static PRE_REVIEW_VALIDATION_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub(super) fn assert_pre_review_validation_gate(root: &Path, module_id: &str, artifact: &Value) {
+    #[cfg(test)]
+    PRE_REVIEW_VALIDATION_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let validation_name = module_record_name("pre-review-validation-record", module_id);
     let candidate = read_record(root, &candidate_name);

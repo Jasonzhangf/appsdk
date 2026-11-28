@@ -1344,3 +1344,207 @@ fn pending_block_request_survives_current_state_round_trip() {
 
     assert_eq!(restored.task_block_requests["task-block"], request);
 }
+
+#[test]
+fn dependency_visibility_matches_current_binding_rule() {
+    use crate::server::name_state::TaskAssignment;
+    use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseRecord, TicketPhaseStatus};
+
+    let (server, root) = test_server();
+    for worker in [
+        "master",
+        "parent-a",
+        "child-a",
+        "parent-b",
+        "child-b",
+        "other",
+    ] {
+        let response = crate::server::peer_tests::register_synthetic_peer(&server, worker, worker);
+        assert!(response.ok, "{:?}", response.error);
+    }
+
+    let store = binding_store::BindingControlStore::new(server.host_paths.state_root());
+    let mut state = server.state.lock().unwrap();
+    let route = server_route_scope(&server, &state).unwrap().unwrap();
+    let control = store.load().unwrap();
+    let child_a_key = control
+        .key_for_worker(&route.project_scope_id, &route.app_scope_id, "child-a")
+        .unwrap()
+        .unwrap()
+        .clone();
+    let child_slot_name = child_a_key.name.clone();
+    register_managed_child(&mut state, "child-1", "parent-a", "child-a");
+    register_managed_child(&mut state, "child-2", "parent-b", "child-b");
+
+    let private_dep = task("private-dep", "child-a");
+    state
+        .apply_checked(&Event::TaskCreated {
+            task: private_dep.clone(),
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::BoardDetailsChanged {
+            task_id: private_dep.id.clone(),
+            details: crate::board::BoardTaskDetails {
+                title: "Private child dependency".into(),
+                public_visibility: false,
+                revision: 1,
+                ..crate::board::BoardTaskDetails::default()
+            },
+        })
+        .unwrap();
+    state
+        .apply_task_assignment(&TaskAssignment {
+            task_id: "private-dep".into(),
+            name: child_slot_name,
+            session_id: "session-child-a".into(),
+            assignment_revision: 1,
+            reflow: None,
+            updated_ms: 1,
+        })
+        .unwrap();
+
+    let internal_dep = task("internal-child-dep", "child-a");
+    state
+        .apply_checked(&Event::TaskCreated { task: internal_dep })
+        .unwrap();
+
+    let consumer = task("consumer", "other");
+    state
+        .apply_checked(&Event::TaskCreated {
+            task: consumer.clone(),
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::BoardDetailsChanged {
+            task_id: consumer.id.clone(),
+            details: crate::board::BoardTaskDetails {
+                title: "Public consumer".into(),
+                public_visibility: true,
+                admitted: true,
+                revision: 1,
+                ..crate::board::BoardTaskDetails::default()
+            },
+        })
+        .unwrap();
+    state
+        .apply_checked(&Event::TicketPhaseRecorded {
+            phase: TicketPhaseRecord {
+                task_id: consumer.id.clone(),
+                phase: TicketPhaseKind::Execute,
+                batch: 0,
+                priority: "p2".into(),
+                status: TicketPhaseStatus::WaitingAssignment,
+                slot_name: None,
+                binding_generation: 0,
+                enqueue_seq: 1,
+                attempt_generation: 0,
+                depends_on: vec!["private-dep".into(), "internal-child-dep".into()],
+                route_group: None,
+                wait_reason: None,
+                result: None,
+            },
+        })
+        .unwrap();
+
+    let assert_visibility = |control: &binding_slot::BindingControlSet,
+                             viewer: Option<&str>,
+                             expect_private_dep: bool,
+                             expect_internal_dep: bool| {
+        let dep_row = board_task_view_with_master(
+            &state,
+            control,
+            &state.tasks["private-dep"],
+            viewer,
+            Some("master"),
+            Some(&route),
+        )
+        .unwrap();
+        assert_eq!(dep_row.is_some(), expect_private_dep, "viewer={viewer:?}");
+        let consumer_view = board_task_view_with_master(
+            &state,
+            control,
+            &state.tasks["consumer"],
+            viewer,
+            Some("master"),
+            Some(&route),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            consumer_view.depends_on,
+            vec![
+                if expect_private_dep {
+                    "private-dep"
+                } else {
+                    "内部依赖"
+                },
+                if expect_internal_dep {
+                    "internal-child-dep"
+                } else {
+                    "内部依赖"
+                },
+            ],
+            "viewer={viewer:?}"
+        );
+    };
+
+    // Active binding held by child-a: child-a, parent-a, and master can read private-dep.
+    assert_visibility(&control, Some("child-a"), true, true);
+    assert_visibility(&control, Some("parent-a"), true, true);
+    assert_visibility(&control, Some("master"), true, true);
+    assert_visibility(&control, Some("child-b"), false, false);
+    assert_visibility(&control, Some("parent-b"), false, false);
+    assert_visibility(&control, Some("other"), false, false);
+    assert_visibility(&control, None, false, false);
+
+    // Move the assigned slot to child-b without rewriting stored task.owner ("child-a").
+    let child_b_key = control
+        .key_for_worker(&route.project_scope_id, &route.app_scope_id, "child-b")
+        .unwrap()
+        .unwrap();
+    let child_b_binding = control
+        .slot(child_b_key)
+        .unwrap()
+        .active_binding()
+        .unwrap()
+        .clone();
+    store
+        .commit(binding_store::ControlChange::MoveName {
+            target: child_a_key.clone(),
+            value: child_b_binding,
+            source_names: vec![child_b_key.name.clone()],
+            expected_generation: None,
+        })
+        .unwrap();
+    let control = store.load().unwrap();
+    assert_visibility(&control, Some("child-a"), false, true);
+    assert_visibility(&control, Some("parent-a"), false, true);
+    assert_visibility(&control, Some("child-b"), true, false);
+    assert_visibility(&control, Some("parent-b"), true, false);
+    assert_visibility(&control, Some("other"), false, false);
+    assert_visibility(&control, Some("master"), true, true);
+
+    // Unregister the assigned slot so the nonterminal assigned row has no active binding.
+    store
+        .commit(binding_store::ControlChange::Unregister {
+            key: child_a_key,
+            expected_generation: None,
+        })
+        .unwrap();
+    let control = store.load().unwrap();
+    for viewer in [
+        Some("child-a"),
+        Some("parent-a"),
+        Some("child-b"),
+        Some("parent-b"),
+        Some("other"),
+        None,
+    ] {
+        assert_visibility(&control, viewer, false, matches!(viewer, Some("child-a" | "parent-a")));
+    }
+    assert_visibility(&control, Some("master"), true, true);
+
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}

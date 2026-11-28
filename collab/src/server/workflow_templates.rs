@@ -61,20 +61,43 @@ fn workflow_base_card(target: &str) -> serde_json::Value {
     })
 }
 
-fn workflow_default_specialty(
-    role: &str,
-) -> Option<(&'static str, &'static crate::board::WorkflowTemplateSpec)> {
+fn workflow_canonical_specialty(role: &str) -> Option<&'static str> {
     let normalized = role.trim().to_lowercase();
     let asset = workflow_template_asset();
+    if asset.specialty_templates.contains_key(&normalized) {
+        return asset
+            .specialty_templates
+            .get_key_value(&normalized)
+            .map(|(canonical, _)| canonical.as_str());
+    }
     for (canonical, aliases) in &asset.specialty_aliases {
         if aliases.iter().any(|alias| alias == &normalized) {
             return asset
                 .specialty_templates
-                .get(canonical)
-                .map(|spec| (canonical.as_str(), spec));
+                .contains_key(canonical)
+                .then_some(canonical.as_str());
         }
     }
     None
+}
+
+fn workflow_role_matches(role: &str, expected: &str) -> bool {
+    if role.trim().eq_ignore_ascii_case(expected.trim()) {
+        return true;
+    }
+    workflow_canonical_specialty(role)
+        .zip(workflow_canonical_specialty(expected))
+        .is_some_and(|(role, expected)| role == expected)
+}
+
+fn workflow_default_specialty(
+    role: &str,
+) -> Option<(&'static str, &'static crate::board::WorkflowTemplateSpec)> {
+    let canonical = workflow_canonical_specialty(role)?;
+    workflow_template_asset()
+        .specialty_templates
+        .get(canonical)
+        .map(|spec| (canonical, spec))
 }
 
 fn workflow_default_specialty_card(target: &str) -> serde_json::Value {
@@ -349,7 +372,7 @@ fn handle_workflow_template_set(
         }
         recipients.sort();
         for recipient in recipients {
-            let events = match relationship_notice_events(&state, &control, &route, &recipient, "explicit-notification",
+            let events = match relationship_notice_events(&state, &control, &route, &recipient, "queued",
                 "workflow-template-changed", format!("流程模板 {} 已{}。读取 collab context 获取当前模板。已接任务的归属、指定执行者、reviewer 和验收条件保持；只协调受影响的职责或交接。", plan.target, if plan.outcome == "reset" {"重置"} else {"更新"})) {
                 Ok(events) => events, Err(error) => return Resp::err(error),
             };

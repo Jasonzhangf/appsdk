@@ -652,7 +652,7 @@ fn task_accept_schema_requires_owner_task_id() {
 }
 
 #[test]
-fn recv_schema_requires_caller_supplied_receive_id() {
+fn recv_schema_optional_trace_id_and_consume_once() {
     let definitions = tools();
     let recv = definitions
         .as_array()
@@ -663,20 +663,26 @@ fn recv_schema_requires_caller_supplied_receive_id() {
     let properties = recv["inputSchema"]["properties"].as_object().unwrap();
     assert!(
         properties.contains_key("receive_id"),
-        "MCP recv must expose the durable receive identity for replay"
+        "MCP recv may expose an optional durable trace identity"
     );
     assert_eq!(
         recv["inputSchema"]["required"],
-        json!(["receive_id"]),
-        "MCP recv must require a caller-owned receive identity"
+        json!([]),
+        "MCP recv must not require a trace identity to consume unread mail"
     );
+    let description = recv["description"].as_str().unwrap();
+    assert!(description.contains("consume once"));
+    assert!(!description.contains("replay a committed receive"));
 }
 
 #[test]
-fn recv_rejects_absent_or_invalid_receive_id_before_spawn() {
+fn recv_allows_absent_receive_id_and_rejects_invalid_values_before_spawn() {
+    assert_eq!(build_argv("collab_recv", &json!({})).unwrap(), vec!["recv"]);
+    assert_eq!(
+        build_argv("collab_recv", &json!({"timeout": 30})).unwrap(),
+        vec!["recv", "--timeout", "30"]
+    );
     for args in [
-        json!({}),
-        json!({"timeout": 30}),
         json!({"receive_id": null}),
         json!({"receive_id": 42}),
         json!({"receive_id": ""}),

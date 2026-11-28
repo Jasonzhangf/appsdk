@@ -64,6 +64,7 @@ fn rex_presence_read_under_state_lock_does_not_relock() {
             host_id: None,
             instance_id: "rex-instance".into(),
             cwd: "/tmp".into(),
+            layout_association: None,
         });
         transport.session_id = Some("rex-agent-session".into());
     }

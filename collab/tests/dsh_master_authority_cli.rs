@@ -2178,7 +2178,7 @@ fn dsh_post_submit_read_error_preserves_durable_message_without_retry() {
         .store(true, Ordering::SeqCst);
     let request = json!({"op":"Send","from":"workerA","worker_id":"workerA",
         "token":"tokenA","to":"workerB","type":"notify","subject":"read failure",
-        "body":"durable despite unknown wake","delivery":"queued","message_id":"read-failure-message",
+        "body":"durable despite unknown wake","delivery":"immediate","message_id":"read-failure-message",
         "command":{"command_id":"cmd-read-failure","operation_id":"op-read-failure",
             "actor_binding_id":reg_a["command"]["binding"]["binding_id"],
             "scope":{"app_scope_id":"appserver-cli","project_scope_id":fixture.root}},
@@ -2368,7 +2368,7 @@ fn dsh_master_authority_public_wire_and_restart_preserve_peer_state() {
     assert_ok(&task);
     let sent = fixture.request(json!({"op":"Send","from":"workerA","worker_id":"workerA",
         "token":"tokenA","to":"workerB","type":"notify","subject":"preservation",
-        "body":"preserve me","delivery":"queued","message_id":"fixture-message-id",
+        "body":"preserve me","delivery":"immediate","message_id":"fixture-message-id",
         "command":{"command_id":"cmd-preserve","operation_id":"op-preserve",
             "actor_binding_id":reg_a["command"]["binding"]["binding_id"],
             "scope":{"app_scope_id":"appserver-cli","project_scope_id":fixture.root}},

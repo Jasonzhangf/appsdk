@@ -28,7 +28,6 @@ pub(super) const VERIFY_FOUNDATION_GRAPH: &str =
 #[derive(Debug)]
 pub(super) struct VerifyInvocation {
     root: PathBuf,
-    #[allow(dead_code)]
     reset_epoch: bool,
 }
 

@@ -514,11 +514,8 @@ fn minimal_role_notice_survives_rejected_wake_without_rolling_back_roles() {
     assert_eq!(updated["work_roles"], json!(["designer"]));
     let receipt = &updated["work_roles_update"]["notifications"][0];
     assert_eq!(receipt["durable"], true, "{updated}");
-    assert_eq!(receipt["ok"], false, "{updated}");
-    assert!(
-        receipt["notification_error"].as_str().is_some(),
-        "{updated}"
-    );
+    assert_eq!(receipt["ok"], true, "{updated}");
+    assert_eq!(receipt["notification"], "queued", "{updated}");
     assert_eq!(notices(&fixture, THREAD_A, "work-roles-changed").len(), 1);
     assert!(notices(&fixture, THREAD_A, "work-roles-changed").is_empty());
 }
@@ -640,6 +637,741 @@ fn f7_publish_flags<'a>(extra: &[&'a str]) -> Vec<&'a str> {
     ];
     flags.extend_from_slice(extra);
     flags
+}
+
+fn fixture_receipt(fixture: &AppFixture, case: &str) -> (PathBuf, u32) {
+    let pid = fixture.daemon.as_ref().unwrap().id();
+    let receipt = json!({"case": case, "root": fixture.root, "project": fixture.project,
+        "host_state": fixture.host_state, "app_socket": fixture.app_socket,
+        "daemon_socket": fixture.host_state.join("server.sock"), "serve_pid": pid});
+    if let Some(path) = std::env::var_os("A5_FIXTURE_RECEIPTS") {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(file, "{receipt}").unwrap();
+    }
+    (fixture.root.clone(), pid)
+}
+
+fn fixture_teardown(fixture: AppFixture, receipt: (PathBuf, u32)) {
+    drop(fixture);
+    assert!(!receipt.0.exists(), "fixture root remains: {}", receipt.0.display());
+    let process = Command::new("ps").args(["-p", &receipt.1.to_string(), "-o", "pid="]).output().unwrap();
+    assert!(process.stdout.is_empty(), "owned serve child remains: {}", receipt.1);
+    if let Some(path) = std::env::var_os("A5_FIXTURE_RECEIPTS") {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(file, "{}", json!({"root": receipt.0, "serve_pid": receipt.1,
+            "root_absent": true, "serve_reaped": true})).unwrap();
+    }
+}
+
+fn fixture_public_receipt(
+    fixture: &AppFixture,
+    case: &str,
+    args: &[&str],
+    thread: &str,
+) -> Value {
+    let output = fixture.command_public(args, thread);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut value = serde_json::from_str::<Value>(&stdout).ok();
+    if let Some(parsed) = value.as_mut() {
+        let snapshot = parsed
+            .get("result")
+            .and_then(|result| result.get("snapshot"))
+            .cloned();
+        if snapshot.is_some() {
+            value = snapshot;
+        }
+    }
+    if let Some(path) = std::env::var_os("A5_FIXTURE_RECEIPTS") {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{}", json!({
+            "case": case, "thread": thread, "args": args,
+            "exit_code": output.status.code(), "stdout": stdout, "stderr": stderr
+        }))
+        .unwrap();
+    }
+    assert!(
+        output.status.success(),
+        "collab {:?} failed: stdout={stdout} stderr={stderr}",
+        args
+    );
+    value.expect("public response is JSON")
+}
+
+#[test]
+fn protected_role_execute_observes_public_activity_at_delivery_without_restart() {
+    let fixture = relationship_fixture();
+    let receipt = fixture_receipt(&fixture, "no-restart-observation");
+    let peer = fixture.run_public(&["context"], THREAD_B);
+    let worker = peer["identity"]["worker_id"].as_str().unwrap();
+    let name = peer["identity"]["display_name"].as_str().unwrap();
+    assert_eq!(peer["work_roles"], json!([]));
+
+    fixture.observe_native_agent(worker, "online", "idle");
+    let published = publish(&fixture, "protected-positive", &[]);
+    assert_eq!(published["ticket"]["phases"][0]["slot"], name);
+    let board = fixture.run_public(&["board", "show"], THREAD_B);
+    let first = task(&board, "protected-positive");
+    assert_eq!(first["execute"]["status"], "claimed");
+    let revision = first["revision"].as_u64().unwrap().to_string();
+    let attempt = first["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let started = fixture.run_public(
+        &[
+            "task",
+            "start",
+            "protected-positive",
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &attempt,
+        ],
+        THREAD_B,
+    );
+    assert_eq!(started["task"]["execute"]["status"], "running");
+
+    fixture.observe_native_agent(worker, "online", "busy");
+    let published = fixture_public_receipt(
+        &fixture,
+        "publish-busy-queue",
+        &[
+            "board",
+            "publish",
+            "protected-busy-queue",
+            "--title",
+            "前端页面",
+            "--description",
+            "角色分工公开消费者",
+            "--delivery-condition",
+            "审查通过",
+            "--test-condition",
+            "公开入口断言",
+        ],
+        THREAD_A,
+    );
+    assert_eq!(published["ticket"]["phases"][0]["slot"], name);
+    assert_eq!(published["ticket"]["phases"][0]["status"], "queued");
+    let before_rejected_claim = fixture.current_state();
+    let board = fixture.run_public(&["board", "show"], THREAD_B);
+    let revision = task(&board, "protected-busy-queue")["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let error = rejected(
+        &fixture,
+        &[
+            "board",
+            "claim",
+            "protected-busy-queue",
+            "--expected-revision",
+            &revision,
+        ],
+        THREAD_B,
+    );
+    assert!(error.contains("TICKET_ADMISSION_SLOT_OCCUPIED"), "{error}");
+    let after_rejected_claim = fixture.current_state();
+    for id in ["protected-positive", "protected-busy-queue"] {
+        assert_eq!(
+            f7_execute_phase(&after_rejected_claim, id),
+            f7_execute_phase(&before_rejected_claim, id),
+            "rejected overlapping claim must not change Execute state for {id}"
+        );
+        assert_eq!(
+            after_rejected_claim["task_assignments"][id],
+            before_rejected_claim["task_assignments"][id]
+        );
+        assert_eq!(
+            after_rejected_claim["task_lifecycle"][id],
+            before_rejected_claim["task_lifecycle"][id]
+        );
+        assert_eq!(
+            f7_messages(
+                &after_rejected_claim,
+                &format!("ticket-claimed:{id}")
+            ),
+            f7_messages(&before_rejected_claim, &format!("ticket-claimed:{id}"))
+        );
+    }
+
+    let before_read_ms = chrono::Utc::now().timestamp_millis();
+    let before_delivery = fixture_public_receipt(
+        &fixture,
+        "before-delivery-worker-status",
+        &["worker", "status", worker],
+        THREAD_A,
+    );
+    let before_worker = before_delivery["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == worker)
+        .unwrap();
+    assert_eq!(before_worker["agent_state"], "idle", "{before_delivery}");
+    assert_eq!(
+        before_worker["transport_view"]["thread_state"], "idle",
+        "{before_delivery}"
+    );
+    let observed_ms = before_worker["transport_view"]["activity_observation"]["observed_ms"]
+        .as_i64()
+        .expect("public activity observation has observed_ms");
+    assert!(
+        (before_read_ms - observed_ms).abs() < 60_000,
+        "public activity sample is not fresh: read_ms={before_read_ms} observed_ms={observed_ms}"
+    );
+    let before_board = fixture_public_receipt(
+        &fixture,
+        "before-delivery-board",
+        &["board", "show"],
+        THREAD_B,
+    );
+    let queued = task(&before_board, "protected-busy-queue");
+    assert_eq!(queued["status"], "pending", "{before_board}");
+    assert!(queued["owner_name"].is_null(), "{before_board}");
+    assert!(
+        queued.get("execute").is_none(),
+        "public board unexpectedly exposes an unadmitted Execute row: {before_board}"
+    );
+
+    let delivered = fixture_public_receipt(
+        &fixture,
+        "deliver-first-running-task",
+        &[
+            "task",
+            "deliver",
+            "protected-positive",
+            "--evidence",
+            "no-restart delivery observation",
+            "--attempt",
+            &attempt,
+            "--no-candidate",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(delivered["status"], "delivered", "{delivered}");
+
+    let after_read_ms = chrono::Utc::now().timestamp_millis();
+    let after_delivery = fixture_public_receipt(
+        &fixture,
+        "after-delivery-worker-status",
+        &["worker", "status", worker],
+        THREAD_A,
+    );
+    let after_worker = after_delivery["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == worker)
+        .unwrap();
+    assert_eq!(after_worker["agent_state"], "idle", "{after_delivery}");
+    assert_eq!(
+        after_worker["transport_view"]["thread_state"], "idle",
+        "{after_delivery}"
+    );
+    let observed_ms = after_worker["transport_view"]["activity_observation"]["observed_ms"]
+        .as_i64()
+        .expect("post-delivery public activity observation has observed_ms");
+    assert!(
+        (after_read_ms - observed_ms).abs() < 60_000,
+        "post-delivery public activity sample is not fresh: read_ms={after_read_ms} observed_ms={observed_ms}"
+    );
+    let after_board = fixture_public_receipt(
+        &fixture,
+        "after-delivery-board",
+        &["board", "show"],
+        THREAD_B,
+    );
+    let queued = task(&after_board, "protected-busy-queue");
+    assert_eq!(queued["execute"]["status"], "claimed", "{after_board}");
+    assert_eq!(queued["owner_name"], name, "{after_board}");
+
+    let revision = queued["revision"].as_u64().unwrap().to_string();
+    let attempt = queued["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let started = fixture_public_receipt(
+        &fixture,
+        "start-queued-after-delivery",
+        &[
+            "task",
+            "start",
+            "protected-busy-queue",
+            "--expected-revision",
+            &revision,
+            "--attempt",
+            &attempt,
+        ],
+        THREAD_B,
+    );
+    assert_eq!(started["task"]["execute"]["status"], "running", "{started}");
+    fixture_teardown(fixture, receipt);
+}
+
+#[test]
+fn protected_role_execute_selects_ordinary_peer_and_preserves_busy_queue() {
+    let mut fixture = relationship_fixture();
+    let receipt = fixture_receipt(&fixture, "ordinary-and-busy");
+    let peer = fixture.run_public(&["context"], THREAD_B);
+    let worker = peer["identity"]["worker_id"].as_str().unwrap();
+    let name = peer["identity"]["display_name"].as_str().unwrap();
+    assert_eq!(peer["work_roles"], json!([]));
+    fixture.observe_native_agent(worker, "online", "idle");
+    let published = publish(&fixture, "protected-positive", &[]);
+    assert_eq!(published["ticket"]["phases"][0]["slot"], name);
+    let state = fixture.current_state();
+    let phase = f7_execute_phase(&state, "protected-positive");
+    // Idle publication claims through continuation in the same transaction.
+    assert_eq!(phase["status"], "claimed");
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let revision = task(&board, "protected-positive")["revision"].as_u64().unwrap().to_string();
+    let attempt = phase["attempt_generation"].as_u64().unwrap().to_string();
+    let started = fixture.run_public(&["task", "start", "protected-positive", "--expected-revision", &revision, "--attempt", &attempt], THREAD_B);
+    assert_eq!(started["task"]["execute"]["status"], "running");
+    fixture.observe_native_agent(worker, "online", "busy");
+    let before = fixture.current_state();
+    let queued = publish(&fixture, "protected-busy-queue", &[]);
+    assert_eq!(queued["ticket"]["phases"][0]["slot"], name);
+    let after = fixture.current_state();
+    assert_eq!(f7_execute_phase(&after, "protected-busy-queue")["status"], "queued");
+    f7_assert_no_execute_effects(&after, "protected-busy-queue");
+    assert_eq!(after["task_assignments"]["protected-positive"], before["task_assignments"]["protected-positive"]);
+    assert_eq!(f7_execute_phase(&after, "protected-positive"), f7_execute_phase(&before, "protected-positive"));
+    let revision = task(&fixture.run_public(&["board", "show"], THREAD_A), "protected-busy-queue")["revision"].as_u64().unwrap().to_string();
+    let before_rejected_claim = fixture.current_state();
+    let error = rejected(&fixture, &["board", "claim", "protected-busy-queue", "--expected-revision", &revision], THREAD_B);
+    assert!(error.contains("TICKET_ADMISSION_SLOT_OCCUPIED"), "{error}");
+    let after_rejected_claim = fixture.current_state();
+    for id in ["protected-positive", "protected-busy-queue"] {
+        assert_eq!(
+            f7_execute_phase(&after_rejected_claim, id),
+            f7_execute_phase(&before_rejected_claim, id),
+            "rejected overlapping claim must not change Execute attempts or status for {id}"
+        );
+        assert_eq!(
+            after_rejected_claim["task_assignments"][id],
+            before_rejected_claim["task_assignments"][id],
+            "rejected overlapping claim must not change assignment for {id}"
+        );
+        assert_eq!(
+            after_rejected_claim["task_lifecycle"][id],
+            before_rejected_claim["task_lifecycle"][id],
+            "rejected overlapping claim must not change lifecycle for {id}"
+        );
+        assert_eq!(
+            f7_messages(&after_rejected_claim, &format!("ticket-claimed:{id}")),
+            f7_messages(&before_rejected_claim, &format!("ticket-claimed:{id}")),
+            "rejected overlapping claim must not add claim notices for {id}"
+        );
+    }
+
+    // Activation invalidates restored activity. The next native observation
+    // makes this peer busy, so completion must leave the queue for the claim.
+    let previous_pid = receipt.1;
+    fixture.restart_daemon();
+    let previous = Command::new("ps")
+        .args(["-p", &previous_pid.to_string(), "-o", "pid="])
+        .output()
+        .unwrap();
+    assert!(previous.stdout.is_empty(), "prior owned serve child remains: {previous_pid}");
+    let receipt = fixture_receipt(&fixture, "ordinary-and-busy-after-restart");
+    fixture.observe_native_agent(worker, "online", "busy");
+    let released = fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "protected-positive",
+            "--evidence",
+            "release the first Execute phase",
+            "--attempt",
+            &attempt,
+            "--no-candidate",
+        ],
+        THREAD_B,
+    );
+    assert_eq!(released["status"], "delivered", "{released}");
+    let after_release = fixture.current_state();
+    let released_phase = f7_execute_phase(&after_release, "protected-positive");
+    assert!(!matches!(released_phase["status"].as_str(), Some("claimed" | "running")), "{released_phase}");
+    assert_eq!(f7_execute_phase(&after_release, "protected-busy-queue")["status"], "queued");
+
+    let board = fixture.run_public(&["board", "show"], THREAD_A);
+    let revision = task(&board, "protected-busy-queue")["revision"].as_u64().unwrap().to_string();
+    let claimed = fixture.run_public(
+        &["board", "claim", "protected-busy-queue", "--expected-revision", &revision],
+        THREAD_B,
+    );
+    assert_eq!(claimed["task"]["execute"]["status"], "claimed", "{claimed}");
+    assert_eq!(claimed["task"]["execute"]["attempt_generation"], 1, "{claimed}");
+    assert_eq!(claimed["task"]["owner_name"], name, "{claimed}");
+    let claimed_revision = claimed["task"]["revision"].as_u64().unwrap().to_string();
+    let claimed_attempt = claimed["task"]["execute"]["attempt_generation"].as_u64().unwrap().to_string();
+    let started = fixture.run_public(
+        &["task", "start", "protected-busy-queue", "--expected-revision", &claimed_revision, "--attempt", &claimed_attempt],
+        THREAD_B,
+    );
+    assert_eq!(started["task"]["execute"]["status"], "running", "{started}");
+    let after_second_start = fixture.current_state();
+    assert_eq!(f7_execute_phase(&after_second_start, "protected-busy-queue")["status"], "running");
+    fixture_teardown(fixture, receipt);
+}
+
+#[test]
+fn protected_role_execute_excludes_patrol_memory_and_explicit_pins() {
+    for role in ["patrol", "memory"] {
+        let fixture = relationship_fixture();
+        let receipt = fixture_receipt(&fixture, role);
+        let peer = fixture.run_public(&["context", "--work-roles", role], THREAD_B);
+        let worker = peer["identity"]["worker_id"].as_str().unwrap();
+        let name = peer["identity"]["display_name"].as_str().unwrap();
+        fixture.observe_native_agent(worker, "online", "idle");
+        for (id, flags) in [("protected-auto", vec![]), ("protected-pin", vec!["--executor", name])] {
+            let published = publish(&fixture, id, &flags);
+            assert_eq!(published["ticket"]["phases"][0]["status"], "waiting_assignment", "{published}");
+            assert!(published["ticket"]["phases"][0]["slot"].is_null());
+            let before = fixture.current_state();
+            let error = rejected(&fixture, &["board", "claim", id, "--expected-revision", "1"], THREAD_B);
+            assert!(error.contains("WORK_EXECUTOR_PROTECTED_ROLE"), "{error}");
+            let after = fixture.current_state();
+            f7_assert_no_execute_effects(&after, id);
+            assert_eq!(f7_execute_phase(&after, id), f7_execute_phase(&before, id));
+            assert_eq!(after["tasks"][id], before["tasks"][id]);
+        }
+        fixture_teardown(fixture, receipt);
+    }
+}
+
+#[test]
+fn protected_role_execute_alias_excludes_ordinary_publication_claim_dispatch_and_invite() {
+    for role in ["巡察者", "记忆 agent"] {
+        let fixture = relationship_fixture();
+        let receipt = fixture_receipt(&fixture, &format!("ordinary-alias-{role}"));
+        let peer = fixture.run_public(&["context", "--work-roles", role], THREAD_B);
+        let worker = peer["identity"]["worker_id"].as_str().unwrap();
+        let name = peer["identity"]["display_name"].as_str().unwrap();
+        fixture.observe_native_agent(worker, "online", "idle");
+
+        let id = format!("protected-alias-{role}");
+        let published = publish(&fixture, &id, &f7_publish_flags(&[]));
+        assert_eq!(
+            published["ticket"]["phases"][0]["status"],
+            "waiting_assignment",
+            "{published}"
+        );
+        assert!(published["ticket"]["phases"][0]["slot"].is_null());
+
+        let claim_id = format!("protected-alias-claim-{role}");
+        let published_plain = publish(&fixture, &claim_id, &[]);
+        assert_eq!(
+            published_plain["ticket"]["phases"][0]["status"],
+            "waiting_assignment",
+            "{published_plain}"
+        );
+        assert!(
+            published_plain["ticket"]["phases"][0]["slot"].is_null(),
+            "{published_plain}"
+        );
+        let claim_error = rejected(
+            &fixture,
+            &["board", "claim", &claim_id, "--expected-revision", "1"],
+            THREAD_B,
+        );
+        assert!(
+            claim_error.contains("WORK_EXECUTOR_PROTECTED_ROLE"),
+            "{claim_error}"
+        );
+        let invite_error = rejected(
+            &fixture,
+            &[
+                "board",
+                "invite",
+                &id,
+                "--to",
+                name,
+                "--expected-revision",
+                "1",
+            ],
+            THREAD_A,
+        );
+        assert!(
+            invite_error.contains("WORK_EXECUTOR_PROTECTED_ROLE"),
+            "{invite_error}"
+        );
+        let dispatch = fixture.run_public(
+            &["board", "dispatch", &id, "--expected-revision", "1"],
+            THREAD_A,
+        );
+        assert_eq!(dispatch["outcome"], "waiting", "{dispatch}");
+        let state = fixture.current_state();
+        assert!(state["board_details"][&id]["invitation"].is_null(), "{state}");
+        assert_eq!(
+            f7_execute_phase(&state, &id)["status"],
+            "waiting_assignment",
+            "{state}"
+        );
+        fixture_teardown(fixture, receipt);
+    }
+}
+
+#[test]
+fn non_master_cannot_publish_or_edit_a_protected_role_execute_exception() {
+    for role in ["巡察者", "记忆 agent"] {
+        let fixture = relationship_fixture();
+        let receipt = fixture_receipt(&fixture, &format!("peer-protected-policy-{role}"));
+        let peer = fixture.run_public(&["context", "--work-roles", role], THREAD_B);
+        let worker = peer["identity"]["worker_id"].as_str().unwrap();
+
+        for (id, flag) in [
+            (format!("peer-publish-role-{role}"), "--prefer-role"),
+            (format!("peer-publish-kind-{role}"), "--work-kind"),
+        ] {
+            let error = rejected(
+                &fixture,
+                &[
+                    "board",
+                    "publish",
+                    &id,
+                    "--title",
+                    "前端页面",
+                    "--description",
+                    "保护角色发布权限回归",
+                    "--delivery-condition",
+                    "审查通过",
+                    "--test-condition",
+                    "公开入口断言",
+                    flag,
+                    role,
+                ],
+                THREAD_B,
+            );
+            assert!(error.contains("BOARD_MASTER_REQUIRED"), "{error}");
+            assert!(fixture.current_state()["tasks"].get(&id).is_none());
+        }
+
+        let id = format!("peer-owned-policy-{role}");
+        let published = fixture.run_public(
+            &[
+                "board",
+                "publish",
+                &id,
+                "--title",
+                "前端页面",
+                "--description",
+                "普通 peer 自有任务",
+                "--delivery-condition",
+                "审查通过",
+                "--test-condition",
+                "公开入口断言",
+                "--work-kind",
+                "frontend",
+            ],
+            THREAD_B,
+        );
+        assert_eq!(published["task"]["status"], "pending", "{published}");
+        assert_eq!(fixture.current_state()["tasks"][&id]["owner"], worker);
+
+        for (flag, value) in [("--prefer-role", role), ("--work-kind", role)] {
+            let error = rejected(
+                &fixture,
+                &[
+                    "board",
+                    "policy",
+                    "--scope",
+                    "task",
+                    "--id",
+                    &id,
+                    flag,
+                    value,
+                    "--expected-revision",
+                    "1",
+                ],
+                THREAD_B,
+            );
+            assert!(error.contains("BOARD_MASTER_REQUIRED"), "{error}");
+            let state = fixture.current_state();
+            assert_eq!(state["board_details"][&id]["revision"], 1, "{state}");
+            assert!(
+                !state["board_details"][&id]["work_policy"]["preferred_roles"]
+                    .as_array()
+                    .is_some_and(|roles| roles.iter().any(|candidate| candidate == role)),
+                "{state}"
+            );
+            assert_ne!(
+                state["board_details"][&id]["work_policy"]["work_kind"],
+                role,
+                "{state}"
+            );
+        }
+        fixture.run_public(
+            &[
+                "board",
+                "policy",
+                "--scope",
+                "project",
+                "--work-kind",
+                "protected-default",
+                "--prefer-role",
+                role,
+            ],
+            THREAD_A,
+        );
+        let inherited_id = format!("peer-publish-inherited-{role}");
+        let error = rejected(
+            &fixture,
+            &[
+                "board",
+                "publish",
+                &inherited_id,
+                "--title",
+                "前端页面",
+                "--description",
+                "继承保护角色的发布权限回归",
+                "--delivery-condition",
+                "审查通过",
+                "--test-condition",
+                "公开入口断言",
+                "--work-kind",
+                "protected-default",
+            ],
+            THREAD_B,
+        );
+        assert!(error.contains("BOARD_MASTER_REQUIRED"), "{error}");
+        assert!(fixture.current_state()["tasks"].get(&inherited_id).is_none());
+        fixture_teardown(fixture, receipt);
+    }
+}
+
+#[test]
+fn protected_role_execute_alias_authorized_task_dispatches_accepts_and_claims() {
+    for (role, preferred_role) in [("巡察者", "patrol"), ("记忆 agent", "memory")] {
+        let fixture = relationship_fixture();
+        let receipt = fixture_receipt(&fixture, &format!("authorized-alias-{role}"));
+        let peer = fixture.run_public(&["context", "--work-roles", role], THREAD_B);
+        let worker = peer["identity"]["worker_id"].as_str().unwrap();
+        let name = peer["identity"]["display_name"].as_str().unwrap();
+        fixture.observe_native_agent(worker, "online", "idle");
+
+        let id = format!("protected-authorized-{role}");
+        let published = publish(
+            &fixture,
+            &id,
+            &f7_publish_flags(&[
+                "--prefer-role",
+                preferred_role,
+                "--work-kind",
+                "maintenance",
+            ]),
+        );
+        assert_eq!(
+            published["ticket"]["phases"][0]["status"],
+            "waiting_assignment",
+            "{published}"
+        );
+
+        let dispatched = fixture.run_public(
+            &["board", "dispatch", &id, "--expected-revision", "1"],
+            THREAD_A,
+        );
+        assert_eq!(dispatched["task"]["invited_peer"], worker, "{dispatched}");
+        let invitation_revision = dispatched["task"]["revision"].as_u64().unwrap().to_string();
+        let accepted = fixture.run_public(
+            &[
+                "board",
+                "respond",
+                &id,
+                "--accept",
+                "--expected-revision",
+                &invitation_revision,
+            ],
+            THREAD_B,
+        );
+        assert_eq!(accepted["task"]["owner_name"], name, "{accepted}");
+        assert_eq!(accepted["task"]["execute"]["status"], "claimed", "{accepted}");
+        let revision = accepted["task"]["revision"].as_u64().unwrap().to_string();
+        let updated = fixture.run_public(
+            &[
+                "board",
+                "policy",
+                "--scope",
+                "task",
+                "--id",
+                &id,
+                "--work-kind",
+                "maintenance",
+                "--expected-revision",
+                &revision,
+            ],
+            THREAD_B,
+        );
+        assert_eq!(updated["task"]["owner_name"], name, "{updated}");
+        assert_eq!(updated["task"]["execute"]["status"], "claimed", "{updated}");
+        assert_eq!(
+            fixture.current_state()["board_details"][&id]["work_policy"]["protected_role_authorized"],
+            true
+        );
+        let revision = updated["task"]["revision"].as_u64().unwrap().to_string();
+        let attempt = accepted["task"]["execute"]["attempt_generation"]
+            .as_u64()
+            .unwrap()
+            .to_string();
+        let started = fixture.run_public(
+            &[
+                "task",
+                "start",
+                &id,
+                "--expected-revision",
+                &revision,
+                "--attempt",
+                &attempt,
+            ],
+            THREAD_B,
+        );
+        assert_eq!(started["task"]["execute"]["status"], "running", "{started}");
+        fixture_teardown(fixture, receipt);
+    }
+}
+
+#[test]
+fn protected_role_execute_rechecks_current_roles_without_unrelated_side_effects() {
+    for role in ["patrol", "memory"] {
+        let fixture = relationship_fixture();
+        let receipt = fixture_receipt(&fixture, &format!("stale-{role}"));
+        let alice = fixture.run_public(&["context"], THREAD_B);
+        let bob = fixture.run_public(&["context"], THREAD_C);
+        let alice_worker = alice["identity"]["worker_id"].as_str().unwrap();
+        let bob_worker = bob["identity"]["worker_id"].as_str().unwrap();
+        let alice_name = alice["identity"]["display_name"].as_str().unwrap();
+        let bob_name = bob["identity"]["display_name"].as_str().unwrap();
+        fixture.observe_native_agent(bob_worker, "online", "idle");
+        publish(&fixture, "protected-unrelated", &["--executor", bob_name]);
+        fixture.observe_native_agent(alice_worker, "online", "busy");
+        let queued = publish(&fixture, "protected-stale", &["--executor", alice_name]);
+        assert_eq!(queued["ticket"]["phases"][0]["status"], "queued");
+        fixture.run_public(&["context", "--work-roles", role], THREAD_B);
+        fixture.observe_native_agent(alice_worker, "online", "idle");
+        let before = fixture.current_state();
+        assert!(!before["task_assignments"]["protected-unrelated"].is_null());
+        let revision = task(&fixture.run_public(&["board", "show"], THREAD_A), "protected-stale")["revision"].as_u64().unwrap().to_string();
+        let error = rejected(&fixture, &["board", "claim", "protected-stale", "--expected-revision", &revision], THREAD_B);
+        assert!(error.contains("WORK_EXECUTOR_PROTECTED_ROLE"), "{error}");
+        let after = fixture.current_state();
+        f7_assert_no_execute_effects(&after, "protected-stale");
+        assert_eq!(f7_execute_phase(&after, "protected-stale"), f7_execute_phase(&before, "protected-stale"));
+        for key in ["tasks", "board_details", "task_assignments", "task_lifecycle"] {
+            assert_eq!(after[key]["protected-unrelated"], before[key]["protected-unrelated"], "{key}");
+        }
+        assert_eq!(f7_execute_phase(&after, "protected-unrelated"), f7_execute_phase(&before, "protected-unrelated"));
+        assert_eq!(after["resources"], before["resources"]);
+        fixture_teardown(fixture, receipt);
+    }
 }
 
 #[test]
@@ -2309,6 +3041,7 @@ fn waiting_assignment_rework_preserves_schedule_when_old_owner_is_retired() {
 #[test]
 fn publish_admits_ticket_to_shortest_slot_queue_and_rotates_on_ties() {
     let fixture = AppFixture::new();
+    let receipt = fixture_receipt(&fixture, "queue-rotation");
     fixture.run_public(&["context"], THREAD_A);
     fixture.run_public(&["context"], THREAD_B);
     fixture.run_public(&["context"], THREAD_C);
@@ -2363,6 +3096,7 @@ fn publish_admits_ticket_to_shortest_slot_queue_and_rotates_on_ties() {
         persisted["ticket_rotation"]["execute:generic"], peers[0],
         "{persisted}"
     );
+    fixture_teardown(fixture, receipt);
 }
 
 #[test]
@@ -5612,5 +6346,82 @@ fn reassignment_accept_while_executor_slot_already_running_leaves_two_active_exe
     assert_eq!(
         first_after_start["status"], "running",
         "the first ticket stays running while the reassigned ticket starts: {first_after_start:#?}"
+    );
+}
+
+#[test]
+fn publish_and_deliver_auto_claims_deliver_ticket_claim_wakes_immediately() {
+    let fixture = relationship_fixture();
+    let peer = fixture.run_public(&["context"], THREAD_B);
+    let worker = peer["identity"]["worker_id"].as_str().unwrap();
+
+    fixture.observe_native_agent(worker, "online", "idle");
+    let published = publish(&fixture, "claim-wake-first", &[]);
+    assert_eq!(published["ticket"]["phases"][0]["status"], "claimed", "{published}");
+    let board = fixture.run_public(&["board", "show"], THREAD_B);
+    let first = task(&board, "claim-wake-first");
+    let first_attempt = first["execute"]["attempt_generation"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let first_revision = first["revision"].as_u64().unwrap().to_string();
+
+    let after_publish = fixture.current_state();
+    let first_wakes = f7_messages(&after_publish, "ticket-claimed:claim-wake-first");
+    assert_eq!(first_wakes.len(), 1, "{after_publish}");
+    let first_msg_id = first_wakes[0]["id"].as_str().unwrap();
+    assert_eq!(
+        first_wakes[0]["wake_attempt_count"], 1,
+        "board publish auto-claim must attempt delivery immediately: {first_wakes:#?}"
+    );
+    assert!(
+        after_publish["notification_delivery_accepted"]
+            .get(first_msg_id)
+            .is_some(),
+        "board publish ticket-claim-* must receive transport delivery acceptance: {after_publish}"
+    );
+
+    fixture.run_public(
+        &[
+            "task",
+            "start",
+            "claim-wake-first",
+            "--expected-revision",
+            &first_revision,
+            "--attempt",
+            &first_attempt,
+        ],
+        THREAD_B,
+    );
+    let second = publish(&fixture, "claim-wake-second", &[]);
+    assert_eq!(second["ticket"]["phases"][0]["status"], "queued", "{second}");
+
+    fixture.run_public(
+        &[
+            "task",
+            "deliver",
+            "claim-wake-first",
+            "--evidence",
+            "first done cleanly",
+            "--attempt",
+            &first_attempt,
+            "--no-candidate",
+        ],
+        THREAD_B,
+    );
+
+    let after_deliver = fixture.current_state();
+    let second_wakes = f7_messages(&after_deliver, "ticket-claimed:claim-wake-second");
+    assert_eq!(second_wakes.len(), 1, "{after_deliver}");
+    let second_msg_id = second_wakes[0]["id"].as_str().unwrap();
+    assert_eq!(
+        second_wakes[0]["wake_attempt_count"], 1,
+        "task deliver continuation auto-claim must attempt delivery immediately: {second_wakes:#?}"
+    );
+    assert!(
+        after_deliver["notification_delivery_accepted"]
+            .get(second_msg_id)
+            .is_some(),
+        "task deliver ticket-claim-* must receive transport delivery acceptance: {after_deliver}"
     );
 }

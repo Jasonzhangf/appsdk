@@ -102,6 +102,10 @@ pub(crate) struct BindingValue {
     pub(crate) physical_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) layout_binding_id: Option<String>,
+    /// Rex layout observed when this control record was registered. This is
+    /// restore input only; delivery and liveness continue to use `transport`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rex_layout: Option<crate::proto::RexLayoutAssociation>,
     /// Daemon-verified owner process of the current Rex execution. The
     /// project, app, agent session and endpoint come from this same value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -338,7 +342,7 @@ pub(crate) struct BindingHost {
 }
 
 impl BindingValue {
-    pub(crate) fn new(binding: RuntimeBinding, transport: SelectedTransport) -> Self {
+    pub(crate) fn new(binding: RuntimeBinding, mut transport: SelectedTransport) -> Self {
         let tab_id = LogicalTab {
             project_scope: binding.project_scope.clone(),
             app_scope_id: binding.app_scope_id.clone(),
@@ -351,6 +355,10 @@ impl BindingValue {
             crate::proto::TransportKind::Rex => "rex",
         }
         .to_owned();
+        let rex_layout = transport
+            .rex_endpoint
+            .as_mut()
+            .and_then(|endpoint| endpoint.layout_association.take());
         Self {
             invocation_cwd: binding.project_scope.as_str().to_owned(),
             binding,
@@ -363,6 +371,7 @@ impl BindingValue {
             },
             physical_name: None,
             layout_binding_id: None,
+            rex_layout,
             rex_execution: None,
             rex_execution_fence: None,
             legacy_registration_number: None,
@@ -458,6 +467,39 @@ impl BindingValue {
                 ));
             }
         }
+        if let Some(layout) = self.rex_layout.as_ref() {
+            layout.validate().map_err(|reason| {
+                SlotError::Invariant(format!("Rex layout association: {reason}"))
+            })?;
+            let endpoint = self
+                .transport
+                .as_ref()
+                .filter(|transport| transport.kind == crate::proto::TransportKind::Rex)
+                .and_then(|transport| transport.rex_endpoint.as_ref())
+                .ok_or_else(|| {
+                    SlotError::Invariant("Rex layout association requires a Rex endpoint".into())
+                })?;
+            if layout.server != endpoint.server
+                || layout.session_id != endpoint.session_id
+                || layout.block_id != endpoint.block_id
+                || layout.instance_id != endpoint.instance_id
+                || Some(layout.host_id.as_str()) != endpoint.host_id.as_deref()
+            {
+                return Err(SlotError::Invariant(
+                    "Rex layout association differs from the selected endpoint".into(),
+                ));
+            }
+            if self.host.profile.as_deref().is_none_or(str::is_empty) {
+                return Err(SlotError::Invariant(
+                    "Rex layout association requires a typed Codex profile".into(),
+                ));
+            }
+            if self.binding.session_id.is_none() {
+                return Err(SlotError::Invariant(
+                    "Rex layout association requires an agent session".into(),
+                ));
+            }
+        }
         self.binding
             .validate()
             .map_err(|error| SlotError::Invalid(error.to_string()))
@@ -524,6 +566,7 @@ impl BindingValue {
             && self.invocation_cwd == other.invocation_cwd
             && self.physical_name == other.physical_name
             && self.layout_binding_id == other.layout_binding_id
+            && self.rex_layout == other.rex_layout
             && self.rex_execution == other.rex_execution
             && self.rex_execution_fence == other.rex_execution_fence
     }

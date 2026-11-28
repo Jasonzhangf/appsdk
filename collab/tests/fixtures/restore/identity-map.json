@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "slots": [
+    {
+      "identity_key": {
+        "project_scope": "@PROJECT@",
+        "app_scope_id": "appserver-cli",
+        "name": "Alice"
+      },
+      "display_slot": 2,
+      "identity_status": "active",
+      "generation": 1,
+      "current": {
+        "binding": {
+          "project_scope": "@PROJECT@",
+          "app_scope_id": "appserver-cli",
+          "agent_id": "collab-restore-fixture",
+          "runtime_id": "runtime-rex-collab-restore-fixture",
+          "binding_id": "binding-collab-restore-fixture",
+          "session_id": "10000000-0000-0000-0000-000000000001"
+        },
+        "transport": {
+          "kind": "rex",
+          "session_id": "10000000-0000-0000-0000-000000000001",
+          "rex_endpoint": {
+            "server": "unix:///fixture/rex.sock",
+            "session_id": "session:20000000-0000-0000-0000-000000000001",
+            "block_id": "block:20000000-0000-0000-0000-000000000002",
+            "host_id": "fixture-host",
+            "instance_id": "fixture-instance",
+            "cwd": "@PROJECT@"
+          },
+          "capabilities": [
+            "send_message_to_block",
+            "observe_current",
+            "events"
+          ],
+          "self_check": "official Rex server.status, session.list and session.list_blocks passed"
+        },
+        "tab_id": {
+          "project_scope": "@PROJECT@",
+          "app_scope_id": "appserver-cli"
+        },
+        "host": {
+          "agent_kind": "codex",
+          "host_type": "rex",
+          "profile": "gcm"
+        },
+        "invocation_cwd": "@PROJECT@",
+        "physical_name": null,
+        "rex_layout": {
+          "server": "unix:///fixture/rex.sock",
+          "instance_id": "fixture-instance",
+          "host_id": "fixture-host",
+          "session_id": "session:20000000-0000-0000-0000-000000000001",
+          "session_revision": 3,
+          "active_window": true,
+          "window_id": "window:20000000-0000-0000-0000-000000000003",
+          "window_index": 0,
+          "window_label": "CodexAgent",
+          "focused": true,
+          "block_id": "block:20000000-0000-0000-0000-000000000002",
+          "block_label": "shell",
+          "block_flavor": "com.superlogical.terminal.shell",
+          "block_host_id": "fixture-host",
+          "layer_id": "layer:20000000-0000-0000-0000-000000000004",
+          "layer_kind": "tiled",
+          "layer_bounds": [
+            0,
+            0,
+            1,
+            1
+          ],
+          "layer_state": null,
+          "layout": {
+            "rect": [
+              0,
+              0,
+              1,
+              1
+            ],
+            "block_id": "block:20000000-0000-0000-0000-000000000002"
+          }
+        }
+      },
+      "previous": null
+    }
+  ],
+  "effects": []
+}

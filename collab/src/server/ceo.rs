@@ -731,7 +731,7 @@ impl ProjectRuntimeManager {
         let notification = if deduplicated {
             NotificationAttempt::NotAttempted("identical reply already durable".into())
         } else if let Some(sub) = &subscription {
-            attempt_notification_detailed_with_at(target, &mid, &sub.id, now_ms())
+            attempt_notification_detailed_with_rex_recovery(target, &mid, &sub.id, now_ms())
         } else {
             NotificationAttempt::NotAttempted("no notification subscription".into())
         };

@@ -5,7 +5,10 @@
 //! The daemon owns binding selection, event-task lifecycle, and state projection.
 
 use crate::client::adapters::NotificationDeliveryClass;
-use crate::proto::{RexCandidate, RexEndpoint, SelectedTransport, TransportKind};
+use crate::proto::{
+    RestoreCarrier, RestoreCleanup, RestoreFailure, RexCandidate, RexEndpoint,
+    RexLayoutAssociation, RexLayoutNode, SelectedTransport, TransportKind,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fmt;
@@ -73,6 +76,10 @@ fn official_cli_path() -> String {
     #[cfg(test)]
     if let Some(path) = test_cli() {
         return path.to_string_lossy().into_owned();
+    }
+    #[cfg(feature = "lifecycle-test-hooks")]
+    if let Some(path) = std::env::var_os("COLLAB_TEST_REX_CLI") {
+        return PathBuf::from(path).to_string_lossy().into_owned();
     }
     #[cfg(target_os = "macos")]
     {
@@ -177,8 +184,36 @@ pub struct RexWriteReceipt {
 pub struct RexProcessObservation {
     pub pid: Option<u64>,
     pub name: Option<String>,
+    #[serde(default)]
+    pub argv0: Option<String>,
     pub path: Option<String>,
     pub cwd: Option<String>,
+}
+
+impl RexProcessObservation {
+    pub(crate) fn matches_owner(&self, owner: &RexProgramStatusOwner) -> bool {
+        if self.pid != Some(owner.pid) {
+            return false;
+        }
+        let owner_name = owner.name.trim();
+        let owner_base = crate::host_runtime::strip_old_update_suffix(owner_name);
+        self.name.as_deref().map(str::trim).is_some_and(|name| {
+            name == owner_name || crate::host_runtime::strip_old_update_suffix(name) == owner_base
+        }) || self
+            .argv0
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|argv0| argv0 == owner_name || argv0 == owner_base)
+    }
+
+    pub(crate) fn agent_kind(&self) -> Option<crate::host_runtime::AgentKind> {
+        let chain = [self.name.as_deref(), self.argv0.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        crate::host_runtime::classify_nearest_agent(chain)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,20 +253,27 @@ pub struct RexObservation {
 }
 
 impl RexObservation {
-    /// Extract the one foreground Codex owner only when all current terminal
+    /// Extract the one foreground TUI agent owner only when all requested terminal
     /// sources are complete and the program-status owner matches foreground.
-    pub(crate) fn current_foreground_codex_owner(&self) -> Result<RexProgramStatusOwner, String> {
+    fn current_foreground_agent_record(
+        &self,
+        expected: Option<crate::host_runtime::AgentKind>,
+        required_sources: &[&str],
+    ) -> Result<
+        (
+            crate::host_runtime::AgentKind,
+            &RexProgramStatusRecord,
+            RexProgramStatusOwner,
+        ),
+        String,
+    > {
         if self.gap_possible || !self.source_errors.is_empty() {
             return Err(format!(
                 "REX_EXECUTION_UNVERIFIED: current Rex observation has source gaps: {}",
                 self.source_errors.join("; ")
             ));
         }
-        for required in [
-            "com.superlogical.terminal.process",
-            "com.superlogical.terminal.pwd",
-            "com.superlogical.terminal.program_status",
-        ] {
+        for required in required_sources {
             if !self.sources.iter().any(|source| source == required) {
                 return Err(format!(
                     "REX_EXECUTION_UNVERIFIED: current Rex observation is missing {required}"
@@ -251,25 +293,79 @@ impl RexObservation {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .ok_or_else(|| "REX_EXECUTION_UNVERIFIED: Rex foreground name is missing".to_owned())?;
-        if !crate::host_runtime::is_codex_command(name) {
-            return Err(format!(
-                "REX_EXECUTION_UNVERIFIED: Rex foreground is not Codex ({name})"
-            ));
-        }
+        let detected = process.agent_kind();
+        let kind = match (expected, detected) {
+            (Some(want), Some(got)) if want == got => want,
+            (Some(want), _) => {
+                return Err(format!(
+                    "REX_EXECUTION_UNVERIFIED: Rex foreground is not {} ({name})",
+                    want.display_name()
+                ));
+            }
+            (None, Some(got)) => got,
+            (None, None) => {
+                return Err(format!(
+                    "REX_EXECUTION_UNVERIFIED: Rex foreground is not a supported agent ({name})"
+                ));
+            }
+        };
+        let _ = pid;
         self.program_status
             .iter()
             .find(|record| {
-                record.app.as_deref() == Some("codex")
+                record.app.as_deref() == Some(kind.rex_program_app())
                     && record
                         .owner
                         .as_ref()
-                        .is_some_and(|owner| owner.pid == pid && owner.name == name)
+                        .is_some_and(|owner| process.matches_owner(owner))
             })
-            .and_then(|record| record.owner.clone())
+            .and_then(|record| record.owner.clone().map(|owner| (kind, record, owner)))
             .ok_or_else(|| {
-                "REX_EXECUTION_UNVERIFIED: Codex program_status owner does not match the Rex foreground"
-                    .to_owned()
+                format!(
+                    "REX_EXECUTION_UNVERIFIED: {} program_status owner does not match the Rex foreground",
+                    kind.display_name()
+                )
             })
+    }
+
+    pub(crate) fn current_foreground_agent_owner(
+        &self,
+        expected: Option<crate::host_runtime::AgentKind>,
+    ) -> Result<(crate::host_runtime::AgentKind, RexProgramStatusOwner), String> {
+        let (kind, _, owner) = self.current_foreground_agent_record(
+            expected,
+            &[
+                "com.superlogical.terminal.process",
+                "com.superlogical.terminal.pwd",
+                "com.superlogical.terminal.program_status",
+            ],
+        )?;
+        Ok((kind, owner))
+    }
+
+    fn deliverable_foreground_agent_owner(
+        &self,
+        expected: Option<crate::host_runtime::AgentKind>,
+    ) -> Result<(crate::host_runtime::AgentKind, RexProgramStatusOwner), String> {
+        let (kind, record, owner) = self.current_foreground_agent_record(
+            expected,
+            &[
+                "com.superlogical.terminal.process",
+                "com.superlogical.terminal.program_status",
+            ],
+        )?;
+        let normalized_state = record
+            .state
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase);
+        if let Some(state @ ("blocked" | "error")) = normalized_state.as_deref() {
+            return Err(format!(
+                "REX_EXECUTION_UNVERIFIED: {} foreground state is {state}; refusing terminal input",
+                kind.display_name()
+            ));
+        }
+        Ok((kind, owner))
     }
 }
 
@@ -393,6 +489,28 @@ async fn run_cli(
         command,
         stdin_body,
         StdoutCapture::All,
+        false,
+    )
+    .await
+}
+
+async fn run_cli_isolated(
+    operation: &'static str,
+    cli_path: &Path,
+    server: &str,
+    deadline: Instant,
+    command: &[String],
+    stdin_body: Option<String>,
+) -> Result<CompletedCall, RexError> {
+    run_cli_with_capture(
+        operation,
+        cli_path,
+        server,
+        deadline,
+        command,
+        stdin_body,
+        StdoutCapture::All,
+        true,
     )
     .await
 }
@@ -414,6 +532,7 @@ async fn run_cli_tail(
         command,
         stdin_body,
         StdoutCapture::LastLines(lines),
+        false,
     )
     .await
 }
@@ -434,6 +553,7 @@ async fn run_cli_with_capture(
     command: &[String],
     stdin_body: Option<String>,
     stdout_capture: StdoutCapture,
+    isolated_process_group: bool,
 ) -> Result<CompletedCall, RexError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -459,6 +579,58 @@ async fn run_cli_with_capture(
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped())
     .kill_on_drop(true);
+    if isolated_process_group {
+        cmd.process_group(0);
+    }
+
+    #[cfg(feature = "lifecycle-test-hooks")]
+    if operation == "session.create" {
+        if let Some(fd) = std::env::var_os("COLLAB_TEST_REX_LIFETIME_FD") {
+            let fd = fd
+                .to_string_lossy()
+                .parse::<libc::c_int>()
+                .expect("fixture lifetime fd is an integer");
+            unsafe {
+                cmd.pre_exec(move || {
+                    let pid = libc::getpid();
+                    let bytes = pid.to_ne_bytes();
+                    let mut sent = 0;
+                    while sent < bytes.len() {
+                        let written =
+                            libc::write(fd, bytes[sent..].as_ptr().cast(), bytes.len() - sent);
+                        if written < 0 {
+                            if std::io::Error::last_os_error().kind()
+                                == std::io::ErrorKind::Interrupted
+                            {
+                                continue;
+                            }
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        sent += written as usize;
+                    }
+                    let mut acknowledged = [0_u8; 1];
+                    loop {
+                        let read = libc::read(fd, acknowledged.as_mut_ptr().cast(), 1);
+                        if read == 1 {
+                            break;
+                        }
+                        if read < 0 {
+                            let error = std::io::Error::last_os_error();
+                            if error.raw_os_error() == Some(libc::EINTR) {
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                        return Err(std::io::Error::from_raw_os_error(libc::EPIPE));
+                    }
+                    if acknowledged[0] != b'a' {
+                        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
 
     if Instant::now() >= deadline {
         return Err(RexError::known_not_delivered(
@@ -834,6 +1006,148 @@ fn parse_json_call(operation: &'static str, call: &CompletedCall) -> Result<Valu
     })
 }
 
+fn capture_layout_from_view(
+    view: &Value,
+    endpoint: &RexEndpoint,
+) -> Result<RexLayoutAssociation, RexError> {
+    let malformed = |detail: &str| {
+        RexError::known_not_delivered(
+            "session.view",
+            RexInputStage::BeforeWrite,
+            format!("REX_LAYOUT_MALFORMED: {detail}"),
+        )
+    };
+    let object = view
+        .as_object()
+        .ok_or_else(|| malformed("session.view response is not an object"))?;
+    if object.get("session_id").and_then(Value::as_str) != Some(endpoint.session_id.as_str()) {
+        return Err(malformed("session.view identifies a different session"));
+    }
+    let session_revision = object
+        .get("revision")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| malformed("session revision is missing"))?;
+    let active_window_id = object.get("active_window_id").and_then(Value::as_str);
+    let windows = object
+        .get("windows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| malformed("windows array is missing"))?;
+
+    let mut matches = Vec::new();
+    for (window_index, window) in windows.iter().enumerate() {
+        let layers = window
+            .get("layers")
+            .and_then(Value::as_array)
+            .ok_or_else(|| malformed("window layers array is missing"))?;
+        for layer in layers {
+            let blocks = layer
+                .get("blocks")
+                .and_then(Value::as_array)
+                .ok_or_else(|| malformed("layer blocks array is missing"))?;
+            for block in blocks {
+                if block.get("block_id").and_then(Value::as_str) == Some(endpoint.block_id.as_str())
+                {
+                    matches.push((window_index, window.clone(), layer.clone(), block.clone()));
+                }
+            }
+        }
+    }
+    if matches.is_empty() {
+        return Err(RexError::known_not_delivered(
+            "session.view",
+            RexInputStage::BeforeWrite,
+            "REX_LAYOUT_TARGET_ABSENT: candidate Rex block is not placed in a window",
+        ));
+    }
+    if matches.len() != 1 {
+        return Err(RexError::known_not_delivered(
+            "session.view",
+            RexInputStage::BeforeWrite,
+            "REX_LAYOUT_TARGET_AMBIGUOUS: candidate Rex block has more than one window placement",
+        ));
+    }
+    let (window_index, window, layer, block) = matches.pop().expect("one exact Rex block match");
+    let required_string = |value: &Value, field: &str| {
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|field_value| !field_value.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| malformed(format!("{field} is missing").as_str()))
+    };
+    let creator_name = required_string(&block, "creator_name")?;
+    if creator_name != TERMINAL_CREATOR {
+        return Err(malformed("candidate block has a non-terminal creator"));
+    }
+    let window_id = required_string(&window, "window_id")?;
+    let block_label = required_string(&block, "label")?;
+    let block_flavor = required_string(&block, "flavor")?;
+    let block_host_id = required_string(&block, "host_id")?;
+    let host_id = endpoint
+        .host_id
+        .clone()
+        .ok_or_else(|| malformed("Rex endpoint host_id is missing"))?;
+    if block_host_id != host_id {
+        return Err(malformed(
+            "candidate block host differs from the Rex endpoint host",
+        ));
+    }
+    let layer_kind = required_string(&layer, "kind")?;
+    let layer_bounds = layer
+        .get("bounds")
+        .cloned()
+        .ok_or_else(|| malformed("layer bounds are missing"))
+        .and_then(|value| {
+            serde_json::from_value::<[serde_json::Number; 4]>(value)
+                .map_err(|_| malformed("layer bounds must contain four numbers"))
+        })?;
+    let layout = layer
+        .get("layout")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .ok_or_else(|| malformed("layer layout tree is missing"))
+        .and_then(|value| {
+            serde_json::from_value::<RexLayoutNode>(value)
+                .map_err(|_| malformed("layer layout tree is malformed"))
+        })?;
+    let layout_association = RexLayoutAssociation {
+        server: endpoint.server.clone(),
+        instance_id: endpoint.instance_id.clone(),
+        host_id,
+        session_id: endpoint.session_id.clone(),
+        session_revision,
+        active_window: active_window_id == Some(window_id.as_str()),
+        window_id: window_id.clone(),
+        window_index: u32::try_from(window_index)
+            .map_err(|_| malformed("window order is out of range"))?,
+        window_label: window
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        focused: window.get("focused_block_id").and_then(Value::as_str)
+            == Some(endpoint.block_id.as_str()),
+        block_id: endpoint.block_id.clone(),
+        block_label,
+        block_flavor,
+        block_host_id,
+        layer_id: layer
+            .get("layer_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        layer_kind,
+        layer_bounds,
+        layer_state: layer
+            .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        layout,
+    };
+    layout_association
+        .validate()
+        .map_err(|detail| malformed(&detail))?;
+    Ok(layout_association)
+}
+
 #[derive(Debug, Clone)]
 struct CompletedCall {
     status: std::process::ExitStatus,
@@ -933,7 +1247,37 @@ pub async fn verify_candidate(
     candidate: &RexCandidate,
     agent_session_id: &str,
 ) -> Result<SelectedTransport, RexError> {
-    let deadline = Instant::now() + default_timeout()?;
+    verify_candidate_until(
+        candidate,
+        agent_session_id,
+        Instant::now() + default_timeout()?,
+        false,
+    )
+    .await
+}
+
+/// Verify the public save boundary for a restorable Rex association. Callers
+/// must opt in: ordinary registration and notification repair use
+/// `verify_candidate`, which only proves the block/session address.
+pub async fn verify_restorable_candidate(
+    candidate: &RexCandidate,
+    agent_session_id: &str,
+) -> Result<SelectedTransport, RexError> {
+    verify_candidate_until(
+        candidate,
+        agent_session_id,
+        Instant::now() + default_timeout()?,
+        true,
+    )
+    .await
+}
+
+async fn verify_candidate_until(
+    candidate: &RexCandidate,
+    agent_session_id: &str,
+    deadline: Instant,
+    capture_restore_layout: bool,
+) -> Result<SelectedTransport, RexError> {
     validate_target_fields(
         &candidate.server,
         &candidate.session_id,
@@ -972,15 +1316,32 @@ pub async fn verify_candidate(
                 "Rex service did not provide its instance_id",
             )
         })?;
-    let endpoint = RexEndpoint {
+    let mut endpoint = RexEndpoint {
         server: candidate.server.clone(),
         session_id: candidate.session_id.clone(),
         block_id: candidate.block_id.clone(),
         host_id,
         instance_id,
         cwd: candidate.cwd.clone(),
+        layout_association: None,
     };
     resolve_target_until(&endpoint, deadline).await?;
+    if capture_restore_layout {
+        let view_call = run_cli(
+            "session.view",
+            Path::new(&official_cli_path()),
+            &endpoint.server,
+            deadline,
+            &api_call_argv("session.view", Some(&endpoint.session_id)),
+            Some(
+                serde_json::to_string(&json!({"session_id": endpoint.session_id}))
+                    .expect("session.view JSON"),
+            ),
+        )
+        .await?;
+        let view = parse_json_call("session.view", &view_call)?;
+        endpoint.layout_association = Some(capture_layout_from_view(&view, &endpoint)?);
+    }
     Ok(SelectedTransport {
         kind: TransportKind::Rex,
         endpoint: None,
@@ -1131,15 +1492,18 @@ async fn verify_service_until(endpoint: &RexEndpoint, deadline: Instant) -> Resu
 }
 
 pub async fn write_text(endpoint: &RexEndpoint, text: &str) -> Result<RexWriteReceipt, RexError> {
-    write_text_until(endpoint, text, Instant::now() + default_timeout()?).await
+    write_text_inner(endpoint, text, Instant::now() + default_timeout()?, true).await
 }
 
-async fn write_text_until(
+async fn write_text_inner(
     endpoint: &RexEndpoint,
     text: &str,
     deadline: Instant,
+    verify_service: bool,
 ) -> Result<RexWriteReceipt, RexError> {
-    verify_service_until(endpoint, deadline).await?;
+    if verify_service {
+        verify_service_until(endpoint, deadline).await?;
+    }
     let request = json!({
         "session_id": endpoint.session_id,
         "block_id": endpoint.block_id,
@@ -1189,6 +1553,7 @@ async fn write_text_until(
 
 async fn send_enter_until(
     endpoint: &RexEndpoint,
+    expected_kind: crate::host_runtime::AgentKind,
     expected_owner: &RexProgramStatusOwner,
     deadline: Instant,
 ) -> Result<(), RexError> {
@@ -1201,15 +1566,28 @@ async fn send_enter_until(
             "Rex operation deadline elapsed while waiting to submit the queued text",
         ));
     }
-    let owner = observe_current_until(endpoint, deadline)
-        .await
-        .map_err(|error| RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string()))?
-        .current_foreground_codex_owner();
-    if owner.as_ref().ok() != Some(expected_owner) {
+    let owner = observe_methods_until(
+        endpoint,
+        deadline,
+        &[
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.program_status",
+        ],
+        false,
+    )
+    .await
+    .map_err(|error| {
+        RexError::unknown("send_enter", RexInputStage::BeforeWrite, error.to_string())
+    })?
+    .deliverable_foreground_agent_owner(Some(expected_kind));
+    if owner.as_ref().ok().map(|(_, owner)| owner) != Some(expected_owner) {
         return Err(RexError::unknown(
             "send_enter",
             RexInputStage::BeforeWrite,
-            "foreground Codex changed after text was queued",
+            format!(
+                "foreground {} changed after text was queued",
+                expected_kind.display_name()
+            ),
         ));
     }
     let call = run_cli(
@@ -1287,17 +1665,34 @@ async fn observe_current_until(
     endpoint: &RexEndpoint,
     deadline: Instant,
 ) -> Result<RexObservation, RexError> {
-    verify_service_until(endpoint, deadline).await?;
+    observe_methods_until(
+        endpoint,
+        deadline,
+        &[
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.pwd",
+            "com.superlogical.terminal.program_status",
+        ],
+        true,
+    )
+    .await
+}
+
+async fn observe_methods_until(
+    endpoint: &RexEndpoint,
+    deadline: Instant,
+    methods: &[&str],
+    verify_service: bool,
+) -> Result<RexObservation, RexError> {
+    if verify_service {
+        verify_service_until(endpoint, deadline).await?;
+    }
     let mut sources = Vec::new();
     let mut source_errors = Vec::new();
     let mut process = None;
     let mut pwd = None;
     let mut program_status = Vec::new();
-    for method in [
-        "com.superlogical.terminal.process",
-        "com.superlogical.terminal.pwd",
-        "com.superlogical.terminal.program_status",
-    ] {
+    for &method in methods {
         let call = run_cli(
             "observe_current",
             Path::new(&official_cli_path()),
@@ -1355,6 +1750,10 @@ fn extract_process(value: &Value) -> RexProcessObservation {
             .and_then(|item| item.get("name"))
             .and_then(Value::as_str)
             .map(str::to_owned),
+        argv0: foreground
+            .and_then(|item| item.get("argv0"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         path: foreground
             .and_then(|item| item.get("path"))
             .and_then(Value::as_str)
@@ -1410,6 +1809,15 @@ pub async fn notify(
     text: &str,
     mode: Option<&str>,
 ) -> Result<String, RexError> {
+    notify_for_agent(transport, text, mode, None).await
+}
+
+pub(crate) async fn notify_for_agent(
+    transport: &SelectedTransport,
+    text: &str,
+    mode: Option<&str>,
+    expected_kind: Option<crate::host_runtime::AgentKind>,
+) -> Result<String, RexError> {
     let deadline = Instant::now() + default_timeout()?;
     let allowed = [
         None,
@@ -1435,19 +1843,30 @@ pub async fn notify(
             "selected transport carries no verified Rex endpoint",
         )
     })?;
-    let observation = observe_current_until(endpoint, deadline).await?;
-    let owner = observation.current_foreground_codex_owner().map_err(|error| {
-        RexError::known_not_delivered(
-            "notify",
-            RexInputStage::BeforeWrite,
-            format!("RECIPIENT_NOT_ONLINE: {error}"),
-        )
-    })?;
-    let receipt = write_text_until(endpoint, text, deadline).await?;
+    let observation = observe_methods_until(
+        endpoint,
+        deadline,
+        &[
+            "com.superlogical.terminal.process",
+            "com.superlogical.terminal.program_status",
+        ],
+        true,
+    )
+    .await?;
+    let (kind, owner) = observation
+        .deliverable_foreground_agent_owner(expected_kind)
+        .map_err(|error| {
+            RexError::known_not_delivered(
+                "notify",
+                RexInputStage::BeforeWrite,
+                format!("RECIPIENT_NOT_ONLINE: {error}"),
+            )
+        })?;
+    let receipt = write_text_inner(endpoint, text, deadline, false).await?;
     let text_stage = RexInputStage::WriteQueued {
         bytes_written: receipt.bytes_written,
     };
-    if let Err(error) = send_enter_until(endpoint, &owner, deadline).await {
+    if let Err(error) = send_enter_until(endpoint, kind, &owner, deadline).await {
         return Err(RexError {
             operation: "send_key",
             class: error.class,
@@ -1692,3 +2111,347 @@ pub fn spawn_events(endpoint: RexEndpoint, on_event: mpsc::Sender<RexEvent>) -> 
 #[cfg(test)]
 #[path = "rex/tests.rs"]
 mod tests;
+
+pub(crate) async fn restore_carrier(
+    plan: &crate::proto::RestorePlan,
+    recheck_binding: impl Fn() -> Result<(), crate::proto::RestoreFailure>,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<RestoreCarrier, RestoreFailure> {
+    let saved = &plan.saved_layout;
+    let reject = |detail| RestoreFailure::new("plan", detail);
+    saved
+        .validate()
+        .map_err(|error| RestoreFailure::new("plan", error))?;
+    validate_target_fields(&saved.server, &saved.session_id, &saved.block_id)
+        .map_err(|error| RestoreFailure::new("plan", error.to_string()))?;
+    let full_rect = |rect: &[serde_json::Number; 4]| {
+        rect.iter()
+            .map(serde_json::Number::as_f64)
+            .eq([Some(0.0), Some(0.0), Some(1.0), Some(1.0)])
+    };
+    // The association captures metadata for just the selected terminal. A
+    // split cannot be rebuilt without the other leaves' creation metadata.
+    if saved.window_index != 0
+        || !saved.active_window
+        || !saved.focused
+        || saved
+            .window_label
+            .as_deref()
+            .is_none_or(|label| label.trim().is_empty())
+        || saved
+            .layer_id
+            .as_deref()
+            .is_none_or(|id| id.trim().is_empty())
+        || saved.session_revision == 0
+        || saved.layer_kind != "tiled"
+        || saved.layer_state.is_some()
+        || saved.block_flavor != "com.superlogical.terminal.shell"
+        || saved.layout.block_id.as_deref() != Some(saved.block_id.as_str())
+        || !full_rect(&saved.layer_bounds)
+        || !full_rect(&saved.layout.rect)
+    {
+        return Err(reject("RESTORE_LAYOUT_INCOMPLETE_OR_UNSUPPORTED"));
+    }
+    let label = &plan.session_label;
+    if label.len() > 128
+        || label.is_empty()
+        || label.trim() != label
+        || label.chars().any(char::is_control)
+        || label.starts_with("session:")
+    {
+        return Err(reject("RESTORE_FRESH_SESSION_LABEL_REQUIRED"));
+    }
+
+    let cli = official_cli_path();
+    let timeout =
+        default_timeout().map_err(|error| RestoreFailure::new("rex", error.to_string()))?;
+    let api = |method: &'static str, session: Option<&str>, body: Value| {
+        let argv = api_call_argv(method, session);
+        let cli = &cli;
+        let server = &saved.server;
+        async move {
+            let call = run_cli(
+                method,
+                Path::new(cli),
+                server,
+                Instant::now() + timeout,
+                &argv,
+                Some(body.to_string()),
+            )
+            .await
+            .map_err(|error| RestoreFailure::new(method, error.to_string()))?;
+            parse_json_call(method, &call)
+                .map_err(|error| RestoreFailure::new(method, error.to_string()))
+        }
+    };
+    let source = RexEndpoint {
+        server: saved.server.clone(),
+        session_id: saved.session_id.clone(),
+        block_id: saved.block_id.clone(),
+        host_id: Some(saved.host_id.clone()),
+        instance_id: saved.instance_id.clone(),
+        cwd: String::new(),
+        layout_association: None,
+    };
+    let verify_service = || async {
+        verify_service_until(&source, Instant::now() + timeout)
+            .await
+            .map_err(|error| RestoreFailure::new("server.status", error.to_string()))
+    };
+    let service = verify_service().await;
+    if is_cancelled() {
+        return Err(RestoreFailure::new("cancelled", "RESTORE_CANCELLED"));
+    }
+    service?;
+    if is_cancelled() {
+        return Err(RestoreFailure::new("cancelled", "RESTORE_CANCELLED"));
+    }
+    let listing = api("session.list", None, json!({})).await;
+    if is_cancelled() {
+        return Err(RestoreFailure::new("cancelled", "RESTORE_CANCELLED"));
+    }
+    let listing = listing?;
+    let sessions = match &listing["sessions"] {
+        Value::Null if listing.get("sessions").is_some() => &[][..],
+        Value::Array(sessions) => sessions.as_slice(),
+        _ => return Err(RestoreFailure::new("session.list", "missing sessions list")),
+    };
+    for session in sessions {
+        let existing_label = session["label"].as_str();
+        let existing_id = session["session_id"].as_str();
+        if existing_label.is_none() || existing_id.is_none() {
+            return Err(RestoreFailure::new("session.list", "invalid session entry"));
+        }
+        if existing_label == Some(label) || existing_id == Some(label) {
+            return Err(RestoreFailure::new(
+                "session.list",
+                "RESTORE_TARGET_ALREADY_EXISTS",
+            ));
+        }
+    }
+    if is_cancelled() {
+        return Err(RestoreFailure::new("cancelled", "RESTORE_CANCELLED"));
+    }
+
+    recheck_binding()?;
+    if is_cancelled() {
+        return Err(RestoreFailure::new("cancelled", "RESTORE_CANCELLED"));
+    }
+    let create_body = json!({
+        "label": label,
+        "initial_windows": [{
+            "window_label": saved.window_label,
+            "layout": {"block": {"flavor": saved.block_flavor, "label": saved.block_label}}
+        }]
+    });
+    let create_context = crate::proto::RestoreCreateContext {
+        server: saved.server.clone(),
+        session_label: label.clone(),
+        operation_id: plan.operation_id.clone(),
+    };
+    let create_failure = |error: RexError| {
+        let outcome = if error.class == NotificationDeliveryClass::KnownNotDelivered {
+            crate::proto::RestoreCreateOutcome::ConfirmedRejected {
+                native_code: error.native_code.clone(),
+                detail: error.detail.clone(),
+            }
+        } else {
+            crate::proto::RestoreCreateOutcome::Unknown {
+                detail: error.detail.clone(),
+            }
+        };
+        let mut failure = RestoreFailure::new("session.create", error.to_string());
+        failure.create_outcome = Some(outcome);
+        failure.create_context = Some(create_context.clone());
+        failure
+    };
+    let create_call = run_cli_isolated(
+        "session.create",
+        Path::new(&cli),
+        &saved.server,
+        Instant::now() + timeout,
+        &api_call_argv("session.create", None),
+        Some(create_body.to_string()),
+    )
+    .await;
+    let parsed_receipt = match create_call {
+        Ok(call) => parse_json_call("session.create", &call),
+        Err(error) => Err(error),
+    };
+    let receipt = match parsed_receipt {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let failure = create_failure(error);
+            return Err(if is_cancelled() {
+                cancelled_create_failure(failure)
+            } else {
+                failure
+            });
+        }
+    };
+    let session_id = match receipt["session_id"].as_str().filter(|id| {
+        *id != saved.session_id
+            && !sessions
+                .iter()
+                .any(|session| session["session_id"].as_str() == Some(id))
+            && validate_target_fields(&saved.server, id, &saved.block_id).is_ok()
+    }) {
+        Some(session_id) => session_id,
+        None => {
+            let detail = "RESTORE_OWNERSHIP_UNCONFIRMED: receipt lacks a fresh full session ID";
+            let mut error = RestoreFailure::new("session.create", detail);
+            error.create_receipt = Some(receipt.clone());
+            error.create_outcome = Some(crate::proto::RestoreCreateOutcome::Unknown {
+                detail: detail.into(),
+            });
+            error.create_context = Some(create_context.clone());
+            return Err(if is_cancelled() {
+                cancelled_create_failure(error)
+            } else {
+                error
+            });
+        }
+    };
+
+    if is_cancelled() {
+        let mut failure = RestoreFailure::new("cancelled", "RESTORE_CANCELLED");
+        failure.cleanup =
+            Some(cleanup_restore_session(&source, Path::new(&cli), timeout, session_id).await);
+        failure.create_receipt = Some(receipt);
+        failure.create_context = Some(create_context);
+        return Err(failure);
+    }
+
+    let verification = async {
+        let mismatch = || RestoreFailure::new("session.view", "RESTORE_LAYOUT_MISMATCH");
+        let windows = receipt["initial_windows"].as_array().ok_or_else(mismatch)?;
+        let [window] = windows.as_slice() else {
+            return Err(mismatch());
+        };
+        let blocks = window["block_ids"].as_array().ok_or_else(mismatch)?;
+        let [block] = blocks.as_slice() else {
+            return Err(mismatch());
+        };
+        let block_id = block.as_str().ok_or_else(mismatch)?;
+        validate_target_fields(&saved.server, session_id, block_id)
+            .map_err(|error| RestoreFailure::new("session.create", error.to_string()))?;
+        if block_id == saved.block_id {
+            return Err(mismatch());
+        }
+        let view = api(
+            "session.view",
+            Some(session_id),
+            json!({"session_id": session_id}),
+        )
+        .await?;
+        verify_service().await?;
+        let observed = capture_layout_from_view(
+            &view,
+            &RexEndpoint {
+                session_id: session_id.into(),
+                block_id: block_id.into(),
+                ..source.clone()
+            },
+        )
+        .map_err(|error| RestoreFailure::new("session.view", error.to_string()))?;
+
+        if view["label"].as_str() != Some(label)
+            || view["windows"].as_array().map(Vec::len) != Some(1)
+            || view["windows"][0]["layers"].as_array().map(Vec::len) != Some(1)
+            || view["windows"][0]["layers"][0]["blocks"]
+                .as_array()
+                .map(Vec::len)
+                != Some(1)
+            || window["window_id"].as_str() != Some(observed.window_id.as_str())
+            || !observed.window_id.starts_with("window:")
+            || observed.window_id == saved.window_id
+            || window["revision"].as_u64() != Some(observed.session_revision)
+            || observed
+                .layer_id
+                .as_deref()
+                .is_none_or(|id| !id.starts_with("layer:"))
+            || observed.layer_id == saved.layer_id
+            || observed.window_label != saved.window_label
+            || observed.window_index != saved.window_index
+            || observed.active_window != saved.active_window
+            || observed.focused != saved.focused
+            || observed.block_label != saved.block_label
+            || observed.block_flavor != saved.block_flavor
+            || observed.layer_kind != saved.layer_kind
+            || observed.layer_state != saved.layer_state
+            || observed.layout.block_id.as_deref() != Some(block_id)
+            || !full_rect(&observed.layer_bounds)
+            || !full_rect(&observed.layout.rect)
+        {
+            return Err(mismatch());
+        }
+        recheck_binding()?;
+        Ok(observed)
+    }
+    .await;
+    let mut failure = match verification {
+        Ok(layout_verification) if !is_cancelled() => {
+            return Ok(RestoreCarrier {
+                create_receipt: receipt,
+                layout_verification,
+            });
+        }
+        Ok(_) => RestoreFailure::new("cancelled", "RESTORE_CANCELLED"),
+        Err(failure) if is_cancelled() => cancelled_create_failure(failure),
+        Err(failure) => failure,
+    };
+    failure.cleanup =
+        Some(cleanup_restore_session(&source, Path::new(&cli), timeout, session_id).await);
+    failure.create_receipt = Some(receipt);
+    failure.create_context = Some(create_context);
+    Err(failure)
+}
+
+fn cancelled_create_failure(mut failure: RestoreFailure) -> RestoreFailure {
+    let mut cancelled = RestoreFailure::new("cancelled", "RESTORE_CANCELLED");
+    cancelled.detail = format!("RESTORE_CANCELLED: {}", failure.detail);
+    cancelled.create_receipt = failure.create_receipt.take();
+    cancelled.create_outcome = failure.create_outcome.take();
+    cancelled.create_context = failure.create_context.take();
+    cancelled
+}
+
+async fn cleanup_restore_session(
+    source: &RexEndpoint,
+    cli: &Path,
+    timeout: Duration,
+    session_id: &str,
+) -> crate::proto::RestoreCleanup {
+    let cleanup = async {
+        verify_service_until(source, Instant::now() + timeout)
+            .await
+            .map_err(|error| RestoreFailure::new("server.status", error.to_string()))?;
+        let call = run_cli(
+            "kill",
+            cli,
+            &source.server,
+            Instant::now() + timeout,
+            &["kill".into(), session_id.into()],
+            None,
+        )
+        .await
+        .map_err(|error| RestoreFailure::new("kill", error.to_string()))?;
+        if !call.status.success() {
+            return Err(RestoreFailure::new(
+                "kill",
+                native_failure("kill", RexInputStage::BeforeWrite, &call).to_string(),
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    match cleanup {
+        Ok(()) => RestoreCleanup::Closed {
+            session_id: session_id.into(),
+        },
+        Err(error) => RestoreCleanup::Unconfirmed {
+            session_id: session_id.into(),
+            detail: error.detail,
+        },
+    }
+}

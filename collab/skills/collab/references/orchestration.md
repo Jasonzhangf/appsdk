@@ -38,13 +38,15 @@ master派发前在原任务单填写完整长程任务内容和明确周期。�
 
 ## 身份与通信入口
 
-身份明确且已有有效回执时直接复用。仅身份不确定、缺失或公开入口明确返回身份/绑定异常时，才在实际项目运行 `collab context`。首次注册由用户明确要求触发。压缩、续接、唤醒、派发、巡检及普通收发本身均沿用有效身份。缺任务、消息或订阅事实时查询对应公开入口。
+身份明确且已有有效回执时直接复用。仅身份不确定、缺失或公开入口明确返回身份/绑定异常时，才在实际项目运行 `collab context`。首次注册由用户明确要求触发。压缩、续接、唤醒、派发、巡检及普通收发本身均沿用有效身份。仅需任务进展时运行 `collab task status '<id>'`；仅需查看身份时运行 `collab context --query`。身份恢复条件和成功后的当前动作沿[恢复决策表](stable-name-recovery.md#table-d-context-recovery-and-current-actions)。
 
 Collab 日常注册、恢复和通信使用 Collab Skill。tm-iterm 仅在用户明确指定，或正常 Collab 通信方式已有真实失败证据且确需紧急排障时使用。按对应授权处理紧急排障所需证据与动作。
 
 ## 每轮触发与 board 对齐
 
 每次唤醒、处理变化或选择下一动作时进入本轮。先复用本层目标文档、当前 board、变化证据和容量，识别影响当前调度的差异。
+
+巡检唤醒按[巡检决策表](board-idle-patrol.md#table-c-patrol-wakes-and-cancellation)处理。通知 subject 决定具体检查动作；取消使用对应 event 与任务范围。`master-dispatch-gap` 只提示重新核实派发缺口，不是可取消的 event。
 
 | 触发 | 必查差异 | 实际动作 |
 | --- | --- | --- |
@@ -65,9 +67,11 @@ CEO 按授权管理项目 master。Master 按 [Collab 派单顺序](../SKILL.md#
 处理 buglist 和项目任务。Jenny 分配独立目标，peer 在本人任务内使用 Codex 编排。
 巡检或记忆专长只承接本职责的任务。
 
-每轮派发先列出全部 live idle peer，包括没有当前任务的成员。遇到 `unknown` 等异常，
-按 [主动核实流程](board-idle-patrol.md#非-live-peer-的主动核实流程) 当轮查看状态。Rex
-和 Codex TUI/tmux 走现有 snapshot 入口。状态未知的 peer 不计入容量，其他工作继续派发。
+每轮派发先列出全部 live idle peer，包括没有当前任务的成员。遇到 `unknown`（含 `REX_SERVICE_CHANGED`）
+等异常，按 [主动核实流程](board-idle-patrol.md#非-live-peer-的主动核实流程) 当轮执行
+`collab worker snapshot <id> --capture --lines 80`（Rex 和 Codex TUI/tmux 走现有 snapshot 入口）
+确定 agent 实际状态，并立即落盘与执行具体 action item（恢复、改派或排除）。状态未知的 peer
+不计入容量，其他工作继续派发。上述事务均属 master scope，自行闭环，不找 CEO。
 
 master 选择承接任务的 peer 时，按 Collab Skill
 [派单顺序与一 peer 一任务](../SKILL.md#派单顺序与一-peer-一任务) 维护的当前提示词优先级和容量边界执行；本文件不复制该排序细节。

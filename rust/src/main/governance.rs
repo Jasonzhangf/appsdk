@@ -1471,3 +1471,89 @@ pub(super) fn try_assert_declared_contracts(root: &Path, project: &Value) -> Res
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn schema_property_compatibility_accepts_strengthening_and_rejects_weakening() {
+        // Exact type + enum subset tightening is allowed.
+        let canonical = json!({"type": "string", "enum": ["a", "b", "c"], "minLength": 2});
+        let tightened = json!({"type": "string", "enum": ["a", "b"], "minLength": 4});
+        assert!(
+            try_assert_schema_property_compatible(&canonical, &tightened, "schema.json:field")
+                .is_ok()
+        );
+
+        // Widening enum or lowering minLength must be rejected.
+        let widened_enum = json!({"type": "string", "enum": ["a", "b", "c", "d"], "minLength": 2});
+        assert!(try_assert_schema_property_compatible(
+            &canonical,
+            &widened_enum,
+            "schema.json:field"
+        )
+        .is_err());
+
+        let lowered_min = json!({"type": "string", "enum": ["a", "b"], "minLength": 1});
+        assert!(try_assert_schema_property_compatible(
+            &canonical,
+            &lowered_min,
+            "schema.json:field"
+        )
+        .is_err());
+
+        // Const must remain exact.
+        let canonical_const = json!({"const": "exact"});
+        assert!(try_assert_schema_property_compatible(
+            &canonical_const,
+            &json!({"const": "exact"}),
+            "schema.json:mode"
+        )
+        .is_ok());
+        assert!(try_assert_schema_property_compatible(
+            &canonical_const,
+            &json!({"const": "other"}),
+            "schema.json:mode"
+        )
+        .is_err());
+
+        // Nested object required/properties recursion.
+        let canonical_obj = json!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "minLength": 1}
+            }
+        });
+        let valid_obj = json!({
+            "type": "object",
+            "required": ["id", "extra"],
+            "properties": {
+                "id": {"type": "string", "minLength": 3},
+                "extra": {"type": "boolean"}
+            }
+        });
+        assert!(try_assert_schema_property_compatible(
+            &canonical_obj,
+            &valid_obj,
+            "schema.json:nested"
+        )
+        .is_ok());
+
+        let weakened_obj = json!({
+            "type": "object",
+            "required": [],
+            "properties": {
+                "id": {"type": "string", "minLength": 1}
+            }
+        });
+        assert!(try_assert_schema_property_compatible(
+            &canonical_obj,
+            &weakened_obj,
+            "schema.json:nested"
+        )
+        .is_err());
+    }
+}

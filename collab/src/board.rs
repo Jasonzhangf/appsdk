@@ -75,6 +75,9 @@ pub struct WorkPolicy {
     pub work_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_roles: Option<Vec<String>>,
+    /// Task-specific protected-role exception granted by the project master.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub protected_role_authorized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -440,6 +443,7 @@ pub struct BoardTaskView {
     pub next_step: Option<String>,
     pub work_kind: Option<String>,
     pub parent_task_id: Option<String>,
+    pub depends_on: Vec<String>,
     pub child_work_policies: std::collections::BTreeMap<String, WorkPolicy>,
     pub preferred_roles: Vec<String>,
     pub executor_name: Option<String>,

@@ -79,6 +79,10 @@ use tokio::sync::Notify;
 mod notification_batch_tests;
 
 #[cfg(test)]
+#[path = "notification_policy_tests.rs"]
+mod notification_policy_tests;
+
+#[cfg(test)]
 #[path = "host_route_registry_tests.rs"]
 mod host_route_registry_tests;
 

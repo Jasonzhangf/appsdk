@@ -2356,10 +2356,15 @@ async fn historical_architect_invitation_response_survives_mailbox_retention() {
     );
     assert!(accepted.ok, "{accepted:?}");
     let notice_id = accepted.data["notification_message_id"].as_str().unwrap();
+    let deliver_at = {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.tasks["named-work"].owner, "current");
+        assert_eq!(state.msgs[notice_id].to, "new-architect");
+        assert_eq!(state.mailbox_name_addresses[notice_id].name, name);
+        state.msgs[notice_id].created_ms + 120_000
+    };
+    timers::tick_with_idle_at(&server, deliver_at, &|_| true);
     let state = server.state.lock().unwrap();
-    assert_eq!(state.tasks["named-work"].owner, "current");
-    assert_eq!(state.msgs[notice_id].to, "new-architect");
-    assert_eq!(state.mailbox_name_addresses[notice_id].name, name);
     assert_eq!(state.msgs[notice_id].wake_attempt_count, 1);
     assert!(state.notification_delivery_accepted.contains_key(notice_id));
     for (recipient, expected) in [("new-architect", 1), ("architect", 0), ("master", 0)] {

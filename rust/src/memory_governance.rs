@@ -1348,11 +1348,7 @@ fn rule_state(value: &Value) -> &'static str {
 }
 
 fn valid_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 160
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+    crate::primitives::is_valid_id(value, 160, true)
 }
 
 fn entry_id(value: &Value) -> String {
@@ -1624,54 +1620,5 @@ fn approval_target_valid(
 }
 
 fn full_clause(clause: &Value) -> bool {
-    let Some(clause) = clause.as_object() else {
-        return false;
-    };
-    let strings = [
-        "clause_id",
-        "axis",
-        "axis_id",
-        "scope",
-        "scenario",
-        "trigger",
-        "state_before",
-        "state_after",
-        "owner",
-    ];
-    let arrays = [
-        "allowed_actions",
-        "forbidden_actions",
-        "effects",
-        "evidence",
-    ];
-    strings.iter().all(|key| {
-        clause
-            .get(*key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
-    }) && arrays.iter().all(|key| {
-        clause
-            .get(*key)
-            .and_then(Value::as_array)
-            .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_string))
-    }) && clause.get("governance").is_some_and(|governance| {
-        let Some(governance) = governance.as_object() else {
-            return false;
-        };
-        [
-            "edge",
-            "gate_kind",
-            "check",
-            "allow_case",
-            "deny_case",
-            "observation",
-        ]
-        .iter()
-        .all(|key| {
-            governance
-                .get(*key)
-                .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-        })
-    })
+    pipeline_runtime::governance::is_valid_ontology_clause_shape(clause)
 }

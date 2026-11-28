@@ -61,7 +61,7 @@
       "id": "判定身份与职责适用条件",
       "operator": "appsdk.collab_context.classify_role_applicability",
       "operator_version": "1",
-      "description": "按当前 typed 协作身份判断管理、普通 peer 执行及工作专长；普通 peer 在现有合同内执行与编排简单工作，有合适 architect 时复杂设计由 architect 负责。patrol、memory、architect 和 reviewer 投影各自职责，工作角色标签不改变身份、授权或订阅。",
+      "description": "按当前 typed 协作身份判断管理、普通 peer 执行及工作专长；每位 owner 在自身授权和交付范围内用 Codex orchestration 完成工作。工作专长描述能力，不授予调度权，也不要求 peer 间移交；patrol、memory、architect 和 reviewer 标签只投影各自职责，不改变身份、授权、订阅或精确 override。",
       "inputs": [
         "角色模板候选"
       ],

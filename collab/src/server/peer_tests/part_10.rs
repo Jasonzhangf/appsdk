@@ -1,8 +1,314 @@
+fn p4_decision_table_context(master: bool) -> Value {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    if master {
+        promote_master(&server, "peer", "user-approved");
+    }
+    let context = handle_context(&server, "peer".into(), "token-peer".into());
+    assert!(context.ok, "{context:?}");
+    std::fs::remove_dir_all(root).unwrap();
+    context.data
+}
+
+#[test]
+fn p4_decision_table_busy_slot_vs_queued_candidate() {
+    for master in [false, true] {
+        let context = p4_decision_table_context(master);
+        let text = context["role_brief"].to_string();
+        for required in [
+            "queued admission is not execution",
+            "collab task status '<running-id>'",
+            "collab board claim '<id>' --expected-revision <revision>",
+            "collab task start '<id>' --expected-revision <revision> --attempt <attempt>",
+            "Leave queued work queued",
+            "preserve any other typed error",
+            "current stable-name owner",
+            "execute.status == queued",
+            "attempt_generation == null",
+            "working or rework task",
+            "TICKET_STALE_BINDING",
+            "queued recovery case",
+            "stale-binding recovery case",
+            "require a fresh claimed attempt before",
+            "Direct task start only after the claim receipt",
+            "claimed Execute attempt for the current binding",
+            "owner-local claim can succeed without an Execute phase",
+        ] {
+            assert!(text.contains(required), "missing {required}: {text}");
+        }
+        for forbidden in [
+            "matching attempt was revoked",
+            "older binding's",
+            "binding generation",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "unobservable history requirement {forbidden}: {text}"
+            );
+        }
+    }
+    let table = include_str!("../../../skills/collab/operations.md")
+        .split("### Table A:")
+        .nth(1)
+        .unwrap()
+        .split("### Admission and completion sequence")
+        .next()
+        .unwrap();
+    for (branch, status_phrase) in [
+        ("queued recovery case", "working task"),
+        ("stale-binding recovery case", "working or rework task"),
+    ] {
+        let row = table.lines().find(|line| line.contains(branch)).unwrap();
+        assert!(row.contains("collab board claim '<id>' --expected-revision <revision>"));
+        assert!(row.contains("current stable-name owner"));
+        assert!(row.contains("attempt_generation == null"));
+        assert!(row.contains(status_phrase), "missing {status_phrase}: {row}");
+        if branch == "stale-binding recovery case" {
+            assert!(row.contains("Require a fresh claimed attempt before `collab task start`"));
+        }
+    }
+    assert!(table.contains("TICKET_STALE_BINDING"));
+    assert!(table.contains("execute.status == claimed"));
+    assert!(table.contains("Direct task start only after the claim receipt"));
+    for forbidden in [
+        "matching attempt was revoked",
+        "Execute batches",
+        "binding generation",
+    ] {
+        assert!(!table.contains(forbidden), "{table}");
+    }
+}
+
+#[test]
+fn p4_decision_table_invitation_modes_and_acceptance() {
+    for master in [false, true] {
+        let context = p4_decision_table_context(master);
+        let text = context["role_brief"].to_string();
+        for required in [
+            "stored long-horizon declaration",
+            "BOARD_LONG_HORIZON_CONTENT_REQUIRED",
+            "--long-horizon-content",
+            "--long-horizon-every-ms",
+            "--one-shot",
+            "collab board respond '<id>' --accept --expected-revision <revision>",
+        ] {
+            assert!(text.contains(required), "missing {required}: {text}");
+        }
+    }
+}
+
+#[test]
+fn p4_decision_table_pending_approval_vs_approved_block() {
+    let context = p4_decision_table_context(false);
+    let text = context["role_brief"].to_string();
+    for required in [
+        "collab task block '<id>' --next",
+        "pending request is not approved blocked",
+        "collab task status '<id>'",
+        "--blocker-action approve --decision-reason",
+        "--blocker-action reject --decision-reason",
+        "No self-approval",
+        "does not imply slot release",
+    ] {
+        assert!(text.contains(required), "missing {required}: {text}");
+    }
+}
+
+#[test]
+fn p4_decision_table_resource_wait_vs_business_block() {
+    let context = p4_decision_table_context(false);
+    let text = context["role_brief"].to_string();
+    for required in [
+        "actual occupancy conflict",
+        "collab task wait '<id>' --for '<holder-id>'",
+        "Resource waiting is not business-block approval",
+        "collab board show",
+        "retained resources",
+        "nonconflicting eligible work",
+        "RESOURCE_RELEASED",
+        "wait=null",
+        "block_requests",
+        "collab board update '<id>' --expected-revision <revision> --status working --next '<resume-evidence>'",
+        "collab task update '<id>' --status working --next '<resume-evidence>'",
+        "On refusal",
+    ] {
+        assert!(text.contains(required), "missing {required}: {text}");
+    }
+}
+
+#[test]
+fn p4_decision_table_patrol_subject_vs_cancellation_event() {
+    for master in [false, true] {
+        let context = p4_decision_table_context(master);
+        let text = context["role_brief"].to_string();
+        for required in [
+            "board-idle-patrol",
+            "collab notify cancel --event board-idle --task-id '<id>'",
+            "project-patrol",
+            "collab notify cancel --event master-idle",
+            "master-dispatch-gap",
+            "collab notify status",
+            "direct-message reception",
+            "board-idle-patrol.md#table-c-patrol-wakes-and-cancellation",
+            "rearm",
+        ] {
+            assert!(text.contains(required), "missing {required}: {text}");
+        }
+        assert!(
+            !text.contains("cancel --event master-dispatch-gap"),
+            "{text}"
+        );
+    }
+    let table = include_str!("../../../skills/collab/references/board-idle-patrol.md");
+    assert!(table.contains("--repeat-count <repeat-count> --ttl-seconds <ttl-seconds>"));
+    assert!(!table.contains("--repeat-count <n> --ttl-seconds <n>"));
+}
+
+#[test]
+fn p4_decision_table_valid_binding_vs_actual_recovery() {
+    let context = p4_decision_table_context(false);
+    let recovery = context["role_brief"]["communication_recovery"].to_string();
+    for required in [
+        "binding is valid",
+        "collab context --query",
+        "collab task status '<id>'",
+        "identity is unknown",
+        "binding error",
+        "completed",
+        "result.snapshot.registered=true",
+        "valid name, role, and binding",
+        "role_brief",
+        "operations",
+        "next_actions",
+    ] {
+        assert!(
+            recovery.contains(required),
+            "missing {required}: {recovery}"
+        );
+    }
+    assert!(!recovery.contains("context --recover"), "{recovery}");
+}
+
+#[test]
+fn p4_decision_table_unread_host_actions_and_owned_task_without_next_step() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    {
+        let mut state = server.state.lock().unwrap();
+        let now = now_ms();
+        for (id, next_step) in [
+            ("T-no-next", None),
+            ("T-blank-next", Some("  ")),
+            ("T-supplied-next", Some("Run the accepted consumer check")),
+        ] {
+            state
+                .apply_checked(&Event::TaskCreated {
+                    task: TaskRec {
+                        id: id.into(),
+                        owner: "peer".into(),
+                        created_by: "peer".into(),
+                        feature_id: None,
+                        worktree_path: None,
+                        branch: None,
+                        base_commit: None,
+                        priority: default_priority(),
+                        status: "working".into(),
+                        next_step: next_step.map(str::to_owned),
+                        wait: None,
+                        isolation_mode: None,
+                        created_ms: now,
+                        updated_ms: now,
+                    },
+                })
+                .unwrap();
+        }
+    }
+    server.commit(&[Event::Sent {
+        msg: Message {
+            id: "p4-unread".into(),
+            from: "peer".into(),
+            to: "peer".into(),
+            mtype: "notify".into(),
+            subject: Some("board-idle-patrol".into()),
+            body: "Inspect T-no-next".into(),
+            in_reply_to: None,
+            created_ms: now_ms(),
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+            retry_attempted: false,
+        },
+    }]);
+    for dsh in [false, true] {
+        if dsh {
+            server
+                .state
+                .lock()
+                .unwrap()
+                .workers
+                .get_mut("peer")
+                .unwrap()
+                .transport
+                .as_mut()
+                .unwrap()
+                .kind = crate::proto::TransportKind::Dsh;
+        }
+        let context = handle_context(&server, "peer".into(), "token-peer".into());
+        assert!(context.ok, "{context:?}");
+        let actions = context.data["next_actions"].as_array().unwrap();
+        let text = actions
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for id in ["T-no-next", "T-blank-next"] {
+            assert!(text.contains(&format!("collab task status {id}")), "{text}");
+        }
+        assert!(actions
+            .iter()
+            .any(|a| a == "Run the accepted consumer check"));
+        assert!(!actions
+            .iter()
+            .any(|a| a.as_str().is_some_and(|s| s.trim().is_empty())));
+        if dsh {
+            assert!(
+                text.contains("native delivery") && text.contains("collab inbox"),
+                "{text}"
+            );
+            assert!(
+                text.contains("do not run collab recv or collab ack"),
+                "{text}"
+            );
+        } else {
+            assert!(text.contains("collab recv --timeout 0"), "{text}");
+        }
+        assert_eq!(
+            server.state.lock().unwrap().msgs["p4-unread"].state,
+            "pending"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn p4_decision_table_static_guidance_stays_out_of_dynamic_actions() {
+    for master in [false, true] {
+        let context = p4_decision_table_context(master);
+        assert_eq!(context["next_actions"], serde_json::json!([]));
+        for operation in context["operations"].as_array().unwrap() {
+            assert!(!matches!(
+                operation["kind"].as_str(),
+                Some("responsibility" | "next_action" | "completion_action" | "notification_rule")
+            ));
+        }
+    }
+}
+
 #[test]
 fn context_is_read_only_and_does_not_consume_notifications() {
     let (mut server, root) = test_server();
-    register(&server, "peer", "%peer");
-    register(&server, "peer-two", "%peer-two");
+    register_synthetic_peer(&server, "peer", "%peer");
+    register_synthetic_peer(&server, "peer-two", "%peer-two");
     let expected_tmux_endpoint = server.state.lock().unwrap().workers["peer"]
         .transport
         .as_ref()
@@ -210,6 +516,98 @@ fn master_context_routes_ready_independent_work() {
         .data
         .to_string()
         .contains("saturate live present peers first"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn context_next_actions_guides_unread_messages_and_tasks_without_next_step() {
+    let (server, root) = test_server();
+    assert!(register_synthetic_peer(&server, "master", "thread-master").ok);
+    assert!(register_synthetic_peer(&server, "peer", "thread-peer").ok);
+    promote_master(&server, "master", "user-approved");
+
+    let send = handle_send(
+        &server,
+        "master".into(),
+        "peer".into(),
+        "notify".into(),
+        Some("assignment".into()),
+        "start here".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(send.ok, "{send:?}");
+
+    {
+        let mut state = server.state.lock().unwrap();
+        let now = now_ms();
+        state
+            .apply_checked(&Event::TaskCreated {
+                task: TaskRec {
+                    id: "T-no-next".into(),
+                    owner: "peer".into(),
+                    created_by: "master".into(),
+                    feature_id: None,
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: default_priority(),
+                    status: "working".into(),
+                    next_step: None,
+                    wait: None,
+                    isolation_mode: None,
+                    created_ms: now,
+                    updated_ms: now,
+                },
+            })
+            .unwrap();
+    }
+
+    let context = handle_context(&server, "peer".into(), "token-peer".into());
+    assert!(context.ok, "{}", context.error.unwrap_or_default());
+    let next_actions: Vec<String> = context.data["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        next_actions
+            .iter()
+            .any(|action| action.contains("collab recv")),
+        "missing unread action in {next_actions:?}"
+    );
+    assert!(
+        next_actions
+            .iter()
+            .any(|action| action.contains("collab task status T-no-next")),
+        "missing task next_step fallback in {next_actions:?}"
+    );
+    {
+        let mut state = server.state.lock().unwrap();
+        state
+            .workers
+            .get_mut("peer")
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .kind = crate::proto::TransportKind::Dsh;
+    }
+    let dsh_context = handle_context(&server, "peer".into(), "token-peer".into());
+    assert!(dsh_context.ok, "{}", dsh_context.error.unwrap_or_default());
+    let dsh_actions: Vec<String> = dsh_context.data["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        dsh_actions
+            .iter()
+            .any(|action| action.contains("collab inbox") && action.contains("do not run collab recv")),
+        "DSH context must guide collab inbox without instructing collab recv: {dsh_actions:?}"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1833,9 +2231,7 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
             },
         },
         Event::MasterWakeSignal {
-            signal: crate::server::state::MasterWakeSignal::WorkerIdle {
-                worker_id: "worker".into(),
-            },
+            signal: crate::server::state::MasterWakeSignal::GoalDue { revision: 1 },
             at_ms: now,
         },
         Event::Sent {
@@ -1843,8 +2239,8 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
                 id: "master-wake".into(),
                 from: "collab-server".into(),
                 to: "master".into(),
-                mtype: "notify".into(),
-                subject: Some("worker-idle: worker".into()),
+                mtype: "notification".into(),
+                subject: Some("goal:plan.md".into()),
                 body: "wake".into(),
                 in_reply_to: None,
                 created_ms: now,
@@ -1907,9 +2303,7 @@ fn typed_master_wake_delivery_does_not_depend_on_legacy_master_projection() {
     let now = now_ms();
     server.commit(&[
         Event::MasterWakeSignal {
-            signal: crate::server::state::MasterWakeSignal::WorkerIdle {
-                worker_id: "worker".into(),
-            },
+            signal: crate::server::state::MasterWakeSignal::GoalDue { revision: 1 },
             at_ms: now,
         },
         Event::Sent {
@@ -1917,8 +2311,8 @@ fn typed_master_wake_delivery_does_not_depend_on_legacy_master_projection() {
                 id: "master-wake-typed".into(),
                 from: "collab-server".into(),
                 to: "master".into(),
-                mtype: "notify".into(),
-                subject: Some("worker-idle: worker".into()),
+                mtype: "notification".into(),
+                subject: Some("goal:plan.md".into()),
                 body: "wake".into(),
                 in_reply_to: None,
                 created_ms: now,
@@ -2085,26 +2479,14 @@ fn worker_freed_transitions_notify_live_master() {
     crate::server::keepalive::tick_at(&server_arc, now + 60_002);
 
     let state = server_arc.state.lock().unwrap();
-    let idle_alert = state
-        .msgs
-        .values()
-        .find(|m| m.to == "master-worker" && m.subject == Some("subagent-status".into()));
     assert!(
-        idle_alert.is_some(),
-        "expected managed subagent-status alert sent to master"
+        !state
+            .msgs
+            .values()
+            .any(|m| m.to == "master-worker" && matches!(m.subject.as_deref(), Some("subagent-status" | "worker-idle" | "master-wake-batch"))),
+        "idle transitions must no longer push idle alerts to master"
     );
-    let alert = idle_alert.unwrap();
-    assert!(alert.body.contains("newly_idle=subagent:managed-worker"));
-    assert!(alert.body.contains("live_idle=subagent:managed-worker"));
-    assert!(alert.body.contains("Long-horizon orchestration"));
-    assert!(alert.body.contains("verified idle capacity"));
-    assert!(alert.body.contains("one complete independent contract per task"));
-    assert!(alert.body.contains("Each owner handles their own Codex"));
-    assert!(!alert
-        .body
-        .contains("regardless of whether other peers are busy"));
-    assert!(!alert.body.contains("only after confirming no peer can take it"));
-    assert!(!alert.body.contains("saturate live present peers first"));
+    assert_eq!(state.keepalives["task-worker"].observed, "idle");
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -2284,22 +2666,14 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
             m.to == "master-worker" && m.subject == Some("worker-unresponsive: stuck-worker".into())
         })
         .collect();
-    assert_eq!(offline_alerts.len(), 1);
-    assert!(offline_alerts[0]
-        .body
-        .contains("durable tasks with `collab task status`"));
-    assert!(offline_alerts[0]
-        .body
-        .contains("mailbox with `collab inbox`"));
-    assert!(!offline_alerts[0].body.contains("snapshot"));
+    assert!(
+        offline_alerts.is_empty(),
+        "ordinary presence edges must not push worker-unresponsive alerts to master"
+    );
     assert_eq!(
         state.keepalives["stuck-worker"].notified_presence,
         "offline"
     );
-    assert!(state
-        .master_wake
-        .unresponsive_workers
-        .contains(&"stuck-worker".into()));
     drop(state);
 
     for request in [
@@ -2340,8 +2714,8 @@ fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
                     && m.subject == Some("worker-unresponsive: stuck-worker".into())
             })
             .count(),
-        1,
-        "unchanged offline status, status-all, workers, and ack must not duplicate"
+        0,
+        "unchanged offline status, status-all, workers, and ack must not emit alerts"
     );
 
     // Re-creating the pane restores an address only. The agent runtime stays

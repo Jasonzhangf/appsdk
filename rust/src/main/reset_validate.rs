@@ -34,20 +34,14 @@ pub(super) fn reset_transaction_write_bytes(
     reset_transaction_symlink_components(transaction_dir, parent)?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("RESET_TRANSACTION_PARENT_CREATE_FAILED:{error}"))?;
-    if fs::symlink_metadata(target)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
+    if crate::primitives::is_symlink(target) {
         return Err(format!(
             "RESET_TRANSACTION_TARGET_SYMLINK:{}",
             target.display()
         ));
     }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("RESET_TRANSACTION_NONCE_FAILED:{error}"))?
-        .as_nanos();
-    let staging = target.with_extension(format!("staging.{}.{}", std::process::id(), nonce));
+    let staging = crate::primitives::staging_path_for(target)
+        .map_err(|error| format!("RESET_TRANSACTION_NONCE_FAILED:{error}"))?;
     fs::write(&staging, bytes).map_err(|error| {
         format!(
             "RESET_TRANSACTION_WRITE_FAILED:{}:{error}",

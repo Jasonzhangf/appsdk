@@ -138,6 +138,12 @@ AppSDK 编辑使用 daemon 订阅回执中的 ID 作为前置条件。若当前�
 新批次的启动权限沿既有目标合同。任务派发、任务改动及其订阅事件在同一业务提交中发生。
 机器图见 [目标归属与调度](collab-goal-ownership.graph.json)。
 
+### 保护角色与 2 分钟批量合流策略（2026-11-27 消融契约）
+
+- 统一策略门在原生传输选择前同时检查接收方角色（current `master` 或 `patrol`/`memory` 专长）与合并窗口。
+- `master` / `patrol` / `memory`：普通事件仅持久入箱并保持 `Deferred`（不记失败、不立即调用 native adapter、不重置或加速巡检周期）；仅在既有周期巡检或目标调度到期时随巡检一并投递，且禁止 `turn/steer`（AppServer 使用 `queued`，DSH 使用 `inject`，Desktop/Rex 仅在确认 idle 时投递）。
+- 普通接收方：全传输统一适用 `[t0, t0 + 120_000)` 毫秒固定收集窗口，全量合并窗口内合格消息，不因 `MAX_BATCH_DELIVERY` 预览截断而滞留成员；预留与提交均以全批次成员列表为准。`Deferred` 不得触发 `route_repair` 或记录 `NotificationDeliveryFailed`。
+
 ## 实施映射
 
 | 语义节点 | owner | 当前状态 | 缺口 |

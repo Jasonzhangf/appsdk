@@ -4149,13 +4149,11 @@ fn idle_notifications_to(state: &Value, master: &str) -> usize {
     })
 }
 
-/// Public-entry idempotence and recipient-presence contract for the idle
-/// wake. An unknown-presence master keeps the batch pending; once the master
-/// is confirmed online the same idle set is delivered exactly once and is not
-/// regenerated while that notification stays unconsumed.
+/// Idle peer activity must not emit `worker-idle` notices to the master even
+/// while both the peer and master are online.
 #[test]
-fn ordinary_idle_wake_is_held_while_master_unknown_and_sent_once_when_online() {
-    let fixture = AppFixture::new();
+fn ordinary_idle_does_not_emit_worker_idle_to_master() {
+    let mut fixture = AppFixture::new();
     let context_a = fixture.run_public(&["context"], THREAD_A);
     let context_b = fixture.run_public(&["context"], THREAD_B);
     let worker_a = context_a["identity"]["worker_id"]
@@ -4166,8 +4164,7 @@ fn ordinary_idle_wake_is_held_while_master_unknown_and_sent_once_when_online() {
         .as_str()
         .expect("daemon receipt names TUI worker B")
         .to_owned();
-    let mut app_fixture = fixture;
-    let promoted = app_fixture.run_public(
+    let promoted = fixture.run_public(
         &[
             "context",
             "--approve-grant",
@@ -4176,12 +4173,12 @@ fn ordinary_idle_wake_is_held_while_master_unknown_and_sent_once_when_online() {
         THREAD_B,
     );
     assert_eq!(promoted["master"]["worker_id"], worker_b);
-    let project = std::fs::canonicalize(&app_fixture.project)
+    let project = std::fs::canonicalize(&fixture.project)
         .unwrap()
         .to_string_lossy()
         .into_owned();
 
-    let seed = |state: &mut Value, master_presence: &str| {
+    fixture.update_current_state(|state| {
         state["agent_presence"][&project][&worker_a] = json!({
             "project_scope": project, "worker_id": worker_a, "session_id": THREAD_A,
             "presence": "online", "reason": "fixture", "observed_ms": 1
@@ -4193,60 +4190,27 @@ fn ordinary_idle_wake_is_held_while_master_unknown_and_sent_once_when_online() {
         });
         state["agent_presence"][&project][&worker_b] = json!({
             "project_scope": project, "worker_id": worker_b, "session_id": THREAD_B,
-            "presence": master_presence, "reason": "fixture", "observed_ms": 2
+            "presence": "online", "reason": "fixture", "observed_ms": 2
         });
         state["agent_activity"][&project][&worker_b] = json!({
             "project_scope": project, "worker_id": worker_b, "session_id": THREAD_B,
             "activity": "idle", "background": false, "reason": "fixture",
             "observed_ms": 2, "idle_since_ms": 2
         });
-        state["master_wake"]["idle_workers"] = json!([worker_a]);
-        state["master_wake"]["newly_idle_workers"] = json!([worker_a]);
-        state["master_wake"]["generation"] = json!(1);
-        state["master_wake"]["delivery_state"] = json!("pending");
-        // This pending batch comes from a completed working episode. A restart
-        // can prune its old idle projection until the current probe succeeds.
         state["keepalives"][&worker_a] = json!({
-            "observed":"unknown", "idle_since_ms":0, "activity_ms":1,
+            "observed":"idle", "idle_since_ms":1, "activity_ms":1,
             "last_notice_ms":0, "last_notice_id":null, "unacked":0,
             "suspected_offline":false, "working_seen":true
         });
-    };
+    });
 
-    // Unknown recipient presence must not deliver, and the pending idle set
-    // must survive repeated daemon ticks.
-    app_fixture.update_current_state(|state| seed(state, "unknown"));
+    fixture.observe_native_agent(&worker_a, "online", "idle");
     thread::sleep(Duration::from_millis(2500));
     assert_eq!(
-        idle_notifications_to(&app_fixture.current_state(), &worker_b),
+        idle_notifications_to(&fixture.current_state(), &worker_b),
         0,
-        "an unknown-presence master must not receive an idle wake"
+        "online idle peer must not report worker-idle to master"
     );
-
-    // Confirming the master online delivers the same idle set exactly once.
-    app_fixture.update_current_state(|state| seed(state, "online"));
-    app_fixture.observe_native_agent(&worker_a, "online", "idle");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if idle_notifications_to(&app_fixture.current_state(), &worker_b) >= 1 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "an online master must receive the idle wake"
-        );
-        thread::sleep(Duration::from_millis(100));
-    }
-
-    // The still-unconsumed notification must not be regenerated on later ticks.
-    thread::sleep(Duration::from_millis(2500));
-    assert_eq!(
-        idle_notifications_to(&app_fixture.current_state(), &worker_b),
-        1,
-        "the same unconsumed idle set must not be delivered twice"
-    );
-
-    drop(app_fixture);
 }
 
 #[test]
@@ -4380,20 +4344,8 @@ fn idle_capacity_projection_public_board_and_context_share_pruned_capacity() {
         &context["master"]["master_wake"],
     ] {
         assert!(
-            !wake["idle_workers"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|id| id.as_str() == Some(busy_worker.as_str())),
-            "busy worker leaked into public idle capacity: {wake}"
-        );
-        assert!(
-            wake["idle_workers"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|id| id.as_str() == Some(idle_worker.as_str())),
-            "genuine idle worker disappeared from public capacity: {wake}"
+            wake.get("idle_workers").is_none(),
+            "idle_workers projection must stay ablated: {wake}"
         );
     }
     assert_eq!(

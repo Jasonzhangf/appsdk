@@ -31,8 +31,15 @@ text(result.output);
 参数解析失败时按该工具的声明修正参数并重试。如果原生入口仍失败，沿任务合同报告
 原错、已试入口、受影响步骤和恢复条件。
 
-本入口保留日常协作规则。命令细节按下表读取 [操作手册](operations.md) 的对应章节，
-不整篇加载；手册与本入口属于同一个 Skill。
+本入口保留日常协作规则。按已观察的事实先选择下表中的唯一入口，再只读取对应章节；
+不整篇加载。手册与本入口属于同一个 Skill。
+
+| 已观察条件 | 唯一分支入口 |
+|---|---|
+| 任务已排队、当前 slot busy、认领或启动被拒 | [Table A：Busy slots and queued admission](operations.md#table-a-busy-slots-and-queued-admission) |
+| 资源冲突、业务 blocker 待批、等待后继续队列 | [Table B：Resource waits, block approval, and queue continuation](operations.md#table-b-resource-waits-block-approval-and-queue-continuation) |
+| 收到巡检唤醒、无可执行项需取消或恢复巡检 | [Table C：board idle 巡检与取消](references/board-idle-patrol.md) |
+| 需要恢复身份或从 context 选择当前动作 | [Table D：稳定名字恢复](references/stable-name-recovery.md) |
 
 ## 适用身份
 
@@ -70,7 +77,8 @@ board 修改仍先提交，自动通知在目标离线时保持未读。
 
 ### 身份恢复
 
-按[恢复操作表](references/stable-name-recovery.md#正常恢复)根据原始回执选择下一条命令。
+按 [Table D：稳定名字恢复](references/stable-name-recovery.md#正常恢复) 根据原始回执选择
+下一条命令。
 恢复动作留在同一个 agent 会话。先跑 context，再按缺项进入对应宿主的只读诊断。
 禁止先派子 agent、搜索历史身份、调用其他 context 工具碰运气，或使用
 `rex session rename`、新建窗口、切换 block、重启 daemon 来修复身份。
@@ -106,7 +114,7 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 
 | 任务 | 入口与边界 |
 |---|---|
-| 恢复当前已注册身份和状态 | 在本项目实际环境运行 `collab context`；仅给当前宿主的真实 runtime 信息 |
+| 恢复当前已注册身份和状态 | 按 [Table D](references/stable-name-recovery.md) 选择 context 或 context query；仅给当前宿主的真实 runtime 信息 |
 | 查可投递地址 | `collab list`；全局目录，不依赖当前目录，输出 `project.name`、通道和真实可达状态 |
 | 发送已授权消息（本项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址必须来自 `collab list`，显式地址失败不回退默认目标 |
 | 跨项目通信 | 仅在用户或当前任务合同明确指定目标项目与接收人时发送。无跨项目指令时，`Jenny` 指本项目的 Jenny。AppSDK CLI 或 SDK 错误不会自动把消费者项目的任务交给 `appsdk.Jenny`。只用目录核实已有授权目标，保留原发送和接收证据 |
@@ -185,13 +193,15 @@ master 按[派单顺序](#派单顺序与一-peer-一任务)选择本阶段的�
 
 ### 派单顺序与一 peer 一任务
 
-manager（master 与任务合同明确受托派发的人）每轮派单先查看 board 的当前项目成员与容量，列出全部
+manager（仅限当前项目 master / Jenny；peer 不派发其他 peer）每轮派单先查看 board 的当前项目成员与容量，列出全部
 idle peer，包括没有当前任务的成员，并显式显示各自通道来源（Codex TUI、DSH、Codex
 Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显示但不计入业务派单容量。
 `identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 的成员按
 [非 live peer 主动核实流程](references/board-idle-patrol.md#非-live-peer-的主动核实流程)
-处理。刚注册的 Rex peer 显示 `unknown` 时，master 当轮主动查状态和原 block 的 snapshot。
-仍需 peer 补事实时最多等 15 分钟。状态未核实的 peer 不计入容量，其他 ready 工作继续派发。
+处理。遇到 `unknown`（含 `REX_SERVICE_CHANGED`）时，master 必须在当轮执行
+`collab worker snapshot <id> --capture --lines 80`（或对应宿主只读检查）确认该 agent 的真实状态，
+并立即落盘或执行具体 action item（如恢复/续接、改派未关闭任务或排除容量），不得仅记录 `unknown`
+后被动等待。仍需 peer 补事实时最多等 15 分钟。状态未核实的 peer 不计入容量，其他 ready 工作继续派发。
 先按任务权限、能力、依赖和实际容量筛选，再按当前用户或任务提示词中的优先级选择。
 派单优先级可直接在提示词自定义，不新增固定宿主排序算法或专用配置。提示词未指定时，
 默认 DSH 与 Codex TUI 同层优先，Codex Desktop 最后。有合适且可用的现有 peer 时先派单，
@@ -315,10 +325,12 @@ board 任务且正态 idle 时应唤醒本人，由本人继续推理并判断�
 超过 30 分钟，同一 idle 阶段重复推送至少间隔 30 分钟；29m59s 和恰好 30m00s 不推，
 不补发漏掉周期。
 
-任务阻塞或执行者没有推进时，直属负责人[当轮先取证](references/board-idle-patrol.md#任务阻塞或停滞先取证)。
+任务阻塞、执行者没有推进或状态为 `unknown`（含 `REX_SERVICE_CHANGED`）时，直属负责人
+[当轮先取证](references/board-idle-patrol.md#任务阻塞或停滞先取证)。
 用 `collab who` 取目标 worker ID 和当前 transport。Rex 绑定只查原 Rex block，
-tmux 绑定只查原 tmux pane。需要实际终端证据时执行
-`collab worker snapshot <id> --capture --lines 80`，由 daemon 按当前绑定选适配器。
+tmux 绑定只查原 tmux pane。必须执行
+`collab worker snapshot <id> --capture --lines 80` 检查终端输出以确定 agent 实际状态，
+并基于真实状态生成和执行具体 action item（恢复、改派或关闭清理），不得只标记 `unknown` 后空等。
 身份恢复走原会话 `collab context`。
 
 没有可执行项时，peer 取消本人对应的 board 巡检，任务与基本收件仍保留。取消按任务和当前稳定 owner
@@ -350,9 +362,12 @@ master 检查必要证据，不用 ACK 或自报完成代替验收。
 
 ## CEO 与项目进度
 
-全局 CEO 只由 daemon 的 typed grant 授权；工作角色 `ceo` 不授予全局权限。项目
-master 有 CEO 时通过现有 `collab ceo reply` 路由回报目标、已验收结果、剩余工作、
-阻塞和下一动作；无 CEO 时明确报告 `CEO_NOT_CONFIGURED`，继续本项目工作。
+全局 CEO 只由 daemon 的 typed grant 授权；工作角色 `ceo` 不授予全局权限。
+项目 master 自己 scope 内的所有事务（包括 peer 状态核实、`unknown`/`REX_SERVICE_CHANGED` 排查与恢复、
+任务拆解与派发、任务改派、常规阻塞解阻、review 后备、worktree 清理和日常巡检）由 master 自行处理闭环，
+不需要也不得找 CEO 请示、求助或例行汇报。只有在存在全局 CEO 且发生超出本 project master 权限的事项
+（需跨项目协调或用户决定）或重大里程碑实质进展时，才通过现有 `collab ceo reply` 路由回报目标、
+已验收结果、剩余工作、阻塞和下一动作；无 CEO 时明确报告 `CEO_NOT_CONFIGURED`，继续本项目工作。
 `collab master status` 与 `collab ceo progress` 的 `workspace` 必须投影当前 master
 绑定注册的 canonical project root；不得另造可写状态根，也不得用 cwd 或 session
 载体替代工作空间事实。
@@ -385,9 +400,11 @@ CEO 按该指引维护用户明确确认的稳定偏好与写作习惯：先读�
 ## 资源和生命周期边界
 
 每个 peer 只拥有获授权的任务、文件、worktree 和资源。并发写入前按
-[任务与 worktree](references/task-worktree-lifecycle.md)登记；冲突按
-[资源等待](references/resource-waits.md)隔离，不覆盖或回收他人的资源。显式取消、
-集成、清理沿各自 owner 的入口。
+[任务执行操作](references/task-worktree-lifecycle.md#task-execution-operations)登记，
+单事件状态边界见[任务执行契约](references/task-worktree-lifecycle.md#task-execution-contract)；
+冲突按[资源等待](references/resource-waits.md)隔离，不覆盖或回收他人的资源。
+任务由 Jenny 统一调度，owner 通过本地 Codex 编排执行，不向 peer 派单也不发送常规
+进度汇报；显式取消、集成、清理沿各自 owner 的入口。
 
 Collab daemon 由用户管理。普通协作、安装、注册和恢复不包含 daemon 维护或任何 tmux
 server/pane 生命周期操作。选定传输失败后不跨传输伪造成功。生产工作不挂到未交付的
@@ -401,14 +418,14 @@ v2 实验状态。
 
 | 当前动作 | 只读对应内容 |
 |---|---|
-| 首次使用、恢复身份或换宿主 | [功能与入口选择](operations.md#功能与入口选择)、[身份恢复](references/stable-name-recovery.md#正常恢复) |
+| 首次使用、恢复身份或换宿主 | [功能与入口选择](operations.md#功能与入口选择)、[Table D：身份恢复](references/stable-name-recovery.md) |
 | 投递、查回执或收到通知 | [通信入口与项目目录](operations.md#通信入口与项目目录) |
 | 新建、编辑、续订或结束 Longhorizon | [目标入口与参数](operations.md#目标入口与参数)、[空闲唤醒与状态核实](operations.md#空闲唤醒与状态核实) |
 | 修改角色或工作流程模板 | [角色分工](operations.md#工作角色与用户指定分工)、[流程模板](operations.md#唯一-skill-与当前工作流程) |
-| 任务板发布、认领、交付及队列接续 | [任务板与 dashboard](operations.md#public-task-board-and-read-only-dashboard) |
+| 任务板发布、认领、交付及队列接续 | [Table A](operations.md#table-a-busy-slots-and-queued-admission)、[Table B](operations.md#table-b-resource-waits-block-approval-and-queue-continuation)、[任务执行操作](references/task-worktree-lifecycle.md#task-execution-operations)、[任务执行契约](references/task-worktree-lifecycle.md#task-execution-contract) |
 | 通信失败、身份恢复或显式重置 | [Recovery / Failure / Reset](operations.md#recovery-failure-reset-regression)、[当前身份与用户维护边界](references/migration-daemon.md) |
 | CEO、跨项目 master 操作 | [CEO](operations.md#全局-ceo-与项目-master)、[跨项目通信](operations.md#cross-project-master-communication) |
-| board idle 巡检、取消与 CEO 回报 | [board idle 巡检](references/board-idle-patrol.md) |
+| board idle 巡检、取消与 CEO 回报 | [Table C：board idle 巡检](references/board-idle-patrol.md) |
 | 宿主注册、AppServer 或 thread 路由 | [宿主注册](operations.md#宿主注册所需信息)、[AppServer](operations.md#appserver-runtime-registration) |
 | 版本升级、项目迁移或显式 reset | [迁移、安装与激活](references/migration-daemon.md#choose-the-migration-owner)、[验证细节](references/verification.md) |
 | 通知、订阅、路径问题 | [通知](references/notifications.md)、[状态路径](references/state-paths.md) |

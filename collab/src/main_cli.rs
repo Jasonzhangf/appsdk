@@ -555,6 +555,8 @@ pub(crate) enum WorkerCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
+    /// Rebuild a saved Codex Rex tab in a fresh session and return an explicit resume plan
+    Restore(RestoreArgs),
     /// Managed persistent agent peers (current project only)
     Subagent {
         #[command(subcommand)]
@@ -578,9 +580,12 @@ pub(crate) enum Cmd {
         #[arg(long)]
         service: bool,
     },
-    /// User maintenance entrypoint
-    #[command(hide = true)]
-    Up,
+    /// Start or restart the local Collab daemon and bind LaunchAgent autostart
+    Up {
+        /// Force restarting even a healthy same-version detached daemon
+        #[arg(long)]
+        restart: bool,
+    },
     /// User maintenance entrypoint
     #[command(hide = true)]
     Down,
@@ -768,7 +773,7 @@ pub(crate) enum Cmd {
         /// Seconds to opt in to waiting for new mail; 0 checks once
         #[arg(long, default_value_t = 0)]
         timeout: u64,
-        /// Replay one committed receive identity instead of consuming new mail
+        /// Optional trace identifier for this consume-once receive; repeating it does not replay consumed mail
         #[arg(long = "receive-id")]
         receive_id: Option<String>,
     },
@@ -819,6 +824,9 @@ pub(crate) enum Cmd {
         provide: Option<String>,
         #[arg(long)]
         query: bool,
+        /// Require and persist a complete Rex layout for this explicit Save.
+        #[arg(long, conflicts_with = "query")]
+        save: bool,
     },
     /// Mark messages as read
     Ack {
@@ -847,4 +855,28 @@ pub(crate) enum Cmd {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(clap::Args)]
+#[command(
+    long_about = "Rebuild the saved Codex Rex tab for the canonical project at the current working directory. Returns a verified carrier and explicit resume parameters with live_resume=unverified."
+)]
+pub(crate) struct RestoreArgs {
+    #[arg(long)]
+    pub worker: String,
+    #[arg(long)]
+    pub app: String,
+    #[arg(long)]
+    pub binding_id: String,
+    #[arg(long)]
+    pub generation: u64,
+    /// Unused label for the new task-owned Rex session
+    #[arg(long)]
+    pub session_label: String,
+    /// Confirm creation of a new task-owned session
+    #[arg(long)]
+    pub approve: bool,
+    /// Optional correlation ID included in the restore plan
+    #[arg(long)]
+    pub operation_id: Option<String>,
 }

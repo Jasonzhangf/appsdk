@@ -796,9 +796,7 @@ verified pair. A path that cannot prove that identity is a collision: preserve
 it and report the exact path. Never delete `~/.local/bin/collab*` or
 `~/.local/lib/collab/*` merely because the pathname matches.
 
-Installing a binary does not replace the running user-managed daemon. Agents
-never perform its lifecycle actions or request maintenance credentials. After
-user-managed activation, verify the available service:
+Installing a binary does not replace the running daemon automatically. Run `collab up` (or `collab up --restart` when forcing replacement of a healthy same-version detached daemon) from the project root (or a registered worktree) to start or restart the daemon onto the newly installed binary, then verify the live service:
 
 ```sh
 collab context
@@ -1162,9 +1160,7 @@ terminal pollution and storms. Each batch has one attempt; the default window
 is 120 seconds. Policy changes take effect through user-managed runtime
 activation, not task reset.
 
-Explicit `collab sendmessage` is immediate. Idle, progress, delivery, bug, and
-worker-idle notices are auto-merged by the daemon in the 120-second batch
-window; they are not repeated as heartbeat storms.
+Explicit manual `collab sendmessage` is immediate for ordinary peers. Automatic board dispatches, event notices, and queued wakes are auto-merged by the daemon over the full 120-second batch window across transports; master, patrol, and memory roles consume queued events on their periodic patrol schedule instead of on edge interrupts.
 
 Do not retry a failed send automatically. Return its exact error and durable
 status. Never call a transport command directly; the server owns transport
@@ -1312,11 +1308,37 @@ When any board command fails, the CLI preserves the server's full typed
 response, including durable IDs and `repair_required`. Read the `collab
 response:` line before retrying: a durable outcome is not a retryable failure.
 
-### Continue the queue and recheck blockers
+### Table A: Busy slots and queued admission
+
+Apply the first matching row. The queued and stale-binding recovery rows take
+precedence over generic admission, busy-slot, and rejected-start rows. Other
+specific typed errors take precedence over generic admission rows.
+`<id>` comes from the current Board or task receipt,
+`<revision>` comes from the same current task, and `<attempt>` comes from the
+successful claim receipt.
+
+| IF observed condition | actor | THEN exact CLI action | parameter source | required result / next branch |
+|---|---|---|---|---|
+| Admission returned a durable task or phase ID, but execution is queued | Task owner or peer | `collab task status '<id>'` | `<id>` from the admission receipt; queued phase from the status receipt | Preserve the admitted record. Do not republish, duplicate the task, or call start without a claimed attempt. Apply the first later row that matches the current facts. |
+| Another task is executing in the current slot | Current caller | `collab task status '<running-id>'` | `<running-id>` from `collab board show` or the current slot receipt | Continue the running task's authorized next action. Leave queued work queued. |
+| Board shows an eligible pending task for the caller's slot, dependencies are satisfied, and execution capacity is available | Peer for that slot | `collab board claim '<id>' --expected-revision <revision>` | `<id>`, `<revision>`, eligibility, and capacity from `collab board show` and `collab task status '<id>'` | Read task status and Execute phase separately. An owner-local claim can succeed without an Execute phase; in that case follow its task lifecycle, not task start. Start only under the claimed-attempt row below. Preserve a rejection and apply the typed-error row. |
+| Board shows a working task assigned to the current stable-name owner and current binding, with `execute.status == queued` and `attempt_generation == null` | Current stable-name owner | `collab board claim '<id>' --expected-revision <revision>` | `<id>`, `<revision>`, assignment and Execute projection from the current `collab board show`; owner/session from `collab task status '<id>'` | This is the queued recovery case. Reclaim through the existing gate and preserve any typed refusal. Do not inspect old-attempt or binding history. |
+| Board shows a working or rework task assigned to the current stable-name owner and current binding, with `execute.status` equal to `claimed` or `running` and `attempt_generation == null`, or a start attempt for that owner returns `TICKET_STALE_BINDING` | Current stable-name owner | `collab board claim '<id>' --expected-revision <revision>` | `<id>`, `<revision>`, assignment and Execute projection from the current `collab board show`; owner/session from `collab task status '<id>'`; stale error from the start receipt | This is the stale-binding recovery case. Reclaim through the existing gate. Require a fresh claimed attempt before `collab task start`. Preserve any other typed error. Do not inspect old-attempt or binding history. |
+| The claim receipt exposes `execute.status == claimed` and a numeric `attempt_generation` for the current binding | Task owner | `collab task start '<id>' --expected-revision <revision> --attempt <attempt>` | `<revision>` and `<attempt>` from the successful claim receipt | Direct task start only after the claim receipt exposes a claimed Execute attempt for the current binding. Implement the attempt only after a successful start. A rejected start preserves its typed error; if it is `TICKET_STALE_BINDING`, apply the stale-binding recovery row. |
+| Task is queued on another slot, or claim/start is rejected without matching a recovery row above | Claiming peer | `collab board show`, then `collab task status '<id>'` | `<id>` from the rejected receipt; current facts from both read receipts | Preserve the typed error. Do not steal another slot, force-start, or retry the same input. |
+| Jenny finds eligible ready long-horizon work with its complete declaration already stored | Jenny | `collab board invite '<id>' --to '<worker-id>' --expected-revision <revision>` | Current Board ID, revision, stored long-horizon declaration and eligibility; worker from `collab who` | After the durable invitation, the invitee reads its current revision and runs `collab board respond '<id>' --accept --expected-revision <revision>`. Acceptance transfers ownership; then read Execute before start. |
+| Ready long-horizon work lacks a stored declaration | Jenny | `collab board describe '<id>' --expected-revision <revision> --title '<title>' --description '<description>' --delivery-condition '<delivery>' --test-condition '<test>' --long-horizon-content '<goal-content>' --long-horizon-every-ms <interval-ms>`, then invite with the new revision | Preserve title, description, delivery and test fields from the current Board; use authorized goal content and cadence | Bare invite returns `BOARD_LONG_HORIZON_CONTENT_REQUIRED` without the declaration. Do not pass inline schedule flags to invite. After invite, the invitee uses revision-checked `collab board respond '<id>' --accept --expected-revision <revision>`. |
+| Explicitly authorized one-shot work is pending, publisher-owned, unassigned and has no long-horizon declaration or linked goal subscription | Jenny | `collab board invite '<id>' --to '<worker-id>' --expected-revision <revision> --one-shot` | Current Board and membership; one-shot authorization from the task contract | Preserve any mode or eligibility rejection. On success the invitee runs `collab board respond '<id>' --accept --expected-revision <revision>` using the invitation's current revision, then reads Execute before start. Never select one-shot merely to bypass a missing declaration. |
+| A task has no eligible slot or assignment for the current caller | Peer | `collab board show` | Current Board and caller assignment | Continue other authorized work. Do not bypass assignment or execution admission. |
+| Current task completes | Task owner | Follow the existing delivery, review, integration, cleanup, and close lifecycle; then run `collab board show` | Receipts and evidence from those existing lifecycle steps | Select the next eligible item and restart Table A. A delivery report alone does not end cleanup ownership. |
+
+An invitation, queued admission, or transport acceptance is not execution. Do
+not add a `--queue`, force-start command, or busy-slot bypass.
+
+### Admission and completion sequence
 
 Use this sequence for master and peer work. Master also checks the public queue
-and its coordination tasks. Legacy managed records are inspection
-inputs only.
+and its coordination tasks. Legacy managed records are inspection inputs only.
 
 1. Before peer/master board work starts, publish its goal, delivery condition,
    and test condition, then claim it or accept its invitation. When no suitable
@@ -1331,34 +1353,51 @@ inputs only.
 2. On completion, finish the applicable delivery, review, integration, cleanup,
    and close steps. A delivery report alone does not end a cleanup obligation.
    Read `collab board show` and check for unfinished work before stopping.
-3. On a blocker, keep ownership and record the cause, release condition, and
-   next action with `board update --status blocked --next "<facts>"`. Report it
-   to master. For an actual resource conflict use
-   `collab task wait <task-id> --for <holder-task-id>`; it is not a
-   general dependency queue.
-4. Check owned blocked/waiting tasks against current evidence. If a blocker
-   has cleared, recheck resources and execution capacity, then resume through
-   `board update --status working` using the current revision. A release notice
-   requires a recheck; it does not prove the task can resume. Keep it blocked
-   while another task occupies the execution slot.
-5. If current work cannot proceed, select another authorized, nonconflicting
-   pending task and claim it. Prefer priority p0 through p4, then task ID for
-   equal priority. Pending queue entries do not occupy execution capacity.
-   Blocked/waiting tasks keep their resources and unfinished responsibility;
-   starting another task does not release or cancel them.
-6. Before entering idle, check remaining work, pending close/cleanup duties,
-   each blocker, owned worktrees and stale resources, open P0/P1 work, and any
-   new production issue requiring canonical intake. If any action is possible,
-   continue it. Otherwise record what is blocked and the event or responsible
-   actor needed to resume. Preserve dirty, active, shared, or unknown resources
-   as PROTECTED_HOLD. Reuse a valid periodic patrol batch while it has remaining
-   deliveries; do not re-register or reset it. Explicitly re-arm only a consumed
-   ordinary one-shot goal or deadline wake when continued scheduling is required.
-   If a patrol batch is exhausted and the standing duty remains authorized, renew
-   it as a whole batch. Repeat this check on the next message or supported
-   notification. Consume applicable messages with `collab recv` on non-DSH
-   transports. DSH receives full messages natively through its gateway and acts
-   directly on them.
+
+### Table B: Resource waits, block approval, and queue continuation
+
+Apply the first matching row. A pending approval or specific error takes
+precedence over a generic continuation row. `<holder-id>` is the actual
+resource-holder task from the conflict receipt; it is not a guessed task.
+
+| IF observed condition | actor | THEN exact CLI action | parameter source | required result / next branch |
+|---|---|---|---|---|
+| An actual resource conflict names its holder task | Task owner | `collab task wait '<id>' --for '<holder-id>'` | `<id>` from the current task; `<holder-id>` from the conflict receipt | Read the returned wait state. Do not use this command for a general dependency or a business-block approval. |
+| Business work cannot proceed and needs a supervisor decision | Task owner | `collab task block '<id>' --next '<cause; evidence; attempted remedies; affected scope; resume condition>'` | Current failure evidence and the observable condition that would permit resumption | Preserve the returned pending request. The requester does not self-approve it. |
+| Block request is pending | Task owner or peer | `collab task status '<id>'` | Current task receipt | Do not call the task approved `blocked` and do not assume capacity was released. Continue independent actions. |
+| Current authorized supervisor has verified the pending request | Current supervisor; current CEO only for a master-owned task | `collab task update '<id>' --blocker-action approve --decision-reason '<evidence and resume condition>'` | Pending request, current task revision, current authority receipt, and verified evidence | The exact approval receipt is the approved-block result. Any other caller branches to escalation or rejection. |
+| Current authorized supervisor rejects the request | Current supervisor; current CEO only for a master-owned task | `collab task update '<id>' --blocker-action reject --decision-reason '<missing evidence or available action>'` | Pending request and the specific evidence or action gap | Preserve the rejection. The owner applies the returned available action. |
+| A current wait or approved block remains active and no release or recovery evidence matches | Task owner | `collab board show` | Current wait/approval receipt and current Board | Apply Table A to select eligible authorized work by the existing priority and queue rules. Claim and start only when admission permits them. |
+| A queued candidate conflicts with resources retained by the waiting task | Task owner or peer | `collab board show` | Current wait state and the candidate's resource claim | Leave the conflicting candidate queued and select another nonconflicting candidate through Table A. Do not release the waiting task's resources implicitly. |
+| A release or recovery notice arrives | Task owner | `collab task status '<id>'`, then `collab board show`; if decision evidence is missing, `collab context --query` for block_requests | Original persisted wait/block receipt and current task, wait, next_step and block_requests | Match the released holder to the original resource wait. A release sets blocked, clears wait (`wait=null`) and writes `RESOURCE_RELEASED=<holder-id>` in next_step. That marker plus the original wait distinguishes it from a business block, whose approved request and recorded resume condition must be checked separately. A notice or blocked status alone is insufficient. |
+| Resource-release evidence matches, wait is cleared, task is blocked and current resources permit resume; or an approved business block's own resume condition has been met | Current task owner | Public Board task: `collab board update '<id>' --expected-revision <revision> --status working --next '<resume-evidence>'`; legacy non-Board task: `collab task update '<id>' --status working --next '<resume-evidence>'` | Current Board revision for public tasks; original wait or approved block request, observed recovery evidence and current resource ownership | Server must accept the blocked-to-working transition. It gates executor and resource ownership/conflicts. Read the successful task/Execute receipt and use Table A for a current claimed attempt. On refusal preserve the typed error and blocked responsibility, refresh status/Board, resolve the named conflict or escalate to its owner, and continue independent work. Never force resume or self-approve a business block. |
+| All remaining actions require an external event | Task owner | No task mutation; apply Table C | Responsible actor, affected task, and observable recovery signal from the existing task record | Keep the task and resources. Cancel only the patrol entry covered by Table C and preserve direct-message reception. |
+
+Waiting or approved-block state does not make the current execution slot available
+by itself. A continuing task keeps its resources and unfinished responsibility.
+Selecting another item is an explicit Board review. Preserve supervisor and CEO
+authority boundaries and the prohibition on self-approval. If this checkout
+rejects an expected transition, preserve the typed error and report the runtime
+dependency instead of forcing the switch.
+
+Patrol wake subjects, cancellation, and continuation use the authoritative
+Table C in [board-idle-patrol.md](references/board-idle-patrol.md). Context
+recovery and current-action selection use the authoritative Table D in
+[stable-name-recovery.md](references/stable-name-recovery.md).
+
+Before entering idle, check remaining work, pending close/cleanup duties,
+each blocker, owned worktrees and stale resources, open P0/P1 work, and any
+new production issue requiring canonical intake. If any action is possible,
+continue it. Otherwise record what is blocked and the event or responsible
+actor needed to resume. Preserve dirty, active, shared, or unknown resources
+as PROTECTED_HOLD. Reuse a valid periodic patrol batch while it has remaining
+deliveries; do not re-register or reset it. Explicitly re-arm only a consumed
+ordinary one-shot goal or deadline wake when continued scheduling is required.
+If a patrol batch is exhausted and the standing duty remains authorized, renew
+it as a whole batch. Repeat this check on the next message or supported
+notification. Consume applicable messages with `collab recv` on non-DSH
+transports. DSH receives full messages natively through its gateway and acts
+directly on them.
 
 These are agent actions within an activation. Current board mutations commit an
 automatic notice to the other current participant, but the board does not
@@ -1367,8 +1406,9 @@ uncancelled board task receives a board-idle wake on fresh online+idle under
 [board-idle-patrol.md](references/board-idle-patrol.md), through the realtime
 event when connected and the 15-minute check otherwise. A peer with no unclosed
 task or with its patrol cancelled is not polled. Do not invent a polling
-interval, cron job, or retry loop. Existing subscriptions, master wake, and one
-worker-idle fact remain unchanged.
+interval, cron job, or retry loop. Existing subscriptions and periodic master
+patrol remain unchanged; ordinary peer idle transitions no longer push
+`worker-idle` notifications to master.
 
 ## Common command card
 
@@ -1475,18 +1515,15 @@ it only asks the recipient to read the original reply requirement. A worker
 acts on an explicit dispatch, a bounded direct-message lease, or its own open
 task state;
 it does not depend on a wake to make progress. Unknown/absent produces
-no transport input. On each `working` -> `idle` transition, a worker sends one
-idempotent worker-idle fact to the current master. Before stopping, it follows
+no transport input. Idle transitions do not report to `master`; instead,
+keepalive tracks activity locally and `board-idle` / queued ticket continuation
+drives eligible peers automatically. Before stopping, a worker follows
 the board queue and blocker checks above; it continues any eligible work.
-If nothing can proceed, it stops and does not keep knocking. Idle, progress,
-delivery, bug, and worker-idle notices are
-auto-merged; explicit `collab sendmessage` remains immediate. Master idle
-reminders are level-triggered: within the same master idle episode, each
-reminder attempt consumes the shared episode-local budget, up to three
-attempts. An observed change to `working` ends that episode; after three
-consecutive attempts without an observed `working` change, the episode stops.
-Worker-idle facts do not count toward this budget, and there is no
-scheduling-turn counter or automatic rearm.
+If nothing can proceed, it stops and does not keep knocking. Automatic event
+and dispatch notices are auto-merged over the 120-second batch window; explicit
+manual `collab sendmessage` remains immediate for ordinary peers. Standing
+`project-patrol` wakes `master` periodically via non-steering queued submission
+(or idle-gated delivery on non-queueable transports).
 
 Legacy managed records do not receive child-targeted liveness work or new
 assignments. Their historical `subagent-status` facts remain diagnostic input.
@@ -1765,15 +1802,13 @@ When dispatch itself needs a plan, use [independent planning](#无可用执行-p
   master pulls authorized open bugs in priority order (P0 > P1 > P2) and
   assigns each authorized issue to an eligible task owner.
 
-**Worker->Master idle fact and master long-horizon wake**:
-When a worker transitions from `working` to `idle`, it emits one idempotent
-worker-idle fact to the current master. Master and each ordinary peer own their
-own goal deadlines; only the current master owns master-idle project patrol. A
-managed one-shot subworker has no independent goal. A worker has direct-message
-wake and, while holding an unclosed, uncancelled board task, the `board-idle`
-patrol wake described in
-[board-idle-patrol.md](references/board-idle-patrol.md). On an idle fact,
-master must:
+**Periodic patrol and peer auto-driving**:
+Ordinary peer `working` -> `idle` transitions do not report to master; idle
+peers with open work continue automatically via `board-idle` patrol and
+queued ticket claiming. Master, patrol, and memory roles wake primarily on
+their due periodic schedule and inspect capacity via `collab who` / `collab board show`.
+Master and each ordinary peer own their own goal deadlines; only the current
+master owns standing project patrol. On a due patrol wake, master must:
 1. Check the active task graph for unblocked downstream tasks and offer them
    peer-first through the public board;
 2. If the main graph is clear, pull the highest-priority open issue from the

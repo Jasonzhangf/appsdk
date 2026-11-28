@@ -23,7 +23,7 @@ mod subagent;
 
 use clap::Parser;
 use identity::{Identity, RuntimeIdentity};
-use proto::{Req, Resp, TransportKind};
+use proto::{Req, TransportKind};
 use scope::Scope;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -163,104 +163,6 @@ fn require_cli_mailbox_consumer(identity: &Identity) -> anyhow::Result<()> {
         );
     }
     Ok(())
-}
-
-fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::Result<bool> {
-    let runtime = ident
-        .runtime
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("identity has no registered runtime binding"))?;
-    // A missing transport cannot be reused, but it is a normal legacy shape
-    // rather than an error: report "not reusable" so the caller re-registers.
-    let Some(transport) = ident.transport.as_ref() else {
-        return Ok(false);
-    };
-    if transport.kind == TransportKind::Tmux || runtime.native_thread_id.is_some() {
-        let host_facts = host_runtime::host_runtime_facts();
-        let (session, thread) = if let Some(agy_session) = host_facts.agy_session_id {
-            (Some(agy_session), None)
-        } else {
-            (
-                std::env::var("CODEX_SESSION_ID").ok(),
-                std::env::var("CODEX_THREAD_ID").ok(),
-            )
-        };
-        let Some(session) = session else {
-            return Ok(false);
-        };
-        {
-            let persisted_thread = runtime
-                .native_thread_id
-                .as_ref()
-                .map(crate::identity::NativeThreadId::as_str);
-            let persisted_session = runtime
-                .session_id
-                .as_ref()
-                .map(crate::identity::SessionId::as_str);
-            if thread
-                .as_deref()
-                .is_some_and(|thread| persisted_thread != Some(thread))
-                || persisted_session != Some(session.as_str())
-            {
-                return Ok(false);
-            }
-        }
-    }
-    let host_paths = scope.host_paths()?;
-    let scope_root = std::fs::canonicalize(&scope.root)?;
-    if ident
-        .project_scope
-        .as_ref()
-        .is_none_or(|project_scope| project_scope.as_str() != scope_root.to_string_lossy())
-    {
-        return Ok(false);
-    }
-    Ok(
-        scope::canonical_route_for_identity(&host_paths, &scope.root, &runtime.appserver_id)
-            .is_ok_and(|route| route.root == scope_root),
-    )
-    .and_then(|file_says_reusable| {
-        if !file_says_reusable {
-            return Ok(false);
-        }
-        // The route declaration on disk is not the live truth: after a daemon
-        // restart or re-registration the running daemon may hold no route for
-        // this address even though the file still lists one.  Reuse is only
-        // valid when the live daemon resolves the same session/thread.
-        match ident.transport.as_ref() {
-            Some(transport) if transport.kind == crate::proto::TransportKind::Tmux => {
-                let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
-                    return Ok(false);
-                };
-                Ok(client::resolve_route(&scope.sock_path(), endpoint).is_ok())
-            }
-            Some(transport) if transport.kind == crate::proto::TransportKind::AppServer => {
-                let (Some(session), Some(thread)) = (
-                    runtime
-                        .session_id
-                        .as_ref()
-                        .map(crate::identity::SessionId::as_str),
-                    runtime
-                        .native_thread_id
-                        .as_ref()
-                        .map(crate::identity::NativeThreadId::as_str),
-                ) else {
-                    return Ok(false);
-                };
-                if transport.thread_id.as_deref() != Some(thread)
-                    || transport.session_id.as_deref() != Some(session)
-                {
-                    return Ok(false);
-                }
-                // The persisted route file is not live truth: after a daemon
-                // restart or re-registration the running daemon may hold no
-                // route for this address. Reuse is only valid when the live
-                // daemon resolves the same session/thread.
-                Ok(client::resolve_native_route(&scope.sock_path(), session, thread).is_ok())
-            }
-            _ => Ok(false),
-        }
-    })
 }
 
 pub(crate) fn runtime_for_request<'a>(ident: &'a Identity) -> anyhow::Result<&'a RuntimeIdentity> {
@@ -859,8 +761,207 @@ fn main() {
 
 include!("main_error_format.rs");
 
+#[cfg(unix)]
+static RESTORE_INTERRUPTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+struct RestoreInterrupt {
+    previous: libc::sigaction,
+}
+
+#[cfg(unix)]
+impl RestoreInterrupt {
+    fn install() -> std::io::Result<Self> {
+        extern "C" fn interrupt(_: libc::c_int) {
+            RESTORE_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        RESTORE_INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            let mut previous = std::mem::zeroed();
+            action.sa_sigaction = interrupt as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            if libc::sigaction(libc::SIGINT, &action, &mut previous) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Self { previous })
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RestoreInterrupt {
+    fn drop(&mut self) {
+        unsafe { libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut()) };
+    }
+}
+
+fn restore_carrier(
+    args: main_cli::RestoreArgs,
+) -> Result<proto::RestoreResult, proto::RestoreFailure> {
+    use proto::{CodexResumePlan, RestoreFailure, RestorePlan, RestoreResult};
+    use server::binding_store::BindingControlStore;
+
+    let reject = |detail: String| RestoreFailure::new("binding", detail);
+    if !args.approve {
+        return Err(RestoreFailure::new("approval", "RESTORE_APPROVAL_REQUIRED"));
+    }
+    let root = scope::lifecycle_project_root().map_err(|error| reject(error.to_string()))?;
+    let project = root
+        .to_str()
+        .ok_or_else(|| reject("project path is not UTF-8".into()))?;
+    let paths = scope::HostPaths::resolve().map_err(|error| reject(error.to_string()))?;
+    let store = BindingControlStore::new(paths.state_root());
+    let read = || {
+        let control = store.load().map_err(reject)?;
+        let mut matches = control.slots().filter_map(|slot| {
+            let binding = slot.active_binding()?;
+            (slot.identity_key.project_scope.as_str() == project
+                && slot.identity_key.app_scope_id.as_str() == args.app
+                && binding.binding.agent_id.as_str() == args.worker)
+                .then_some((slot.generation, binding))
+        });
+        let (generation, value) = matches
+            .next()
+            .ok_or_else(|| reject("RESTORE_BINDING_NOT_FOUND".into()))?;
+        if matches.next().is_some()
+            || generation == 0
+            || generation != args.generation
+            || value.binding.binding_id.as_str() != args.binding_id
+        {
+            return Err(reject("RESTORE_BINDING_MISMATCH".into()));
+        }
+        Ok(value.clone())
+    };
+    let value = read()?;
+    let profile = value
+        .host
+        .profile
+        .as_ref()
+        .filter(|profile| !profile.trim().is_empty() && !profile.chars().any(char::is_control))
+        .ok_or_else(|| reject("RESTORE_PROFILE_REQUIRED".into()))?;
+    let codex_session_id = value
+        .binding
+        .session_id
+        .as_ref()
+        .ok_or_else(|| reject("RESTORE_CODEX_SESSION_REQUIRED".into()))?;
+    let saved_layout = value
+        .rex_layout
+        .as_ref()
+        .ok_or_else(|| reject("RESTORE_LAYOUT_REQUIRED".into()))?;
+    let transport = value
+        .transport
+        .as_ref()
+        .filter(|transport| transport.kind == proto::TransportKind::Rex)
+        .ok_or_else(|| reject("RESTORE_REX_TRANSPORT_REQUIRED".into()))?;
+    if value.host.agent_kind.as_deref() != Some("codex")
+        || value.host.host_type != "rex"
+        || value.binding.project_scope.as_str() != project
+        || value.binding.app_scope_id.as_str() != args.app
+        || transport.session_id.as_deref() != Some(codex_session_id.as_str())
+    {
+        return Err(reject("RESTORE_BINDING_SCOPE_OR_SESSION_MISMATCH".into()));
+    }
+    let cwd =
+        std::fs::canonicalize(&value.invocation_cwd).map_err(|error| reject(error.to_string()))?;
+    if !cwd.is_dir()
+        || cwd.to_str() != Some(value.invocation_cwd.as_str())
+        || transport
+            .rex_endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.cwd.as_str())
+            != cwd.to_str()
+    {
+        return Err(reject("RESTORE_CWD_MISMATCH".into()));
+    }
+
+    let plan = RestorePlan {
+        project_scope: project.into(),
+        app_scope_id: args.app.clone(),
+        worker_id: args.worker.clone(),
+        binding_id: args.binding_id.clone(),
+        binding_generation: args.generation,
+        operation_id: args.operation_id,
+        session_label: args.session_label,
+        saved_layout: saved_layout.clone(),
+    };
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|error| RestoreFailure::new("runtime", error.to_string()))?;
+    #[cfg(unix)]
+    let _interrupt = RestoreInterrupt::install()
+        .map_err(|error| RestoreFailure::new("signal", error.to_string()))?;
+    #[cfg(all(unix, feature = "lifecycle-test-hooks"))]
+    if let Some(release) = std::env::var_os("COLLAB_TEST_RESTORE_SIGNAL_CONSUMER_BARRIER") {
+        // The regression keeps the former asynchronous consumer withheld. The
+        // synchronous signal owner above does not depend on that consumer.
+        std::fs::write(
+            std::path::PathBuf::from(release).with_extension("ready"),
+            b"ready",
+        )
+        .map_err(|error| RestoreFailure::new("signal", error.to_string()))?;
+    }
+    #[cfg(not(unix))]
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(not(unix))]
+    let signal_cancelled = cancelled.clone();
+    #[cfg(not(unix))]
+    let signal_task = runtime.spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            signal_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let carrier = runtime.block_on(crate::client::adapters::rex::restore_carrier(
+        &plan,
+        || {
+            if read()? != value {
+                return Err(reject("RESTORE_BINDING_CHANGED".into()));
+            }
+            Ok(())
+        },
+        || {
+            #[cfg(unix)]
+            {
+                RESTORE_INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
+            }
+            #[cfg(not(unix))]
+            {
+                cancelled.load(std::sync::atomic::Ordering::SeqCst)
+            }
+        },
+    ));
+    #[cfg(not(unix))]
+    signal_task.abort();
+    let carrier = carrier?;
+    let resume = CodexResumePlan {
+        profile: profile.clone(),
+        codex_session_id: codex_session_id.as_str().into(),
+        canonical_cwd: value.invocation_cwd.clone(),
+        target_block_id: carrier.layout_verification.block_id.clone(),
+    };
+    Ok(RestoreResult {
+        restored_session_id: carrier.layout_verification.session_id.clone(),
+        restored_window_id: carrier.layout_verification.window_id.clone(),
+        restored_block_id: carrier.layout_verification.block_id.clone(),
+        carrier,
+        plan,
+        resume,
+        live_resume: proto::RestoreLiveResume::Unverified,
+    })
+}
+
 fn run(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {
+        Cmd::Restore(args) => {
+            match restore_carrier(args) {
+                Ok(result) => out(&serde_json::json!({"ok": true, "result": result})),
+                Err(error) => {
+                    out(&serde_json::json!({"ok": false, "error": error}));
+                    std::process::exit(2);
+                }
+            }
+            Ok(())
+        }
         Cmd::Config => {
             crate::config::ensure_written()?;
             out(&crate::config::load(&scope::lifecycle_project_root()?)?);
@@ -1107,9 +1208,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(server::run(scope))
         }
-        Cmd::Up => {
-            let _terminal = main_maintenance::user_terminal()?;
-            let project_root = scope::lifecycle_project_root()?;
+        Cmd::Up { restart } => {
+            let project_root = scope::project_root_for_up()?;
             let host_paths = scope::HostPaths::resolve()?;
             if !project_root.join(".agent-collab").is_dir() {
                 scope::init(&project_root)?;
@@ -1121,10 +1221,31 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let sock = host_paths.socket_path();
             // A daemon whose process is alive but whose socket does not answer
             // would otherwise block both the supervised and the detached start
-            // with DAEMON_UNKNOWN. `up` is the user restart entry, so it stops
-            // that verified recorded daemon first and then starts normally.
-            let replaced = client::replace_unresponsive_daemon(&sock, &host_paths.pid_path())?;
-            let was_running = client::alive(&sock);
+            // with DAEMON_UNKNOWN. `up` is the restart entry, so it stops that
+            // verified recorded daemon first and then starts normally.
+            let mut replaced = client::replace_unresponsive_daemon(&sock, &host_paths.pid_path())?;
+            let before_ping = client::call_with_deadline::<serde_json::Value>(
+                &sock,
+                &Req::Ping,
+                None,
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .ok();
+            let was_running = before_ping.is_some();
+            let version_differs = before_ping
+                .as_ref()
+                .and_then(|ping| ping.get("daemon_version"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|version| version != env!("COLLAB_VERSION"));
+            let launchd_reload = main_autostart::launchd_job_loaded();
+            if was_running && (restart || version_differs) && !launchd_reload {
+                // In detached mode or when migrating a detached daemon, stop
+                // the verified held daemon only on explicit `--restart` or
+                // binary version mismatch; plain `up` keeps healthy detached
+                // same-version daemons untouched.
+                replaced = client::replace_running_daemon(&sock, &host_paths.pid_path())?;
+            }
+            let wait_was_running = was_running && launchd_reload && !restart && !version_differs;
             // Bind the supervised daemon to this project, then let launchd own
             // the start. Loading the agent before spawning anything is what
             // makes the supervisor own the daemon: a detached `serve` spawned
@@ -1139,7 +1260,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 Ok(path) => supervised_up_started(
                     path,
                     &sock,
-                    was_running,
+                    wait_was_running,
                     wait_for_daemon(&sock, std::time::Duration::from_secs(5)),
                 )?,
                 Err(error) => {
@@ -1168,11 +1289,14 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 None,
                 std::time::Instant::now() + std::time::Duration::from_secs(5),
             )?;
+            let restarted = replaced.is_some()
+                || (was_running && (restart || version_differs || launchd_reload));
             out(&json!({
                 "ok": true,
                 "server": sock,
                 "daemon_version": ping.get("daemon_version").and_then(serde_json::Value::as_str),
                 "started": started,
+                "restarted": restarted,
                 "supervised": supervised,
                 "replaced": replaced.map(|daemon| json!({
                     "pid": daemon.pid,
@@ -2027,6 +2151,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             approve_grant,
             provide,
             query,
+            save,
         } => {
             // Validate and parse the workflow mutation before any bootstrap or
             // identity write. A malformed spec or conflicting flag must leave
@@ -2066,6 +2191,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 approve_grant.as_deref(),
                 provide.as_deref(),
                 query,
+                save,
             );
             match result {
                 Ok(value) => {
@@ -2577,10 +2703,6 @@ mod federation_entry_tests {
         assert_eq!(operation_id.as_deref(), Some("operation-recovery-1"));
     }
 }
-
-// keep Resp referenced so the type stays part of the public surface for tests
-#[allow(dead_code)]
-fn _unused(_r: Resp) {}
 
 #[cfg(test)]
 #[path = "main_tests.rs"]

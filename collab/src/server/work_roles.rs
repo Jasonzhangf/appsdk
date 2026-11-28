@@ -48,6 +48,50 @@ fn worker_work_roles(state: &State, control: &binding_slot::BindingControlSet, r
         .map(|slot| state.name_work_roles(route.project_scope_id.as_str(), &slot.identity_key.name)).unwrap_or_default())
 }
 
+pub(super) fn worker_is_periodic_protected(
+    server: &Server,
+    state: &State,
+    control: Option<&binding_slot::BindingControlSet>,
+    route: Option<&RouteScope>,
+    worker_id: &str,
+) -> bool {
+    if current_master_holder(server, state).ok().flatten().as_deref() == Some(worker_id) {
+        return true;
+    }
+    let canonical_scope = GlobalState::canonical_project_scope(&server.root)
+        .ok()
+        .map(|scope| scope.as_str().to_owned());
+    let Some(scope) = route
+        .map(|route| route.project_scope_id.as_str())
+        .or(canonical_scope.as_deref())
+    else {
+        return false;
+    };
+    let bound_name = control
+        .zip(route)
+        .and_then(|(control, route)| {
+            control
+                .current_for_worker(&route.project_scope_id, &route.app_scope_id, worker_id)
+                .ok()
+                .flatten()
+                .map(|slot| slot.identity_key.name.clone())
+        })
+        .or_else(|| {
+            state.name_occupancies.get(scope).and_then(|names| {
+                names
+                    .values()
+                    .find(|occ| occ.worker_id == worker_id)
+                    .map(|occ| occ.name.clone())
+            })
+        });
+    bound_name.is_some_and(|name| {
+        state
+            .name_work_roles(scope, &name)
+            .iter()
+            .any(|role| protected_specialty(role).is_some())
+    })
+}
+
 fn handle_work_roles(
     server: &Server,
     actor: String,
@@ -113,7 +157,7 @@ fn handle_work_roles(
             current.active_binding().map(|current| current.binding.agent_id.as_str().to_owned())
         };
         if let Some(recipient) = recipient.filter(|recipient| recipient != &actor && state.workers.contains_key(recipient)) {
-            notices = match relationship_notice_events(&state, &control, &route, &recipient, "explicit-notification", "work-roles-changed",
+            notices = match relationship_notice_events(&state, &control, &route, &recipient, "queued", "work-roles-changed",
                 format!("{name} 的工作专长已变更为 {:?}。读取 collab context / collab board show 获取当前关系。只调整受影响的新任务或交接；已接任务的归属与验收保持。无需仅因角色变化改模板或向用户例行汇报。", normalized)) {
                 Ok(events) => events, Err(error) => return Resp::err(error),
             };

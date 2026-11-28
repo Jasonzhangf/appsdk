@@ -785,7 +785,7 @@ fn holder_close_persists_release_only_for_waiter() {
 fn direct_two_peer_and_three_peer_wait_cycles_fail_closed() {
     let (server, root) = test_server();
     for (id, thread) in [("a", "%a"), ("b", "%b"), ("c", "%c")] {
-        register(&server, id, thread);
+        register_synthetic_peer(&server, id, thread);
     }
     assert!(create_task(&server, "a", "a-task", "a-feature").ok);
     let direct = handle_task_wait(
@@ -1041,5 +1041,99 @@ fn appserver_response_with_a_live_thread_status_is_present() {
         IdentityPresence::Present,
         "a well-formed live status must still report Present"
     );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn holder_close_falls_back_to_direct_message_subscription_for_waiter() {
+    let (server, root) = test_server();
+    register(&server, "holder", "%holder");
+    register(&server, "waiter", "%waiter");
+    assert!(create_task(&server, "holder", "held", "shared-feature").ok);
+    assert!(!create_task(&server, "waiter", "waiting", "shared-feature").ok);
+    assert!(
+        handle_task_wait(
+            &server,
+            "waiter".into(),
+            "token-waiter".into(),
+            "waiting".into(),
+            "held".into(),
+        )
+        .ok
+    );
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "holder".into(),
+                "token-holder".into(),
+                "held".into(),
+                Some(status.into()),
+                Some(format!("continue {status}")),
+            )
+            .ok
+        );
+    }
+    let worktree = candidate_worktree(&root, "held");
+    git_ok(&worktree, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
+    let candidate = current_head(&worktree);
+    assert!(
+        handle_task_deliver(
+            &server,
+            "holder".into(),
+            "token-holder".into(),
+            "held".into(),
+            Some("candidate verified".into()),
+            Some(worktree.to_string_lossy().into_owned()),
+        )
+        .ok
+    );
+    assert!(
+        handle_task_review(
+            &server,
+            "holder".into(),
+            "token-holder".into(),
+            "held".into(),
+            true,
+            false,
+            "reviewed candidate".into(),
+        )
+        .ok
+    );
+    git_ok(&root, &["merge", "--ff-only", &candidate]);
+    assert!(
+        handle_task_integrated(
+            &server,
+            "holder".into(),
+            "token-holder".into(),
+            "held".into(),
+            candidate,
+            "main verified".into(),
+        )
+        .ok
+    );
+    git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
+    assert!(
+        handle_task_close(
+            &server,
+            "holder".into(),
+            "token-holder".into(),
+            "held".into(),
+            false,
+            None,
+        )
+        .ok
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks["waiting"].status, "blocked");
+    let releases: Vec<&Message> = state
+        .msgs
+        .values()
+        .filter(|message| message.body.starts_with("RESOURCE_RELEASED "))
+        .collect();
+    assert_eq!(releases.len(), 1);
+    assert_eq!(releases[0].to, "waiter");
+    assert!(state.wake_bindings.contains_key(&releases[0].id));
+    drop(state);
     std::fs::remove_dir_all(root).ok();
 }

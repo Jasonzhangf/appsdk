@@ -473,7 +473,7 @@ fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
         id: id.into(),
         from: "collab-server".into(),
         to: "master".into(),
-        mtype: "notify".into(),
+        mtype: "notification".into(),
         subject: Some(subject.into()),
         body: "durable detail".into(),
         in_reply_to: None,
@@ -484,45 +484,25 @@ fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
         retry_attempted: false,
     };
     state.apply(&Event::MasterWakeSignal {
-        signal: MasterWakeSignal::WorkerIdle {
-            worker_id: "worker".into(),
-        },
+        signal: MasterWakeSignal::GoalDue { revision: 1 },
         at_ms: 10,
     });
     state.apply(&Event::Sent {
-        msg: generated("idle-1", "worker-idle: worker", 10),
+        msg: generated("goal-1", "goal:plan.md", 10),
     });
+    let legacy_json = r#"{"WorkerIdle":{"worker_id":"worker"}}"#;
+    let legacy: MasterWakeSignal = serde_json::from_str(legacy_json).unwrap();
     state.apply(&Event::MasterWakeSignal {
-        signal: MasterWakeSignal::WorkerIdle {
-            worker_id: "worker".into(),
-        },
+        signal: legacy,
         at_ms: 20,
-    });
-    state.apply(&Event::Sent {
-        msg: generated("idle-duplicate", "worker-idle: worker", 20),
-    });
-    state.apply(&Event::MasterWakeSignal {
-        signal: MasterWakeSignal::WorkerUnresponsive {
-            worker_id: "offline".into(),
-        },
-        at_ms: 30,
-    });
-    state.apply(&Event::Sent {
-        msg: generated("unresponsive", "worker-unresponsive: offline", 30),
     });
     assert_eq!(state.master_wake.generation, 1);
     assert_eq!(state.master_wake.first_pending_ms, 10);
-    assert_eq!(state.master_wake.last_updated_ms, 30);
-    assert_eq!(state.master_wake.idle_workers, vec!["worker"]);
-    assert_eq!(state.master_wake.unresponsive_workers, vec!["offline"]);
+    assert_eq!(state.master_wake.last_updated_ms, 10);
+    assert!(state.master_wake.goal_due);
+    assert_eq!(state.master_wake.active_goal_revision, Some(1));
     assert_eq!(state.master_wake.delivery_state, "pending");
 
-    let explicit = Message {
-        from: "peer".into(),
-        ..generated("explicit", "worker-idle: ignored", 40)
-    };
-    state.apply(&Event::Sent { msg: explicit });
-    assert_eq!(state.master_wake.idle_workers, vec!["worker"]);
     state.apply(&Event::NotificationSubscribed {
         subscription: NotificationSubscription {
             id: "sub-master".into(),
@@ -548,52 +528,19 @@ fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
         },
     });
     state.apply(&Event::WakeBound {
-        message_id: "idle-1".into(),
+        message_id: "goal-1".into(),
         subscription_id: "sub-master".into(),
     });
-    state.notification_subscriptions.insert(
-        "sub-master".into(),
-        NotificationSubscription {
-            id: "sub-master".into(),
-            worker_id: "master".into(),
-            event: "worker-idle".into(),
-            subject: None,
-            target: "thread-master".into(),
-            method: "appserver".into(),
-            trigger_ms: None,
-            trigger_times_ms: Vec::new(),
-            interval_ms: None,
-            repeat_count: 1,
-            fired_count: 0,
-            expires_ms: 60_000,
-            status: "armed".into(),
-            created_ms: 1,
-            updated_ms: 1,
-            status_reason: None,
-            patrol_idle_since_ms: None,
-            patrol_last_push_ms: 0,
-            periodic_declared: false,
-            goal_content: None,
-        },
-    );
     state.apply(&Event::Delivered {
-        ids: vec!["idle-1".into()],
+        ids: vec!["goal-1".into()],
     });
     assert_eq!(state.master_wake.delivery_state, "notified_unconsumed");
     state.apply(&Event::Acked {
-        ids: vec!["idle-1".into()],
+        ids: vec!["goal-1".into()],
         consumed_ms: None,
     });
     assert_eq!(state.master_wake.generation, 1);
     assert_eq!(state.master_wake.delivery_state, "notified_unconsumed");
-    state.apply(&Event::MasterWakeSignal {
-        signal: MasterWakeSignal::WorkerWorking {
-            worker_id: "worker".into(),
-        },
-        at_ms: 50,
-    });
-    assert!(state.master_wake.idle_workers.is_empty());
-    assert_eq!(state.master_wake.delivery_state, "pending");
 }
 
 #[test]
@@ -633,9 +580,7 @@ fn delivered_master_wake_uses_current_typed_grant() {
     state.global.bind_runtime(binding).unwrap();
     state.apply(&Event::GlobalMasterGranted { grant });
     state.apply(&Event::MasterWakeSignal {
-        signal: MasterWakeSignal::WorkerIdle {
-            worker_id: "worker".into(),
-        },
+        signal: MasterWakeSignal::GoalDue { revision: 1 },
         at_ms: 10,
     });
     state.apply(&Event::Sent {
@@ -751,9 +696,7 @@ fn delivered_master_wake_is_scoped_to_subscription_route() {
         state.apply(&Event::GlobalMasterGranted { grant });
     }
     state.apply(&Event::MasterWakeSignal {
-        signal: MasterWakeSignal::WorkerIdle {
-            worker_id: "worker".into(),
-        },
+        signal: MasterWakeSignal::GoalDue { revision: 1 },
         at_ms: 10,
     });
     state.apply(&Event::Sent {

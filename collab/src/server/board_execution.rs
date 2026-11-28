@@ -190,7 +190,12 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
             Err(error) => return Resp::err(error),
         };
         if let Some(slot) = &slot {
-            if let Err(error) = execution_candidate_gate(&state, &id, &slot.identity_key.name) {
+            if let Err(error) = execution_candidate_gate(
+                &state,
+                route.project_scope_id.as_str(),
+                &id,
+                &slot.identity_key.name,
+            ) {
                 return error;
             }
         }
@@ -302,11 +307,34 @@ fn board_claim(server: &Server, actor: String, token: String, id: String, expect
         if let Err(error) = board_execution_gate_with_control(server, &state, &control, &actor, &id) {
             return error;
         }
-        if let Err(error) = execution_candidate_gate(&state, &id, &slot_name) {
+        if let Err(error) = execution_candidate_gate(
+            &state,
+            route.project_scope_id.as_str(),
+            &id,
+            &slot_name,
+        ) {
             return error;
         }
         claimable = Some(recovered);
         name_session = Some((slot_name, session.to_string(), binding_generation));
+    }
+    if let (Some(_), Some((slot_name, _, _))) = (&claimable, &name_session) {
+        use crate::server::ticket_state::{TicketPhaseKind, TicketPhaseStatus};
+
+        if state.ticket_phases.iter().any(|phase| {
+            phase.task_id != id
+                && phase.phase == TicketPhaseKind::Execute
+                && phase.slot_name.as_deref() == Some(slot_name.as_str())
+                && matches!(
+                    phase.status,
+                    TicketPhaseStatus::Claimed | TicketPhaseStatus::Running
+                )
+        }) {
+            return Resp::err_data(
+                "TICKET_ADMISSION_SLOT_OCCUPIED: owner slot already holds a claimed or running phase",
+                json!({"task_id": id, "slot": slot_name}),
+            );
+        }
     }
     task.owner = actor.clone();
     task.status = "working".into();
@@ -456,7 +484,12 @@ fn board_start_locked(
         return Resp::err("TICKET_SESSION_MISSING: current identity binding has no session");
     }
     let slot_name = slot.identity_key.name.clone();
-    if let Err(error) = execution_candidate_gate(state, &id, &slot_name) {
+    if let Err(error) = execution_candidate_gate(
+        state,
+        binding.project_scope.as_str(),
+        &id,
+        &slot_name,
+    ) {
         return error;
     }
     let Some(phase) = state.ticket_phases.iter().find(|phase| {

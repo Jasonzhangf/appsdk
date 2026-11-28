@@ -47,7 +47,7 @@ pub fn tick(server: &Arc<Server>) {
 
 pub(super) fn tick_managed(manager: &super::ProjectRuntimeManager, server: &Arc<Server>) {
     let now = now_ms();
-    super::keepalive::tick_at(server, now);
+    super::keepalive::tick_with_rex_recovery(server, now);
     super::name_monitor::tick_managed(manager, server, now);
     tick_after_tmux(server, now);
 }
@@ -207,12 +207,6 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
             expired.wait = None;
             expired.updated_ms = now;
             lifecycle_events.push(Event::TaskUpdated { task: expired });
-            lifecycle_events.push(Event::MasterWakeSignal {
-                signal: crate::server::state::MasterWakeSignal::TaskBlocked {
-                    task_id: task.id.clone(),
-                },
-                at_ms: now,
-            });
 
             if let Ok(Some(master_id)) = master_holder.as_ref() {
                 let message_id = super::gen_msg_id();
@@ -643,7 +637,9 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                     .then(|| {
                         let board_invitation_only =
                             state.delivery_modes.get(message_id).map(String::as_str)
-                                == Some("explicit-notification");
+                                == Some("explicit-notification")
+                                && super::current_board_invitation_for_message(&state, message)
+                                    .is_some();
                         (
                             message_id.clone(),
                             subscription_id.clone(),
@@ -666,10 +662,11 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
 
 /// The automatic timer candidate domain.
 ///
-/// Ordinary messages (no persisted delivery mode) keep the existing batch
-/// retry contract, and queued tmux delivery keeps its deferred path.
-/// Board invitations may continue after pre-I/O deferral. Other explicit
-/// notifications stay with their explicit retry operator.
+/// Ordinary messages (no persisted delivery mode), deferred explicit
+/// notifications whose initial attempt never ran, and non-failed queued/
+/// registration notifications resume on the timer once their collection
+/// window or role hold clears. Explicitly attempted & failed `explicit-
+/// notification` messages remain excluded via `can_resume_notification`.
 fn automatic_delivery_candidate(state: &super::state::State, message: &Message) -> bool {
     match state.delivery_modes.get(&message.id).map(String::as_str) {
         None => true,
@@ -682,16 +679,22 @@ fn automatic_delivery_candidate(state: &super::state::State, message: &Message) 
                 use crate::proto::TransportKind;
                 matches!(
                     transport.kind,
-                    TransportKind::Tmux | TransportKind::AppServer | TransportKind::Dsh
+                    TransportKind::Tmux
+                        | TransportKind::AppServer
+                        | TransportKind::Dsh
+                        | TransportKind::DesktopBridge
+                        | TransportKind::Rex
                 ) && super::can_resume_notification(state, message)
             })
         }
+        Some("explicit-notification") => {
+            ((message.id.starts_with("ticket-claim-")
+                || super::current_board_invitation_for_message(state, message).is_some())
+                && super::can_resume_notification(state, message))
+                || super::notification_reconnect_pending(state, message)
+        }
         Some("immediate" | super::mailbox::REGISTRATION_NOTIFICATION_MODE) => {
             super::can_resume_notification(state, message)
-        }
-        Some("explicit-notification") => {
-            super::current_board_invitation_for_message(state, message).is_some()
-                && super::can_resume_notification(state, message)
         }
         // Internal daemon markers predate the explicit delivery domain and
         // keep their pre-existing automatic path unchanged.
@@ -742,7 +745,7 @@ fn seed_project_patrol_episode(
     server.commit(&[Event::NotificationSubscribed { subscription }]);
 }
 
-fn is_standing_project_patrol(subscription: &NotificationSubscription) -> bool {
+pub(super) fn is_standing_project_patrol(subscription: &NotificationSubscription) -> bool {
     subscription.event == "master-idle"
         && subscription.subject.as_deref() == Some(PROJECT_PATROL_SUBJECT)
         && is_project_patrol_interval(subscription.interval_ms)
@@ -888,6 +891,12 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
                 current
                     .patrol_idle_since_ms
                     .filter(|start| *start > 0 && *start <= now)
+                    .or_else(|| {
+                        super::worker_agent_facts(server, &state, &worker)
+                            .1
+                            .and_then(|fact| fact.idle_since_ms)
+                            .filter(|start| *start > 0 && *start <= now)
+                    })
                     .or(Some(now))
             } else {
                 None

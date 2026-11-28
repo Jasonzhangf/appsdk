@@ -887,6 +887,21 @@ fn recipient_online_for_delivery(server: &Server, recipient: &str) -> bool {
     transport_agent_view(server, &worker).0 == IdentityPresence::Present
 }
 
+#[cfg(test)]
+thread_local! {
+    static NOTIFICATION_CONTROL_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_notification_control_loads() {
+    NOTIFICATION_CONTROL_LOADS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn notification_control_loads() -> usize {
+    NOTIFICATION_CONTROL_LOADS.with(std::cell::Cell::get)
+}
+
 fn attempt_tmux_notification_with_retry(
     server: &Server,
     message_id: &str,
@@ -909,6 +924,12 @@ fn attempt_tmux_notification_with_retry(
         &str,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
+    fn load_control(server: &Server) -> Result<binding_slot::BindingControlSet, String> {
+        #[cfg(test)]
+        NOTIFICATION_CONTROL_LOADS.with(|count| count.set(count.get() + 1));
+        binding_store::BindingControlStore::new(server.host_paths.state_root()).load()
+    }
+
     let rex = transport.kind == TransportKind::Rex;
     // The Rex sink checks the exact current foreground after binding selection.
     // Its observed liveness can change independently of the daemon monitor.
@@ -919,14 +940,7 @@ fn attempt_tmux_notification_with_retry(
     let mut register_guard = match server.register_gate.try_lock() {
         Ok(guard) => Some(guard),
         Err(std::sync::TryLockError::WouldBlock) => {
-            let code = if rex {
-                "REX_BINDING_PUBLICATION_BUSY"
-            } else {
-                "BINDING_PUBLICATION_BUSY"
-            };
-            return NotificationAttempt::Deferred(Some(format!(
-                "{code}: retry after current binding publication"
-            )));
+            return NotificationAttempt::Deferred;
         }
         Err(std::sync::TryLockError::Poisoned(error)) => {
             return NotificationAttempt::Rejected(format!(
@@ -963,11 +977,13 @@ fn attempt_tmux_notification_with_retry(
         .as_ref()
         != Some(transport)
     {
-        return NotificationAttempt::Deferred(None);
+        return NotificationAttempt::Deferred;
     }
     if !state.scheduler_message_deliverable(message_id) {
         return NotificationAttempt::NotAttempted("scheduler admission is not deliverable".into());
     }
+    let mut cached_control: Option<binding_slot::BindingControlSet> = None;
+    let mut cached_route: Option<Option<RouteScope>> = None;
     let has_patrol_notice = state.board_patrol_notice_ids.iter().any(|id| {
         state
             .msgs
@@ -975,16 +991,21 @@ fn attempt_tmux_notification_with_retry(
             .is_some_and(|message| message.to == recipient)
     });
     let patrol_current = if has_patrol_notice {
-        let control =
-            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-                Ok(control) => control,
+        let control = match cached_control.as_ref() {
+            Some(control) => control,
+            None => match load_control(server) {
+                Ok(control) => cached_control.insert(control),
                 Err(error) => return NotificationAttempt::NotAttempted(error),
-            };
-        let route = match server_route_scope(server, &state) {
-            Ok(route) => route,
-            Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+            },
         };
-        match state::board_patrol_eligible_task_ids(&state, &control, route.as_ref(), recipient) {
+        let route = match cached_route.as_ref() {
+            Some(route) => route.as_ref(),
+            None => match server_route_scope(server, &state) {
+                Ok(route) => cached_route.insert(route).as_ref(),
+                Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+            },
+        };
+        match state::board_patrol_eligible_task_ids(&state, control, route, recipient) {
             Ok(tasks) => tasks.is_some_and(|tasks| !tasks.is_empty()),
             Err(error) => return NotificationAttempt::NotAttempted(error),
         }
@@ -996,6 +1017,68 @@ fn attempt_tmux_notification_with_retry(
             "board patrol notice no longer has canonical eligible tasks".into(),
         );
     }
+    let route_for_policy = match cached_route.as_ref() {
+        Some(route) => route.clone(),
+        None => match server_route_scope(server, &state) {
+            Ok(route) => {
+                cached_route = Some(route.clone());
+                route
+            }
+            Err(_) => None,
+        },
+    };
+    let control_for_policy = if let Some(control) = cached_control.as_ref() {
+        Some(control)
+    } else if route_for_policy.is_some() {
+        load_control(server)
+            .ok()
+            .map(|control| &*cached_control.insert(control))
+    } else {
+        None
+    };
+    let recipient_protected = worker_is_periodic_protected(
+        server,
+        &state,
+        control_for_policy,
+        route_for_policy.as_ref(),
+        recipient,
+    );
+    let seed_scheduled = state
+        .notification_subscriptions
+        .get(subscription_id)
+        .is_some_and(|sub| is_scheduled_patrol_or_deadline(&state, seed, sub));
+    if recipient_protected
+        && !seed_scheduled
+        && !state.handoff_wake_pending(seed)
+        && !matches!(
+            state.delivery_modes.get(&seed_id).map(String::as_str),
+            Some(
+                "explicit-notification"
+                    | mailbox::REGISTRATION_NOTIFICATION_MODE
+                    | "immediate"
+                    | DAEMON_LIVE_CLOSURE_MODE
+                    | RESTART_REPLAY_PENDING_MODE
+            )
+        )
+    {
+        return NotificationAttempt::Deferred;
+    }
+    if recipient_protected
+        && seed_scheduled
+        && !matches!(
+            transport.kind,
+            TransportKind::AppServer | TransportKind::Dsh
+        )
+    {
+        let idle = state
+            .workers
+            .get(recipient)
+            .and_then(|worker| worker_agent_facts(server, &state, worker).1)
+            .is_some_and(|fact| fact.activity == name_state::AgentActivity::Idle);
+        if !idle {
+            return NotificationAttempt::Deferred;
+        }
+    }
     let typed_wake_authority = {
         let has_typed_wake = state.msgs.values().any(|message| {
             message.to == recipient
@@ -1005,21 +1088,32 @@ fn attempt_tmux_notification_with_retry(
         if !has_typed_wake {
             None
         } else {
-            let route = match server_route_scope(server, &state) {
-                Ok(Some(route)) => route,
-                Ok(None) => return NotificationAttempt::Rejected(
+            let route = match cached_route.as_ref() {
+                Some(Some(route)) => route.clone(),
+                Some(None) => return NotificationAttempt::Rejected(
                     "CURRENT_MAP_ROUTE_UNAVAILABLE: typed wake requires a registered project route"
                         .into(),
                 ),
-                Err(error) => return NotificationAttempt::Rejected(error.into()),
+                None => match server_route_scope(server, &state) {
+                    Ok(Some(route)) => {
+                        cached_route = Some(Some(route.clone()));
+                        route
+                    }
+                    Ok(None) => {
+                        return NotificationAttempt::Rejected(
+                            "CURRENT_MAP_ROUTE_UNAVAILABLE: typed wake requires a registered project route"
+                                .into(),
+                        );
+                    }
+                    Err(error) => return NotificationAttempt::Rejected(error.into()),
+                },
             };
-            let control = match binding_store::BindingControlStore::new(
-                server.host_paths.state_root(),
-            )
-            .load()
-            {
-                Ok(control) => control,
-                Err(error) => return NotificationAttempt::Rejected(error),
+            let control = match cached_control.take() {
+                Some(control) => control,
+                None => match load_control(server) {
+                    Ok(control) => control,
+                    Err(error) => return NotificationAttempt::Rejected(error),
+                },
             };
             let Some(project) = state.global.lookup_project_for_route(&route) else {
                 return NotificationAttempt::Rejected(
@@ -1109,30 +1203,62 @@ fn attempt_tmux_notification_with_retry(
     {
         return NotificationAttempt::Consumed;
     }
-    let selected_binding = if transport.kind == TransportKind::Rex {
-        let route = match server_route_scope(server, &state) {
-            Ok(route) => route,
-            Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+    let (selected_binding, rex_expected_agent_kind) = if transport.kind == TransportKind::Rex {
+        let route = if let Some((route, _, _)) = typed_wake_authority.as_ref() {
+            Some(route.clone())
+        } else if let Some(route) = cached_route.as_ref() {
+            route.clone()
+        } else {
+            match server_route_scope(server, &state) {
+                Ok(route) => route,
+                Err(error) => return NotificationAttempt::NotAttempted(error.into()),
+            }
         };
-        let control =
-            match binding_store::BindingControlStore::new(server.host_paths.state_root()).load() {
-                Ok(control) => control,
+        let control_ref = if let Some((_, control, _)) = typed_wake_authority.as_ref() {
+            control
+        } else if let Some(control) = cached_control.as_ref() {
+            control
+        } else {
+            match load_control(server) {
+                Ok(control) => cached_control.insert(control),
                 Err(error) => return NotificationAttempt::NotAttempted(error),
-            };
-        match select_current_rex_delivery_binding(&control, route.as_ref(), recipient, transport) {
-            Ok(binding) => Some(binding),
+            }
+        };
+        let expected_kind = route
+            .as_ref()
+            .and_then(|route| {
+                control_ref
+                    .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|slot| slot.active_binding())
+            .and_then(|value| value.host.agent_kind.as_deref())
+            .and_then(crate::host_runtime::AgentKind::from_str);
+        match select_current_rex_delivery_binding(control_ref, route.as_ref(), recipient, transport) {
+            Ok(binding) => (Some(binding), expected_kind),
             Err(error) => return NotificationAttempt::NotAttempted(error),
         }
     } else {
         let selected = (|| -> Result<_, NotificationAttempt> {
-            let Some(route) = server_route_scope(server, &state)
-                .map_err(|error| NotificationAttempt::Rejected(error.into()))?
-            else {
+            let route = if let Some((route, _, _)) = typed_wake_authority.as_ref() {
+                Some(route.clone())
+            } else if let Some(route) = cached_route.as_ref() {
+                route.clone()
+            } else {
+                server_route_scope(server, &state)
+                    .map_err(|error| NotificationAttempt::Rejected(error.into()))?
+            };
+            let Some(route) = route else {
                 return Ok(None);
             };
-            let control = binding_store::BindingControlStore::new(server.host_paths.state_root())
-                .load()
-                .map_err(NotificationAttempt::Rejected)?;
+            let control = if let Some((_, control, _)) = typed_wake_authority.as_ref() {
+                control.clone()
+            } else if let Some(control) = cached_control.as_ref() {
+                control.clone()
+            } else {
+                load_control(server).map_err(NotificationAttempt::Rejected)?
+            };
             let slot = control
                 .current_for_worker(&route.project_scope_id, &route.app_scope_id, recipient)
                 .map_err(NotificationAttempt::Rejected)?;
@@ -1148,7 +1274,7 @@ fn attempt_tmux_notification_with_retry(
             Ok(slot.and_then(notification_contract::SelectedDeliveryBinding::from_slot))
         })();
         match selected {
-            Ok(binding) => binding,
+            Ok(binding) => (binding, None),
             Err(attempt) => return attempt,
         }
     };
@@ -1169,6 +1295,12 @@ fn attempt_tmux_notification_with_retry(
         .get(&seed_id)
         .cloned()
         .unwrap_or_else(|| "immediate".into());
+    let seed_effective_mode = effective_batch_sink_mode(&delivery_mode);
+    let effective_delay = if recipient_protected && seed_scheduled {
+        0
+    } else {
+        delay
+    };
     let mut batch = state
         .msgs
         .values()
@@ -1176,17 +1308,45 @@ fn attempt_tmux_notification_with_retry(
             if board_invitation.is_some() && message.id != seed_id {
                 return None;
             }
+            if board_invitation.is_none()
+                && !recipient_protected
+                && current_board_invitation_for_message(&state, message)
+                    .is_some_and(|invitation| invitation.one_shot)
+                && message.id != seed_id
+            {
+                return None;
+            }
             if stale_one_shot_invitation(&state, message, selected_binding.as_ref()) {
                 return None;
             }
             let binding = state.wake_bindings.get(&message.id)?;
             let sub = state.notification_subscriptions.get(binding)?;
-            let message_explicit = is_explicit_notification(&state, message);
             let map_allows = match state.mailbox_name_addresses.get(&message.id) {
                 Some(_) => typed_wake_allowed
                     .as_ref()
                     .is_some_and(|allowed| allowed.contains(&message.id)),
                 None => true,
+            };
+            let candidate_mode = state
+                .delivery_modes
+                .get(&message.id)
+                .map(String::as_str)
+                .unwrap_or("immediate");
+            let candidate_effective_mode = effective_batch_sink_mode(candidate_mode);
+            let mode_and_delay_match = if recipient_protected && seed_scheduled {
+                // Due periodic wake folds compatible pending mailbox events for
+                // the same protected recipient into one non-steering batch.
+                message.created_ms <= now
+                    && !state.notification_delivery_accepted.contains_key(&message.id)
+                    && !state.notification_delivery_failures.contains_key(&message.id)
+            } else {
+                candidate_effective_mode == seed_effective_mode
+                    && notification_delivery_delay_ms(
+                        &state,
+                        &message.id,
+                        &sub.event,
+                        &server.config.notifications,
+                    ) == effective_delay
             };
             (state.message_receivable_by(recipient, message)
                 && map_allows
@@ -1194,29 +1354,14 @@ fn attempt_tmux_notification_with_retry(
                 && timers::goal_wake_delivery_allowed(server, &state, message, sub, transport, now)
                 && state.scheduler_message_deliverable(&message.id)
                 && (!state.board_patrol_notice_ids.contains(&message.id) || patrol_current)
-                && message_explicit == explicit
-                && state
-                    .target_sessions
-                    .get(&message.id)
-                    .map(|ts| transport.session_id.as_deref() == Some(ts.as_str()))
-                    .unwrap_or(true)
-                && state
-                    .delivery_modes
-                    .get(&message.id)
-                    .map(String::as_str)
-                    .unwrap_or("immediate")
-                    == delivery_mode.as_str()
-                && notification_delivery_delay_ms(
-                    &state,
-                    &message.id,
-                    &sub.event,
-                    &server.config.notifications,
-                ) == delay
+                && mode_and_delay_match
                 && (message.state == "pending" || state.handoff_wake_pending(message))
                 && (if retry {
                     message.id == seed_id
                 } else {
                     (allow_retry && message.id == seed_id)
+                        || (notification_reconnect_pending(&state, seed)
+                            && notification_reconnect_pending(&state, message))
                         || state.handoff_wake_pending(message)
                         || message.wake_attempt_count < MAX_WAKE_ATTEMPTS
                 })
@@ -1239,52 +1384,58 @@ fn attempt_tmux_notification_with_retry(
         })
         .collect::<Vec<_>>();
     batch.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-    let Some(window_start_ms) = batch.first().map(|candidate| candidate.0) else {
+    let Some(first_created_ms) = batch.first().map(|candidate| candidate.0) else {
         return NotificationAttempt::NotAttempted("no notification batch is ready".into());
     };
-    let (batch, remaining) = mailbox::select_batch(batch, delay, window_start_ms);
+    let window_start_ms = if recipient_protected && seed_scheduled {
+        now
+    } else {
+        first_created_ms
+    };
+    let (batch, remaining) = mailbox::select_batch(batch, effective_delay, window_start_ms);
     let Some(first) = batch.first() else {
         return NotificationAttempt::NotAttempted("notification batch is empty".into());
     };
+    let explicit = explicit
+        || batch
+            .iter()
+            .any(|entry| is_explicit_notification(&state, &state.msgs[&entry.1]));
     let batch_has_one_shot_invitation = batch.iter().any(|(_, message_id, ..)| {
         board_invitation_for_message(&state, &state.msgs[message_id])
             .is_some_and(|invitation| invitation.one_shot)
     });
-    let queued_tmux = transport.kind == TransportKind::Tmux && delivery_mode == "queued";
+    let queued_terminal = matches!(transport.kind, TransportKind::Tmux | TransportKind::Rex)
+        && seed_effective_mode == "queued";
     let last_attempt = state
         .msgs
         .values()
         .filter_map(|message| {
             let binding = state.wake_bindings.get(&message.id)?;
             let sub = state.notification_subscriptions.get(binding)?;
-            let message_explicit = is_explicit_notification(&state, message);
+            let candidate_mode = state
+                .delivery_modes
+                .get(&message.id)
+                .map(String::as_str)
+                .unwrap_or("immediate");
             (state.message_receivable_by(recipient, message)
-                && message_explicit == explicit
-                && state
-                    .delivery_modes
-                    .get(&message.id)
-                    .map(String::as_str)
-                    .unwrap_or("immediate")
-                    == delivery_mode.as_str()
+                && effective_batch_sink_mode(candidate_mode) == seed_effective_mode
                 && notification_delivery_delay_ms(
                     &state,
                     &message.id,
                     &sub.event,
                     &server.config.notifications,
-                ) == delay
+                ) == effective_delay
                 && sub.worker_id == recipient
                 && subscription_can_use_current_transport(sub, transport))
             .then_some(message.last_wake_attempt_ms)
         })
         .max()
         .unwrap_or(0);
-    if now.saturating_sub(window_start_ms) < delay || now.saturating_sub(last_attempt) < delay {
-        if queued_tmux {
-            return NotificationAttempt::Deferred(None);
-        }
-        return NotificationAttempt::NotAttempted(
-            "notification delivery window has not elapsed".into(),
-        );
+    if !(recipient_protected && seed_scheduled)
+        && (now.saturating_sub(window_start_ms) < effective_delay
+            || now.saturating_sub(last_attempt) < effective_delay)
+    {
+        return NotificationAttempt::Deferred;
     }
     if retry {
         if let Some(reason) = explicit_retry_refusal(&state, message_id) {
@@ -1355,23 +1506,18 @@ fn attempt_tmux_notification_with_retry(
         .iter()
         .map(|entry| (entry, state.msgs[&entry.1].wake_attempt_count))
         .collect::<Vec<_>>();
-    // The network adapters use their existing total-deadline calls under
-    // this lock. Tmux and Rex periodic goals already use the idle guard.
-    let guarded_task_wake = !task_wake_ids.is_empty()
-        && matches!(
-            transport.kind,
-            TransportKind::AppServer | TransportKind::DesktopBridge | TransportKind::Dsh
-        );
-    let goal_submission_guard = if guarded_task_wake
-        || batch.iter().any(|entry| {
-            timers::requires_goal_idle(
-                &state,
-                &state.msgs[&entry.1],
-                &state.notification_subscriptions[&entry.2],
-                transport,
-            )
-        })
-    {
+    // For native goal wakes, the final eligibility check, durable reservation
+    // and submission share the state lock with goal edits and status writes.
+    // The native sinks do not access project state. Other mail keeps the
+    // existing unlocked submission path.
+    let goal_submission_guard = if batch.iter().any(|entry| {
+        timers::requires_goal_idle(
+            &state,
+            &state.msgs[&entry.1],
+            &state.notification_subscriptions[&entry.2],
+            transport,
+        )
+    }) {
         Some(state)
     } else {
         drop(state);
@@ -1430,9 +1576,14 @@ fn attempt_tmux_notification_with_retry(
             explicit,
             guarded_one_shot: batch_has_one_shot_invitation,
             guarded_goal: goal_submission_guard.is_some(),
+            expected_agent_kind: rex_expected_agent_kind,
         },
-        if queued_tmux {
+        if queued_terminal {
             DAEMON_LIVE_CLOSURE_MODE
+        } else if recipient_protected
+            && matches!(transport.kind, TransportKind::AppServer | TransportKind::Dsh)
+        {
+            "queued"
         } else if delivery_mode == mailbox::REGISTRATION_NOTIFICATION_MODE {
             "explicit-notification"
         } else {
@@ -1508,7 +1659,7 @@ fn attempt_tmux_notification_with_retry(
                 );
             }
             if !seed_was_submitted {
-                NotificationAttempt::Deferred(None)
+                NotificationAttempt::Deferred
             } else if seed_is_current {
                 NotificationAttempt::Accepted
             } else {
@@ -1575,7 +1726,7 @@ fn attempt_tmux_notification_with_retry(
             } else if seed_was_submitted {
                 NotificationAttempt::Rejected(error)
             } else {
-                NotificationAttempt::Deferred(None)
+                NotificationAttempt::Deferred
             }
         }
     }
@@ -1828,47 +1979,50 @@ fn attempt_notification_detailed_with_mode_at_inner(
     attempt
 }
 
+fn is_scheduled_patrol_or_deadline(
+    state: &State,
+    message: &Message,
+    subscription: &NotificationSubscription,
+) -> bool {
+    timers::is_standing_project_patrol(subscription)
+        || subscription.event == "deadline"
+        || subscription.event == "master-idle"
+        || state.board_patrol_notice_ids.contains(&message.id)
+}
+
+fn effective_batch_sink_mode(raw_mode: &str) -> &'static str {
+    match raw_mode {
+        "explicit-notification" => "explicit-notification",
+        "queued" => "queued",
+        DAEMON_LIVE_CLOSURE_MODE => DAEMON_LIVE_CLOSURE_MODE,
+        RESTART_REPLAY_PENDING_MODE => RESTART_REPLAY_PENDING_MODE,
+        _ => "immediate",
+    }
+}
+
 fn notification_delivery_delay_ms(
     state: &State,
     message_id: &str,
     event: &str,
     config: &crate::config::Notifications,
 ) -> i64 {
-    // These native channels own scheduling after acceptance; the daemon must
-    // not add a notification aggregation window before it submits their input.
-    if state
-        .msgs
-        .get(message_id)
-        .and_then(|message| state.workers.get(&message.to))
-        .and_then(selected_transport_for_worker)
-        .is_some_and(|transport| {
-            matches!(
-                transport.kind,
-                TransportKind::Dsh | TransportKind::DesktopBridge
-            )
-        })
-    {
+    if state.msgs.get(message_id).is_some_and(|message| {
+        state
+            .wake_bindings
+            .get(message_id)
+            .and_then(|sub_id| state.notification_subscriptions.get(sub_id))
+            .is_some_and(|sub| is_scheduled_patrol_or_deadline(state, message, sub))
+    }) {
         return 0;
     }
-    if state
-        .delivery_modes
-        .get(message_id)
-        .is_some_and(|mode| mode == "queued")
-        && state
-            .msgs
-            .get(message_id)
-            .and_then(|message| state.workers.get(&message.to))
-            .and_then(selected_transport_for_worker)
-            .is_some_and(|transport| transport.kind == TransportKind::Tmux)
-    {
-        return config.delay_ms(event);
+    if message_id.starts_with("ticket-claim-") {
+        return 0;
     }
     match state.delivery_modes.get(message_id).map(String::as_str) {
         Some(
             "explicit-notification"
             | mailbox::REGISTRATION_NOTIFICATION_MODE
             | "immediate"
-            | "queued"
             | DAEMON_LIVE_CLOSURE_MODE
             | RESTART_REPLAY_PENDING_MODE,
         ) => 0,
@@ -2113,13 +2267,10 @@ fn notification_send_response(
             data["repair_required"] = json!(false);
             Resp::data(data)
         }
-        NotificationAttempt::Deferred(reason) => {
+        NotificationAttempt::Deferred => {
             data["durable"] = json!(true);
             data["notification"] = json!("queued");
             data["consumed"] = json!(false);
-            if let Some(reason) = reason {
-                data["notification_error"] = json!(reason);
-            }
             Resp::data(data)
         }
         NotificationAttempt::Accepted => {
@@ -2170,9 +2321,7 @@ fn notification_send_response(
                 data,
             )
         }
-        NotificationAttempt::NotAttempted(error)
-            if error.starts_with("RECIPIENT_NOT_ONLINE:") =>
-        {
+        NotificationAttempt::NotAttempted(error) if error.starts_with("RECIPIENT_NOT_ONLINE:") => {
             // The durable send succeeded. The offline recipient owns an
             // unread row and receives input only after a later online probe.
             data["durable"] = json!(true);

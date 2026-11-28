@@ -68,14 +68,20 @@ fn multiple_open_tasks_follow_current_session_and_preserve_closed_history() {
         ("t8-accepted", "accepted"),
         ("t8-closed", "closed"),
     ] {
-        publish_and_claim(&fixture, id);
-        let worktree = fixture.root.join(id);
-        // Lifecycle evidence/resources are pre-existing inputs. This consumer
-        // tests name continuation, not delivery/review/closure admission.
-        records.push((id, status, worktree));
+        fixture.run_public(
+            &["task", "register", id, "--next", "retain this work"],
+            THREAD_B,
+        );
+        records.push((id, status, fixture.root.join(id)));
     }
+    // Tasks, assignments, and lifecycle resources are pre-existing inputs.
+    // This consumer tests name continuation, not Execute claim admission.
     fixture.update_current_state(|state| {
         for (id, status, worktree) in records {
+            state["task_assignments"][id] = json!({
+                "task_id":id,"name":"Bob","session_id":THREAD_B,
+                "assignment_revision":1,"updated_ms":1
+            });
             state["tasks"][id] = json!({
                 "id":id,"owner":peer,"created_by":master,"status":status,"priority":"p2",
                 "feature_id":"t8-feature","worktree_path":worktree,"branch":"codex/t8",

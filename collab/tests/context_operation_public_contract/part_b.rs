@@ -4867,7 +4867,7 @@ fn c03_unapproved_unique_pane_stale_recovery_repairs_without_approval() {
         "{automatic_payload}"
     );
     assert!(
-        !automatic_text.contains("stale-"),
+        !automatic_text.contains(&fence.stale_token),
         "approval result must not leak the stale credential: {automatic_text}"
     );
     assert_eq!(

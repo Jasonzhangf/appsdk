@@ -46,6 +46,35 @@ pub enum MachineCommand {
         #[arg(long)]
         path: PathBuf,
     },
+    /// Inspect and deliver to remote managers via external zterm CLI
+    Zterm {
+        #[command(subcommand)]
+        command: ZtermCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ZtermCommand {
+    /// Check local zterm daemon and slot availability
+    Status,
+    /// List deliverable remote managers discovered via zterm CLI
+    Managers {
+        #[arg(long)]
+        peer: Option<String>,
+    },
+    /// Deliver a message to a named remote manager via zterm CLI
+    Send {
+        #[arg(long)]
+        peer: String,
+        #[arg(long)]
+        manager: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long)]
+        message_id: Option<String>,
+    },
 }
 
 pub fn execute(command: MachineCommand) -> Result<Value> {
@@ -85,6 +114,42 @@ fn execute_at(config_path: &Path, command: MachineCommand) -> Result<Value> {
             runtime.block_on(management::check_peer(config_path, &name, CHECK_TIMEOUT))
         }
         MachineCommand::CredentialCreate { path } => management::create_credential(&path),
+        MachineCommand::Zterm { command } => execute_zterm(command),
+    }
+}
+
+fn execute_zterm(command: ZtermCommand) -> Result<Value> {
+    use crate::client::adapters::zterm;
+    match command {
+        ZtermCommand::Status => {
+            let status = zterm::daemon_status().map_err(anyhow::Error::msg)?;
+            let slots = zterm::list_slots().map_err(anyhow::Error::msg)?;
+            Ok(serde_json::json!({
+                "daemon": status,
+                "slots": slots,
+            }))
+        }
+        ZtermCommand::Managers { peer } => {
+            let managers = zterm::list_remote_managers(peer.as_deref()).map_err(anyhow::Error::msg)?;
+            Ok(serde_json::json!({ "managers": managers }))
+        }
+        ZtermCommand::Send {
+            peer,
+            manager,
+            subject,
+            body,
+            message_id,
+        } => {
+            let receipt = zterm::send_to_remote_manager(
+                &peer,
+                &manager,
+                &subject,
+                &body,
+                message_id.as_deref(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            Ok(serde_json::to_value(receipt)?)
+        }
     }
 }
 

@@ -3299,6 +3299,7 @@ async fn rex_service_generation_change_is_recovered_for_qqbot_ceo_inbound() {
                 platform_message_id: "platform-service-change".into(),
                 reply_route: "qqbot://c2c/conversation".into(),
                 recipient_address: "ceo".into(),
+                quoted_platform_message_id: None,
                 attachments: vec![],
             },
         )

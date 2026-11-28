@@ -409,6 +409,65 @@ pub(crate) fn resolve_channel_inbound_target(
     })
 }
 
+/// Resolve the original sender/target of a quoted QQ platform message id.
+/// Checks outbound `channel_delivery_results` first (the worker that replied to
+/// QQ), then falls back to inbound `channel_envelopes` with that platform id.
+pub(crate) fn resolve_quoted_target(
+    state: &crate::server::state::State,
+    quoted_platform_message_id: &str,
+) -> Option<(String, String)> {
+    let quoted_id = quoted_platform_message_id.trim();
+    if quoted_id.is_empty() {
+        return None;
+    }
+    if let Some(delivery) = state
+        .channel_delivery_results
+        .values()
+        .find(|res| res.platform_message_id.as_deref() == Some(quoted_id))
+    {
+        if let Some(msg) = state.msgs.get(&delivery.message_id) {
+            if state.workers.contains_key(&msg.from) {
+                return Some((msg.from.clone(), msg.from.clone()));
+            }
+        }
+    }
+    for (collab_msg_id, env) in &state.channel_envelopes {
+        if env.platform_message_id == quoted_id {
+            if let Some(msg) = state.msgs.get(collab_msg_id) {
+                if state.workers.contains_key(&msg.to) {
+                    return Some((msg.to.clone(), env.recipient_address.clone()));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Return the active 30-second merge window for a conversation if it has not
+/// expired and its first worker is still registered.
+pub(crate) fn active_merge_window<'a>(
+    state: &'a crate::server::state::State,
+    channel: &str,
+    channel_instance: &str,
+    conversation: &str,
+    now_ms: i64,
+) -> Option<&'a crate::server::channel_envelope::ChannelInboundMergeWindow> {
+    let key = crate::server::conversation_default::conversation_default_key(
+        channel,
+        channel_instance,
+        conversation,
+    );
+    let window = state.channel_inbound_merge_windows.get(&key)?;
+    if now_ms.saturating_sub(window.started_ms)
+        <= crate::server::channel_envelope::CHANNEL_INBOUND_MERGE_WINDOW_MS
+        && state.workers.contains_key(&window.first_worker_id)
+    {
+        Some(window)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod channel_routing_federation_tests {
     use super::*;

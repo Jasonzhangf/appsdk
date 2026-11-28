@@ -1965,6 +1965,15 @@ pub enum Event {
     ChannelDeliveryResultRecorded {
         result: crate::server::channel_delivery::ChannelDeliveryResult,
     },
+    ChannelInboundMergeWindowUpdated {
+        conversation_key: String,
+        window: crate::server::channel_envelope::ChannelInboundMergeWindow,
+    },
+    ChannelInboundMessageMerged {
+        message_id: String,
+        appended_body: String,
+        platform_event_key: String,
+    },
 }
 
 include!("state/state_tail.rs");

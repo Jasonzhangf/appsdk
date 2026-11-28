@@ -70,8 +70,20 @@ pub struct ChannelEnvelope {
     pub reply_route: String,
     /// Resolved recipient address (explicit or conversation default).
     pub recipient_address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted_platform_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentDescriptor>,
+}
+
+pub const CHANNEL_INBOUND_MERGE_WINDOW_MS: i64 = 30_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelInboundMergeWindow {
+    pub first_target_address: String,
+    pub first_worker_id: String,
+    pub started_ms: i64,
+    pub last_message_id: String,
 }
 
 /// Minimal immutable outbound route copied from one inbound envelope. It is
@@ -353,6 +365,7 @@ mod tests {
                 platform_message_id: "../../platform/../../id".into(),
                 reply_route: "qqbot://u1/session".into(),
                 recipient_address: "agent".into(),
+                quoted_platform_message_id: None,
                 attachments: Vec::new(),
             },
             0,
@@ -400,6 +413,7 @@ mod tests {
                 platform_message_id: "platform-1".into(),
                 reply_route: "qqbot://u1/session".into(),
                 recipient_address: "agent".into(),
+                quoted_platform_message_id: None,
                 attachments: Vec::new(),
             },
             0,
@@ -429,6 +443,7 @@ mod tests {
             platform_message_id: "same-event".into(),
             reply_route: "qqbot://u1/session".into(),
             recipient_address: "agent".into(),
+            quoted_platform_message_id: None,
             attachments: Vec::new(),
         };
         let mut envelope_b = envelope_a.clone();
@@ -468,6 +483,7 @@ mod tests {
                     platform_message_id: event_id.into(),
                     reply_route: "qqbot://u1/session".into(),
                     recipient_address: "agent".into(),
+                    quoted_platform_message_id: None,
                     attachments: Vec::new(),
                 },
                 0,
@@ -493,6 +509,7 @@ mod tests {
                     platform_message_id: event_id.clone(),
                     reply_route: "qqbot://u1/session".into(),
                     recipient_address: "agent".into(),
+                    quoted_platform_message_id: None,
                     attachments: Vec::new(),
                 },
                 0,
@@ -532,6 +549,7 @@ mod tests {
             platform_message_id: "event-1".into(),
             reply_route: "qqbot://u1/session".into(),
             recipient_address: "agent".into(),
+            quoted_platform_message_id: None,
             attachments: Vec::new(),
         };
         let first = stage_inbound_attachment(

@@ -63,6 +63,9 @@ pub struct State {
     /// projected into `Message.state`.
     pub channel_delivery_results:
         std::collections::HashMap<String, crate::server::channel_delivery::ChannelDeliveryResult>,
+    #[serde(default)]
+    pub channel_inbound_merge_windows:
+        std::collections::HashMap<String, crate::server::channel_envelope::ChannelInboundMergeWindow>,
     pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,
     /// Last native attempt accepted for a durable message, if any.
     pub notification_delivery_accepted: HashMap<String, i64>,

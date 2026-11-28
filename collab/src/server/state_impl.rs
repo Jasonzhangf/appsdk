@@ -596,6 +596,31 @@ impl State {
                 self.channel_delivery_results
                     .insert(result.message_id.clone(), result.clone());
             }
+            Event::ChannelInboundMergeWindowUpdated {
+                conversation_key,
+                window,
+            } => {
+                self.channel_inbound_merge_windows
+                    .insert(conversation_key.clone(), window.clone());
+            }
+            Event::ChannelInboundMessageMerged {
+                message_id,
+                appended_body,
+                platform_event_key,
+            } => {
+                if let Some(msg) = self.msgs.get_mut(message_id) {
+                    if !msg.body.is_empty() && !appended_body.is_empty() {
+                        msg.body.push('\n');
+                    }
+                    msg.body.push_str(appended_body);
+                }
+                self.platform_event_index.insert(
+                    platform_event_key.clone(),
+                    crate::server::channel_envelope::PlatformEventTarget::LocalMessage(
+                        message_id.clone(),
+                    ),
+                );
+            }
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
                 self.goal_idle_wake.remove(worker_id);

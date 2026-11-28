@@ -7,6 +7,7 @@ pub mod dsh;
 pub mod qqbot;
 pub mod rex;
 pub mod tmux;
+pub mod zterm;
 
 pub use crate::proto::RexEndpoint as RexAdapterEndpoint;
 pub use codex_app_server::verify_candidate;

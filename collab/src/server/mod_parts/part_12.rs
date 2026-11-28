@@ -1054,6 +1054,20 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
 
     let mut connection_tasks = tokio::task::JoinSet::new();
     let (connection_shutdown, connection_shutdown_rx) = tokio::sync::watch::channel(false);
+    #[cfg(not(test))]
+    {
+        let zterm_state_root = host_paths.state_root().to_path_buf();
+        let zterm_log_path = host_paths.log_path();
+        if crate::client::adapters::zterm::daemon_status().is_ok_and(|status| status.running) {
+            std::thread::spawn(move || {
+                if let Err(error) =
+                    crate::client::adapters::zterm::listen_stream_loop(&zterm_state_root, None)
+                {
+                    append_log(&zterm_log_path, &format!("ZTERM_STREAM_STOPPED: {error}"));
+                }
+            });
+        }
+    }
     let (user_shutdown_tx, mut user_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
     tokio::select! {
         _ = user_shutdown_rx.recv() => {}

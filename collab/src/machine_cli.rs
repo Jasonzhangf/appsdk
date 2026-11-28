@@ -75,6 +75,11 @@ pub enum ZtermCommand {
         #[arg(long)]
         message_id: Option<String>,
     },
+    /// Listen to inbound zterm app stream messages and route locally
+    Listen {
+        #[arg(long)]
+        max_events: Option<usize>,
+    },
 }
 
 pub fn execute(command: MachineCommand) -> Result<Value> {
@@ -149,6 +154,12 @@ fn execute_zterm(command: ZtermCommand) -> Result<Value> {
             )
             .map_err(anyhow::Error::msg)?;
             Ok(serde_json::to_value(receipt)?)
+        }
+        ZtermCommand::Listen { max_events } => {
+            let host_paths = crate::scope::HostPaths::resolve()?;
+            let events = zterm::listen_stream_loop(host_paths.state_root(), max_events)
+                .map_err(anyhow::Error::msg)?;
+            Ok(serde_json::json!({ "handled": events }))
         }
     }
 }

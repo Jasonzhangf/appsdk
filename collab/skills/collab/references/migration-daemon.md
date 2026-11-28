@@ -74,6 +74,22 @@ Never manually edit current identity, mailbox, token or route state. The removed
 
 ## Install and activate separately
 
+Standard post-fix rollout first merges the reviewed fix to `main` and cleans up
+the merged feature worktree, then builds and installs globally from the updated
+`main` checkout before restarting the global daemon:
+
+```sh
+scripts/build-collab.sh
+scripts/install-global-collab.sh
+~/.cargo/bin/collab up --restart
+~/.cargo/bin/collab --version
+~/.cargo/bin/collab status
+```
+
+Wait for `daemon_version` in `collab status` to match `collab --version`, then
+run `collab context` from each existing agent session that needs rebinding
+(never run `collab down` or `tmux kill-server`).
+
 Use the formal installer from the reviewed current source:
 
 ```sh

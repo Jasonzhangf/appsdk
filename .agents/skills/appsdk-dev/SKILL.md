@@ -185,10 +185,16 @@ Rust 格式检查使用对应 manifest 的 `cargo fmt -- --check`。
 |---|---|---|
 | AppSDK | `cargo build --release --manifest-path rust/Cargo.toml --locked`；`scripts/install-global-appsdk.sh` | 官方 installer 安装两个 binary 和三个分发 Skills；验证 installed 版本及受影响真实消费者，无 daemon |
 | DAGPipe | `scripts/install-global-dagpipe.sh` | 独立 CLI/SDK 安装；验证受影响图或真实库 consumer，无 daemon |
-| Collab | `scripts/build-collab.sh`；`scripts/install-global-collab.sh`；`collab/scripts/package-collab-tarball.sh` | 正式 release 构建由脚本分配 host build 版本；installer 不操作 daemon 生命周期。离线 tar 包由 `package-collab-tarball.sh` 生成，其 `install.sh` 与 installer 同为二进制 + Skills + `install-autostart`。全局 daemon 由用户管理，agent 只用 `collab context` 恢复 peer，不按任务内容增加身份校验 |
+| Collab | `scripts/build-collab.sh`；`scripts/install-global-collab.sh`；`collab/scripts/package-collab-tarball.sh` | 正式 release 构建由脚本分配 host build 版本；installer 不操作 daemon 生命周期。离线 tar 包由 `package-collab-tarball.sh` 生成，其 `install.sh` 与 installer 同为二进制 + Skills + `install-autostart`。全局 daemon 由 `collab up --restart` 重启生效，agent 只用 `collab context` 恢复 peer，不按任务内容增加身份校验 |
+
+Collab 修复或升级的标准交付与生效流程：
+
+1. 在独占 worktree 完成实现、受影响测试与独立 Review，将修复合流到最新 `main` 并清理已合流 worktree。
+2. 从最新 `main` 检出执行本地构建与全局安装：`scripts/build-collab.sh` 后执行 `scripts/install-global-collab.sh`（更新 `~/.cargo/bin/collab*` 及 `~/.agents/skills/collab`）。
+3. 从项目根执行 `~/.cargo/bin/collab up --restart` 重启全局 daemon，随后运行 `~/.cargo/bin/collab status` 与 `~/.cargo/bin/collab --version` 核对 `daemon_version` 与安装版本一致；需要恢复身份的原宿主会话运行 `collab context`（只读核对用 `collab context --query`）。`collab down`、维护密码与 `tmux kill-server` 仍严格禁止由 agent 自动执行。
 
 候选 `target/` 产物用于 build/test；安装与 live 验收使用正式安装位置。
-Collab 全局 daemon 由用户管理。agent 不启动、关闭或重启它；维护命令和凭据不进入 agent 接口。安装、源码与 live 验收分别报告。
+Collab 安装、源码与 live 验收分别报告；`collab up`（含 `--restart`）是唯一允许的 agent 启停入口，`collab down` 与维护凭据不进入 agent 接口。
 
 完整 AppSDK release 门禁沿 `verify.yml` 的 release job：AppSDK 与 DAGPipe 完整测试、
 格式、合同/版本、两个 release binary 构建、installer 事务、源码 registry 与真实

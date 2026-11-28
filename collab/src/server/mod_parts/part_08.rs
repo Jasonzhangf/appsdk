@@ -975,7 +975,9 @@ fn handle_send_with_task_policy(
     // Resolve and retain the original name under the durable admission lock.
     // A typed QQ reply uses the immutable envelope route and does not require a
     // local worker target; a normal send still resolves through directory facts.
-    let channel_address = to.starts_with("qqbot://") || (to.trim().is_empty() && in_reply_to.is_some());
+    let channel_address = to.starts_with("qqbot://")
+        || ((to == "external:qqbot" || to == "qqbot") && in_reply_to.is_some())
+        || (to.trim().is_empty() && in_reply_to.is_some());
     let channel_reference = if channel_address {
         in_reply_to
             .as_deref()
@@ -998,7 +1000,11 @@ fn handle_send_with_task_policy(
                 "CHANNEL_REPLY_FORBIDDEN: only the original recipient may reply through the original channel route",
             );
         }
-        if !to.trim().is_empty() && to != envelope.reply_route {
+        if !to.trim().is_empty()
+            && to != "external:qqbot"
+            && to != "qqbot"
+            && to != envelope.reply_route
+        {
             return Resp::err(
                 "CHANNEL_REPLY_ROUTE_MISMATCH: explicit --to does not match the original channel reply route",
             );

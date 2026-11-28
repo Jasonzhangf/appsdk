@@ -87,12 +87,30 @@ fn supervised_up_started(
     Ok(!was_running)
 }
 
-/// Use a retained credential for ordinary commands. Only context reconciles
-/// current communication facts; reading an identity must not refresh a route.
+/// Use a retained credential for ordinary commands. Automatically reconciles
+/// an existing bound anchor in the background when host facts drift or a
+/// stale route can be resolved without user approval.
 fn me(scope: &Scope) -> anyhow::Result<Identity> {
     let facts = collect_identity_facts(None)?;
     if facts.dsh_session_id.is_none() || facts.endpoint.is_some() {
-        return registered_project_identity(scope);
+        match registered_project_identity(scope) {
+            Ok(ident) => {
+                if main_context::anchor_drifted(&ident, &facts)
+                    && main_context::try_auto_reconcile_anchor(scope)
+                {
+                    if let Ok(refreshed) = registered_project_identity(scope) {
+                        return Ok(refreshed);
+                    }
+                }
+                return Ok(ident);
+            }
+            Err(err) => {
+                if main_context::try_auto_reconcile_anchor(scope) {
+                    return registered_project_identity(scope);
+                }
+                return Err(err);
+            }
+        }
     }
     // DSH retains its gateway-owned identity path. It has no native endpoint
     // supplement and is outside the native context fact contract.
@@ -1026,7 +1044,30 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
-        Cmd::List => {
+        Cmd::List {
+            local,
+            machine,
+            project,
+        } => {
+            if machine.is_some() || project.is_some() {
+                let host = crate::scope::HostPaths::resolve()?;
+                let v: serde_json::Value = client::call(
+                    &host.socket_path(),
+                    &Req::FederationDirectory { machine, project },
+                )?;
+                out(&v);
+                return Ok(());
+            }
+            if local {
+                let scope = Scope::resolve()?;
+                let v: serde_json::Value = client::call_with_context(
+                    &scope.sock_path(),
+                    &Req::Directory,
+                    Some(cli_project_context(&scope.root)?),
+                )?;
+                out(&v);
+                return Ok(());
+            }
             // Host-wide read-only directory. `list` must work from any cwd and
             // needs no project scope; its addresses and project_roots are the
             // single delivery source for channel adapters.
@@ -2100,9 +2141,22 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Recv {
             timeout,
             receive_id,
+            peek,
         } => {
             let scope = Scope::resolve()?;
             let ident = me(&scope)?;
+            if peek {
+                let v: serde_json::Value = call_project(
+                    &scope,
+                    &ident,
+                    &Req::Inbox {
+                        worker_id: ident.worker_id.clone(),
+                        token: ident.token.clone(),
+                    },
+                )?;
+                out(&v);
+                return Ok(());
+            }
             require_cli_mailbox_consumer(&ident)?;
             let receive_id = receive_id.unwrap_or_else(new_receive_id);
             // The caller must know the receive identity before consumption, not

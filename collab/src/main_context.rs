@@ -1038,3 +1038,77 @@ pub(crate) fn subagent_observe_query(
         _ => None,
     }
 }
+
+/// Returns true when the caller's live host anchor facts (thread, Rex block,
+/// or tmux pane) have drifted from the stored identity binding.
+pub(crate) fn anchor_drifted(ident: &Identity, facts: &IdentityFacts) -> bool {
+    if let (Some(live_thread), Some(runtime)) = (facts.thread_id.as_deref(), ident.runtime.as_ref())
+    {
+        if runtime
+            .native_thread_id
+            .as_ref()
+            .map(identity::NativeThreadId::as_str)
+            != Some(live_thread)
+        {
+            return true;
+        }
+    }
+    if let (Some(rex), Some(transport)) = (facts.rex.as_ref(), ident.transport.as_ref()) {
+        if transport.kind == proto::TransportKind::Rex
+            && transport.session_id.as_deref() != Some(rex.session_id.as_str())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Silently reconcile an existing bound anchor with the running daemon so
+/// normal CLI calls keep the anchor bound without forcing manual `collab context`.
+/// Never runs when no daemon socket exists or when no existing binding slot matches.
+pub(crate) fn try_auto_reconcile_anchor(scope: &Scope) -> bool {
+    if std::env::var_os("COLLAB_DISABLE_AUTO_ANCHOR").is_some() || !scope.sock_path().exists() {
+        return false;
+    }
+    let Ok(host_paths) = scope::HostPaths::resolve() else {
+        return false;
+    };
+    let Ok(project_context) = crate::context_operation::default_project_context(scope) else {
+        return false;
+    };
+    let Ok(facts) = collect_identity_facts(None) else {
+        return false;
+    };
+    let Ok(control) = server::binding_store::BindingControlStore::new(host_paths.state_root()).load()
+    else {
+        return false;
+    };
+    let cwd = scope::process_cwd().ok();
+    let cwd_str = cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let Ok(Some(_slot)) = control.lookup(
+        &project_context.project_scope,
+        &project_context.app_scope_id,
+        &facts,
+        cwd_str.as_deref(),
+    ) else {
+        return false;
+    };
+    let Ok(value) = context_operation_with_intent(
+        None,
+        Some(&scope.root),
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    ) else {
+        return false;
+    };
+    value.get("ok") == Some(&Value::Bool(true))
+        && value
+            .get("result")
+            .and_then(|r| r.get("snapshot"))
+            .and_then(|s| s.get("registered"))
+            == Some(&Value::Bool(true))
+}

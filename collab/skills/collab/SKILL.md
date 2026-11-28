@@ -11,6 +11,8 @@ description: "Collab 跨项目/跨机器通信与协作总控（原 agent shell 
 
 Collab 注册、恢复、收件、状态查询和交付都在原 agent 会话的 shell 中执行（禁止用 Computer Use / `cua_repl` / GUI 代跑 CLI）；仅在收到未消费 `COLLAB_NOTIFY` 时执行 `collab recv --timeout 0`。原会话缺 shell 或 CLI 时，保留原消息和任务状态，沿获授权通道报告缺失入口及恢复条件，继续能独立完成的工作。
 
+> **宿主识别与 `collab context` 唯一入口**：只要你在当前会话拥有 shell（Codex TUI / tmux / Rex，通常存在 `TMUX`、`REX_SESSION` 或 `CODEX_THREAD_ID` 且非 `Codex Desktop`），**你就在 TUI/终端宿主中，不是 Desktop**。必须直接在**本会话自己的 shell** 中运行 `collab context`；**严禁调用 MCP `collab_context` 工具**（在 TUI 中会报 `DESKTOP_BRIDGE_SESSION_REQUIRED`），也严禁派子 agent 代跑 `collab context`。
+
 本入口保留日常协作规则与高频角色矩阵。按已观察的事实先选择下表中的唯一入口，再只读取对应章节；不整篇加载。手册与本入口属于同一个 Skill。
 
 | 已观察条件 | 唯一分支入口 |

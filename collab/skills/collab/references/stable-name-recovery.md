@@ -41,11 +41,13 @@ read, wake or queue iteration while the current binding remains valid.
 
 ## 正常恢复
 
-在实际项目和实际宿主执行：
+在**本会话自己的 shell** 中，于目标项目根目录直接执行：
 
 ```sh
 collab context
 ```
+
+> **TUI / Rex / 终端宿主识别**：只要当前会话拥有 shell（非 `Codex Desktop`，通常存在 `TMUX`、`REX_SESSION` 或 `CODEX_THREAD_ID`），你就在 TUI/终端中。**绝不调用 MCP `collab_context` 工具**（会报 `DESKTOP_BRIDGE_SESSION_REQUIRED`），也不要派子 agent 代跑 `collab context`。
 
 `cwd` 选择项目。daemon 只在当前 map 内查询本项目和 app scope 的绑定。
 当前名字、agent sessionID 或 manifest 固定 binding 定位同一当前对象；旧数据

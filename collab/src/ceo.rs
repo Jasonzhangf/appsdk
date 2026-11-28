@@ -81,6 +81,14 @@ pub enum CeoCommand {
     Progress {
         project: Option<String>,
     },
+    Projects {
+        project: Option<String>,
+    },
+    ProjectInfo {
+        project: Option<String>,
+        name: Option<String>,
+        summary: Option<String>,
+    },
     /// Acknowledge one prepared report batch after actual visible user output.
     ReportAck {
         batch_id: String,

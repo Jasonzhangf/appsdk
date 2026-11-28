@@ -258,9 +258,19 @@ impl ProjectRuntimeManager {
             })
             && holder.as_deref() == Some(actor)
             && !actor.is_empty();
-        Resp::data(
-            json!({"ceo":grant,"worker_id":holder,"is_current":is_current,"authority_error":authority_error,"default_workspace":self.host.host_paths.state_root().join("workspace")}),
-        )
+        let projects = if is_current {
+            self.ceo_projects_overview_value(None).ok()
+        } else {
+            None
+        };
+        Resp::data(json!({
+            "ceo": grant,
+            "worker_id": holder,
+            "is_current": is_current,
+            "authority_error": authority_error,
+            "default_workspace": self.host.host_paths.state_root().join("workspace"),
+            "projects": projects,
+        }))
     }
 
     fn dispatch_ceo(
@@ -279,6 +289,9 @@ impl ProjectRuntimeManager {
                 .map(|_| worker_id.clone())
                 .unwrap_or_default();
             self.ceo_status(context.as_ref(), &actor)
+        } else if let CeoCommand::Projects { project } = command {
+            self.ceo_projects_overview(project)
+                .unwrap_or_else(|error| error)
         } else {
             self.execute_ceo(context.as_ref(), worker_id, token, command)
                 .unwrap_or_else(|error| error)
@@ -528,6 +541,12 @@ impl ProjectRuntimeManager {
                         )
                     }
                     CeoCommand::Progress { project } => self.ceo_progress(project),
+                    CeoCommand::Projects { project } => self.ceo_projects_overview(project),
+                    CeoCommand::ProjectInfo {
+                        project,
+                        name,
+                        summary,
+                    } => self.ceo_project_info(&source, project, name, summary),
                     CeoCommand::ReportAck { batch_id } => self.ceo_report_ack(batch_id),
                     CeoCommand::BootstrapPrepare {
                         project,
@@ -1143,7 +1162,31 @@ impl ProjectRuntimeManager {
                         })
                     })
                     .unwrap_or_else(|| json!({"armed": false}));
-                projects.push(json!({"project":root,"app_scope_id":scope.as_ref().map(|s|s.app_scope_id.as_str()),"registered":true,"master":master,"workspace":workspace,"patrol":master_patrol,"tasks":tasks,"task_counts":counts,"pending_replies":[]}));
+                let (project_name, project_summary) =
+                    project_registration_metadata(&state, scope.as_ref());
+                let label = format_project_label(
+                    "local",
+                    project_name.as_deref(),
+                    &root.to_string_lossy(),
+                    master.as_deref(),
+                );
+                let peer_counts = collect_peer_counts(&runtime, &state);
+                projects.push(json!({
+                    "label": label,
+                    "scope": "local",
+                    "project": root,
+                    "project_name": project_name,
+                    "summary": project_summary,
+                    "app_scope_id": scope.as_ref().map(|s| s.app_scope_id.as_str()),
+                    "registered": true,
+                    "master": master,
+                    "workspace": workspace,
+                    "patrol": master_patrol,
+                    "peer_counts": peer_counts,
+                    "tasks": tasks,
+                    "task_counts": counts,
+                    "pending_replies": [],
+                }));
             }
         }
         let operations = self
@@ -1158,13 +1201,274 @@ impl ProjectRuntimeManager {
         let filter = project_filter
             .as_deref()
             .map(|path| path.to_string_lossy().into_owned());
+        let remote_projects = self.remote_zterm_projects();
         let report = self.ceo_prepare_report_batch(filter.as_deref())?;
         Ok(Resp::data(json!({
             "projects": projects,
+            "remote_projects": remote_projects,
             "bootstrap_operations": operations,
             "report": report,
         })))
     }
+
+    fn ceo_projects_overview(&self, project: Option<String>) -> Result<Resp, Resp> {
+        let value = self.ceo_projects_overview_value(project)?;
+        Ok(Resp::data(value))
+    }
+
+    fn ceo_projects_overview_value(
+        &self,
+        project: Option<String>,
+    ) -> Result<serde_json::Value, Resp> {
+        let roots: Vec<PathBuf> = if let Some(project) = project {
+            let root = std::fs::canonicalize(project)
+                .map_err(|e| Resp::err(format!("CEO_PROJECT_INVALID: {e}")))?;
+            vec![root]
+        } else {
+            self.routes
+                .lock()
+                .unwrap()
+                .values()
+                .map(|r| r.root.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        let mut local_projects = Vec::new();
+        for root in &roots {
+            let runtimes = self.ceo_project_runtimes(&root.to_string_lossy(), None)?;
+            for runtime in runtimes {
+                let state = runtime.state.lock().unwrap();
+                let master = current_master_holder(&runtime, &state).map_err(Resp::err)?;
+                let scope = server_route_scope(&runtime, &state).map_err(Resp::err)?;
+                let (project_name, summary) =
+                    project_registration_metadata(&state, scope.as_ref());
+                let label = format_project_label(
+                    "local",
+                    project_name.as_deref(),
+                    &root.to_string_lossy(),
+                    master.as_deref(),
+                );
+                let peer_counts = collect_peer_counts(&runtime, &state);
+                let patrol = master
+                    .as_deref()
+                    .and_then(|master_id| {
+                        state.notification_subscriptions.values().find(|sub| {
+                            sub.worker_id == master_id
+                                && sub.status == "armed"
+                                && sub.expires_ms > now_ms()
+                                && crate::server::is_exact_project_patrol(sub)
+                        })
+                    })
+                    .map(|sub| {
+                        json!({
+                            "armed": true,
+                            "interval_ms": sub.interval_ms,
+                            "expires_ms": sub.expires_ms,
+                        })
+                    })
+                    .unwrap_or_else(|| json!({"armed": false}));
+                local_projects.push(json!({
+                    "label": label,
+                    "scope": "local",
+                    "project": root,
+                    "project_name": project_name,
+                    "summary": summary,
+                    "master": master,
+                    "patrol": patrol,
+                    "peer_counts": peer_counts,
+                }));
+            }
+        }
+        let remote_projects = self.remote_zterm_projects();
+        Ok(json!({
+            "local": local_projects,
+            "remote": remote_projects,
+            "local_count": local_projects.len(),
+            "remote_count": remote_projects.len(),
+        }))
+    }
+
+    fn remote_zterm_projects(&self) -> Vec<serde_json::Value> {
+        let cache_path = self
+            .host
+            .host_paths
+            .state_root()
+            .join("zterm-remote-managers.json");
+        let Ok(raw) = std::fs::read_to_string(&cache_path) else {
+            return Vec::new();
+        };
+        let Ok(cache) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
+        else {
+            return Vec::new();
+        };
+        let mut results = Vec::new();
+        for (machine, entry) in cache {
+            let Some(managers) = entry.get("managers").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for item in managers {
+                let manager = item
+                    .get("manager")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unassigned");
+                let project_path = item.get("project").and_then(|v| v.as_str()).unwrap_or("");
+                let summary = item.get("summary").and_then(|v| v.as_str());
+                let status = item
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let deliverable = item
+                    .get("deliverable")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let peer_counts = item.get("peer_counts").cloned();
+                let label = format_project_label(&machine, None, project_path, Some(manager));
+                results.push(json!({
+                    "label": label,
+                    "scope": "remote",
+                    "machine": machine,
+                    "project": project_path,
+                    "summary": summary,
+                    "manager": manager,
+                    "status": status,
+                    "deliverable": deliverable,
+                    "peer_counts": peer_counts,
+                }));
+            }
+        }
+        results
+    }
+
+    fn ceo_project_info(
+        &self,
+        default_source: &Arc<Server>,
+        project: Option<String>,
+        name: Option<String>,
+        summary: Option<String>,
+    ) -> Result<Resp, Resp> {
+        let target_server = if let Some(project) = project {
+            let root = std::fs::canonicalize(&project)
+                .map_err(|e| Resp::err(format!("CEO_PROJECT_INVALID: {e}")))?;
+            let runtimes = self.ceo_project_runtimes(&root.to_string_lossy(), None)?;
+            runtimes
+                .into_iter()
+                .next()
+                .ok_or_else(|| Resp::err("CEO_TARGET_PROJECT_NOT_REGISTERED"))?
+        } else {
+            Arc::clone(default_source)
+        };
+        let scope = {
+            let state = target_server.state.lock().unwrap();
+            server_route_scope(&target_server, &state)
+                .map_err(Resp::err)?
+                .ok_or_else(|| Resp::err("CEO_TARGET_PROJECT_NOT_REGISTERED"))?
+        };
+        let mut registration = {
+            let state = target_server.state.lock().unwrap();
+            state
+                .global
+                .lookup_project(&scope.project_scope_id)
+                .and_then(|project| project.registrations.get(scope.app_scope_id.as_str()))
+                .cloned()
+                .unwrap_or_else(|| {
+                    crate::server::global_state::ProjectRegistration::with_registered_at(
+                        scope.project_scope_id.clone(),
+                        scope.app_scope_id.clone(),
+                        now_ms(),
+                    )
+                    .expect("valid project registration")
+                })
+        };
+        if let Some(name) = name {
+            let trimmed = name.trim();
+            registration.project_name = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+        }
+        if let Some(summary) = summary {
+            let trimmed = summary.trim();
+            registration.summary = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+        }
+        target_server.commit(&[Event::GlobalProjectRegistered {
+            registration: registration.clone(),
+        }]);
+        Ok(Resp::data(json!({
+            "project": target_server.root,
+            "project_name": registration.project_name,
+            "summary": registration.summary,
+        })))
+    }
+}
+
+fn project_registration_metadata(
+    state: &State,
+    scope: Option<&crate::scope::RouteScope>,
+) -> (Option<String>, Option<String>) {
+    let Some(scope) = scope else {
+        return (None, None);
+    };
+    let Some(reg) = state
+        .global
+        .lookup_project(&scope.project_scope_id)
+        .and_then(|project| project.registrations.get(scope.app_scope_id.as_str()))
+    else {
+        return (None, None);
+    };
+    (reg.project_name.clone(), reg.summary.clone())
+}
+
+fn format_project_label(
+    scope_prefix: &str,
+    project_name: Option<&str>,
+    project_path: &str,
+    manager: Option<&str>,
+) -> String {
+    let project_slug = project_name
+        .filter(|name| !name.trim().is_empty())
+        .map(str::trim)
+        .or_else(|| {
+            Path::new(project_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+        })
+        .unwrap_or("project");
+    let manager_name = manager
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("unassigned");
+    format!("{scope_prefix}.{project_slug}.{manager_name}")
+}
+
+fn collect_peer_counts(runtime: &Server, state: &State) -> serde_json::Value {
+    use crate::server::name_state::{AgentActivity, AgentPresence};
+    let total = state.workers.len();
+    let mut online = 0usize;
+    let mut busy = 0usize;
+    let mut idle = 0usize;
+    let mut abnormal = 0usize;
+    for worker in state.workers.values() {
+        let (presence, activity) = crate::server::worker_agent_facts(runtime, state, worker);
+        match presence.map(|fact| fact.presence) {
+            Some(AgentPresence::Online) => {
+                online += 1;
+                match activity.map(|fact| fact.activity) {
+                    Some(AgentActivity::Busy) => busy += 1,
+                    Some(AgentActivity::Idle) => idle += 1,
+                    Some(AgentActivity::Error | AgentActivity::Unknown) => abnormal += 1,
+                    _ => {}
+                }
+            }
+            Some(AgentPresence::Offline | AgentPresence::Unknown) | None => {
+                abnormal += 1;
+            }
+        }
+    }
+    json!({
+        "total": total,
+        "online": online,
+        "busy": busy,
+        "idle": idle,
+        "abnormal": abnormal,
+    })
 }
 
 /// Merge the object fields of `extra` into `target`. Non-object inputs are left

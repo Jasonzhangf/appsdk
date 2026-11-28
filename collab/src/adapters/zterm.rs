@@ -57,9 +57,13 @@ pub struct RemoteManagerTarget {
     pub manager: String,
     #[serde(default)]
     pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     #[serde(default)]
     pub status: String,
     pub deliverable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_counts: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,8 +368,13 @@ pub fn list_local_deliverable_managers(state_root: &std::path::Path) -> Vec<Remo
                         peer: String::new(),
                         manager: manager_name,
                         project: Some(project_name),
+                        summary: entry
+                            .get("summary")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned),
                         status: "registered".into(),
                         deliverable: true,
+                        peer_counts: None,
                     });
                 }
             }

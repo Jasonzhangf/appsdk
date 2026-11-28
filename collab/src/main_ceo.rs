@@ -110,6 +110,33 @@ pub(crate) fn run(command: CeoCmd) -> anyhow::Result<()> {
                 .transpose()?;
             emit_ceo(authenticated(), CeoCommand::Progress { project })
         }
+        CeoCmd::Projects { project } => {
+            let project = project
+                .map(|path| canonical_existing("project", &path))
+                .transpose()?
+                .map(|path| path_text(&path))
+                .transpose()?;
+            public_ceo(CeoCommand::Projects { project })
+        }
+        CeoCmd::ProjectInfo {
+            project,
+            name,
+            summary,
+        } => {
+            let project = project
+                .map(|path| canonical_existing("project", &path))
+                .transpose()?
+                .map(|path| path_text(&path))
+                .transpose()?;
+            emit_ceo(
+                authenticated(),
+                CeoCommand::ProjectInfo {
+                    project,
+                    name,
+                    summary,
+                },
+            )
+        }
         CeoCmd::ReportAck { batch_id } => {
             let batch_id = required_text("batch id", batch_id)?;
             emit_ceo(authenticated(), CeoCommand::ReportAck { batch_id })
@@ -164,6 +191,10 @@ pub(crate) fn run(command: CeoCmd) -> anyhow::Result<()> {
 }
 
 fn status() -> anyhow::Result<()> {
+    public_ceo(CeoCommand::Status)
+}
+
+fn public_ceo(command: CeoCommand) -> anyhow::Result<()> {
     let paths = crate::scope::HostPaths::resolve()?;
     let scope = Scope::resolve().ok();
     let (worker_id, token) = match scope
@@ -176,7 +207,7 @@ fn status() -> anyhow::Result<()> {
     let request = Req::Ceo {
         worker_id,
         token,
-        command: CeoCommand::Status,
+        command,
     };
     let value: Value = crate::client::call_with_context(
         &paths.socket_path(),

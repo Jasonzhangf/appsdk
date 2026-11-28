@@ -1138,7 +1138,9 @@ fn mutation_blocked_during_project_reset(req: &Req) -> bool {
     match req {
         Req::Ceo { command, .. } => !matches!(
             command,
-            crate::ceo::CeoCommand::Status | crate::ceo::CeoCommand::Progress { .. }
+            crate::ceo::CeoCommand::Status
+                | crate::ceo::CeoCommand::Progress { .. }
+                | crate::ceo::CeoCommand::Projects { .. }
         ),
         Req::UnregisterSelf { .. } | Req::ProjectReset { .. } => false,
         Req::PeerLifecycle { request } => matches!(

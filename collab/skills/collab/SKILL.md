@@ -1,6 +1,6 @@
 ---
 name: collab
-description: "Collab peer/Jenny 身份、任务交付和协作。原 agent 会话使用 Collab CLI，禁止 Computer Use/CUA/GUI。已注册 peer 执行协作，master 权限另需明确授权。"
+description: "Collab 跨项目/跨机器通信与协作总控（原 agent shell 使用 Collab CLI，禁止 CUA/GUI）。高频主线在本入口（角色状态与 Action 矩阵、CEO 项目总览、在线投递与异步批量回执）；低频细节按需读取 references/（board-idle-patrol.md、stable-name-recovery.md、notifications.md、orchestration.md、task-worktree-lifecycle.md、state-paths.md、migration-daemon.md）及 operations.md。"
 ---
 
 # Collab
@@ -40,6 +40,18 @@ text(result.output);
 | 资源冲突、业务 blocker 待批、等待后继续队列 | [Table B：Resource waits, block approval, and queue continuation](operations.md#table-b-resource-waits-block-approval-and-queue-continuation) |
 | 收到巡检唤醒、无可执行项需取消或恢复巡检 | [Table C：board idle 巡检与取消](references/board-idle-patrol.md) |
 | 需要恢复身份或从 context 选择当前动作 | [Table D：稳定名字恢复](references/stable-name-recovery.md) |
+
+## 高频核心：角色状态与 Action 指引矩阵
+
+所有角色在各自状态下的必做动作如下（低频边界按需查阅 `references/`）：
+
+| 角色 | 状态 | 必须执行的 Action |
+|---|---|---|
+| **CEO** | 在线巡查 / 用户沟通 | 执行 `collab ceo projects`（或 `collab ceo status` / `progress`）查看本地 `local.<project>.<name>` 与远端 `<machine>.<project>.<name>` 项目列表、概要及 `online/busy/idle/abnormal` 统计；用 `collab ceo send` 或 `collab machine zterm send` 派发巡查并向用户汇报 |
+| **Master (Jenny)** | 首次注册 / 恢复 | 用 `collab ceo project-info --name <short> --summary <text>` 填入项目基本信息；维护当前项目 `board` 与 `longhorizon` 订阅 |
+| **Master (Jenny)** | 周期巡检唤醒 (`Idle`) | 审计 P0/P1、未完成任务、资源释放、Peer 忙闲与真实阻塞；有重要进度用 `collab ceo reply` 汇报 CEO；`Busy` 顺延窗口；`Unknown` 必须核实真实在线性（离线走恢复，在线则报观测故障） |
+| **Peer** | 执行中 / 停滞 `Idle` | 持有可执行任务时转 `Idle` 会被立刻唤醒；按 `Plan → Execute → Review → Deliver` 推进（允许独立派发 subagent 完成 Plan/Review，按是否产码语义交付，不以固定 Git 动作卡死） |
+| **任意发送方** | 异步投递后 | 短窗在线观察已交付状态，未全交付可退回 `Idle`；daemon 在 2~3 分钟批量窗口内聚合入站消息、任务唤醒与 `COLLAB_BATCH_RECEIPT` 回执后合并唤醒 |
 
 ## 适用身份
 

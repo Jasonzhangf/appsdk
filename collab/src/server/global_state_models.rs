@@ -180,6 +180,10 @@ pub struct ProjectRegistration {
     pub app_scope_id: AppServerId,
     #[serde(default)]
     pub registered_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 impl ProjectRegistration {
@@ -199,6 +203,8 @@ impl ProjectRegistration {
             project_scope,
             app_scope_id,
             registered_at_ms,
+            project_name: None,
+            summary: None,
         };
         registration.validate()?;
         Ok(registration)

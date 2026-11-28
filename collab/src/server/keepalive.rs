@@ -408,13 +408,23 @@ fn board_patrol_worker_checked(
         .flatten()
         .as_deref()
         != Some(worker.id.as_str());
-    let trigger_mode = if is_ordinary_peer
+    let working_seen = state
+        .keepalives
+        .get(&worker.id)
+        .is_some_and(|rec| rec.working_seen);
+    let immediate_peer_idle_wake = is_ordinary_peer
+        && working_seen
         && activity == AgentActivity::Idle
-        && !candidate.gate.as_ref().is_some_and(|gate| gate.last_poll_idle)
-    {
+        && !candidate.gate.as_ref().is_some_and(|gate| gate.last_poll_idle);
+    let trigger_mode = if immediate_peer_idle_wake {
         PatrolTriggerMode::RealtimeEvent
     } else {
         PatrolTriggerMode::PeriodicPoll
+    };
+    let effective_idle_since_ms = if immediate_peer_idle_wake {
+        now - crate::board_patrol_policy::BOARD_IDLE_TRUSTED_INTERVAL_MS - 1
+    } else {
+        idle_since_ms
     };
     let decision = evaluate_board_patrol(
         &candidate.eligible,
@@ -422,7 +432,7 @@ fn board_patrol_worker_checked(
         trigger_mode,
         activity == AgentActivity::Idle,
         activity == AgentActivity::Busy,
-        idle_since_ms,
+        effective_idle_since_ms,
         now,
         candidate.gate.as_ref(),
     );
@@ -2967,5 +2977,54 @@ mod tests {
             }
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn ordinary_peer_idle_wakes_immediately_after_working() {
+        use std::sync::Arc;
+        let (mut server, root) = test_server();
+        let worker = seed_board_patrol_owner(&server, "alice", "thread-alice");
+        occupy_board_patrol_name(&server, &worker, "Alice");
+        super::super::restore_registered_peer_default_leases(&server);
+        add_board_patrol_task(
+            &server,
+            "T1",
+            "alice",
+            "Alice",
+            worker
+                .transport
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref()
+                .unwrap(),
+            1,
+        );
+        server.commit(&[Event::KeepaliveUpdated {
+            worker_id: "alice".into(),
+            record: super::Record {
+                observed: "working".into(),
+                working_seen: true,
+                ..Default::default()
+            },
+        }]);
+        server.appserver_thread_status = Arc::new(|_, thread| {
+            Ok(serde_json::json!({
+                "thread": {
+                    "id": thread,
+                    "status": {"type": "idle"},
+                },
+            }))
+        });
+        let now = super::super::state::now_ms();
+        tick_at(&server, now);
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                !state.board_patrol_notice_ids.is_empty(),
+                "ordinary peer that was working must wake immediately when it becomes idle"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

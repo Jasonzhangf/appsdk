@@ -1669,3 +1669,74 @@ fn master_wake_hold_suppresses_legacy_finite_master_idle_until_release() {
     }
     std::fs::remove_dir_all(root).ok();
 }
+
+#[test]
+fn standing_project_patrol_unknown_activity_diagnoses_offline_vs_online_mismatch() {
+    use crate::server::name_state::{AgentPresence, AgentPresenceRecord};
+    use crate::server::state::Event;
+
+    let (mut server, root) = test_server();
+    register_project_patrol_master(&server);
+    Arc::get_mut(&mut server).unwrap().appserver_thread_status =
+        Arc::new(|_, _| Err("simulated activity probe failure".into()));
+    let scope = crate::server::GlobalState::canonical_project_scope(&server.root)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    let session_id = {
+        let state = server.state.lock().unwrap();
+        state.workers["master"]
+            .transport
+            .as_ref()
+            .and_then(|t| t.session_id.clone())
+            .unwrap()
+    };
+    let base = now_ms();
+    let subscription_id = project_patrol_subscription(&server, base - 1, base + 86_400_000, 100, 0);
+
+    // Case 1: Unknown activity + Offline presence -> PROJECT_PATROL_TARGET_OFFLINE
+    server.commit(&[Event::AgentPresenceObserved {
+        presence: AgentPresenceRecord {
+            project_scope: scope.clone(),
+            worker_id: "master".into(),
+            session_id: session_id.clone(),
+            presence: AgentPresence::Offline,
+            reason: "gateway offline".into(),
+            observed_ms: base,
+        },
+    }]);
+    tick_with_idle_at(&server, base, &|_| false);
+    {
+        let state = server.state.lock().unwrap();
+        assert!(subscription_messages(&state, &subscription_id).is_empty());
+    }
+    let log = std::fs::read_to_string(server.log_path()).unwrap();
+    assert!(
+        log.contains("PROJECT_PATROL_TARGET_OFFLINE"),
+        "expected offline diagnostic in log: {log}"
+    );
+
+    // Case 2: Unknown activity + Online presence -> PROJECT_PATROL_OBSERVATION_MISMATCH
+    let next = base + PROJECT_PATROL_INTERVAL_MS + 1;
+    server.commit(&[Event::AgentPresenceObserved {
+        presence: AgentPresenceRecord {
+            project_scope: scope,
+            worker_id: "master".into(),
+            session_id,
+            presence: AgentPresence::Online,
+            reason: "gateway online".into(),
+            observed_ms: next,
+        },
+    }]);
+    tick_with_idle_at(&server, next, &|_| false);
+    {
+        let state = server.state.lock().unwrap();
+        assert!(subscription_messages(&state, &subscription_id).is_empty());
+    }
+    let log = std::fs::read_to_string(server.log_path()).unwrap();
+    assert!(
+        log.contains("PROJECT_PATROL_OBSERVATION_MISMATCH"),
+        "expected observation mismatch diagnostic in log: {log}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

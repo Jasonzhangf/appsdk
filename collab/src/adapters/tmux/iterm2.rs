@@ -73,6 +73,30 @@ fn current_client_ttys<'a>(
 }
 
 #[cfg(target_os = "macos")]
+/// Proactively probe iTerm2 Automation authorization on daemon startup so
+/// macOS presents the TCC permission dialog once during `collab up` / daemon
+/// launch (with a 60s window for user approval) rather than timing out in 3s
+/// later when an agent runs `collab context`.
+pub(crate) fn probe_automation_authorization_at_startup() {
+    if cfg!(test) {
+        return;
+    }
+    std::thread::spawn(|| {
+        const PROBE_SCRIPT: &str = r#"if application id "com.googlecode.iterm2" is running then
+            with timeout of 60 seconds
+                tell application id "com.googlecode.iterm2" to count windows
+            end timeout
+        end if"#;
+        let _ = std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", PROBE_SCRIPT])
+            .output();
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn probe_automation_authorization_at_startup() {}
+
+#[cfg(target_os = "macos")]
 fn native_panes(ttys: &BTreeSet<&str>) -> Result<BTreeSet<String>, String> {
     use std::process::Command;
 

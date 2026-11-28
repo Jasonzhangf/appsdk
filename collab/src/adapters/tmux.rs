@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 mod codex_presence;
-mod iterm2;
+pub(crate) mod iterm2;
 
 pub use codex_presence::{AgentActivity, AgentObservation, AgentPresence};
 pub(crate) use iterm2::panes_for_endpoint as iterm2_panes_for_endpoint;

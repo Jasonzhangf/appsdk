@@ -919,6 +919,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
 
 
     append_log(&host_paths.log_path(), "server starting");
+    crate::client::adapters::tmux::iterm2::probe_automation_authorization_at_startup();
 
     let server = Arc::new(Server {
         config: crate::config::load(&scope.root)?,

@@ -246,12 +246,39 @@ const runCollabRaw = async (args, cwd) => {
 
 const collabList = async () => {
   const parsed = await runCollab(["list"], HOME);
-  return (parsed.targets ?? []).filter(
+  const localTargets = (parsed.targets ?? []).filter(
     (entry) =>
       (entry.address || entry.qualified_address) &&
       entry.deliverable !== "unavailable" &&
       (entry.project_root || entry.machine),
   );
+  // Also include declared federation peers so `machine.project.name` addresses
+  // resolve directly without requiring a separate local entry.
+  try {
+    const machines = await runCollab(["machine", "list"], HOME);
+    const peers = Array.isArray(machines?.peers) ? machines.peers : [];
+    const remoteBatches = await Promise.all(
+      peers
+        .map((peer) => String(peer?.name ?? "").trim())
+        .filter(Boolean)
+        .map(async (machine) => {
+          try {
+            const remote = await runCollab(["list", "--machine", machine], HOME);
+            return (remote.targets ?? []).filter(
+              (entry) =>
+                (entry.address || entry.qualified_address) &&
+                entry.deliverable !== "unavailable" &&
+                (entry.project_root || entry.machine),
+            );
+          } catch {
+            return [];
+          }
+        }),
+    );
+    return [...localTargets, ...remoteBatches.flat()];
+  } catch {
+    return localTargets;
+  }
 };
 
 const conversationDefault = async (cwd, targetId) => {

@@ -277,6 +277,46 @@ pub fn max_wake_attempts() -> u32 {
     MAX_WAKE_ATTEMPTS
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BatchReceiptEntry {
+    pub message_id: String,
+    pub recipient: String,
+    pub status: String,
+    pub observed_ms: i64,
+}
+
+pub fn coalesce_batch_receipts(
+    entries: &[BatchReceiptEntry],
+    now_ms: i64,
+    window_ms: i64,
+) -> Option<(Vec<BatchReceiptEntry>, String)> {
+    let window_start = entries.iter().map(|entry| entry.observed_ms).min()?;
+    if now_ms < window_start.saturating_add(window_ms) {
+        return None;
+    }
+    let mut latest_by_msg = std::collections::BTreeMap::<String, BatchReceiptEntry>::new();
+    for entry in entries {
+        match latest_by_msg.get(&entry.message_id) {
+            Some(existing) if existing.observed_ms > entry.observed_ms => {}
+            _ => {
+                latest_by_msg.insert(entry.message_id.clone(), entry.clone());
+            }
+        }
+    }
+    let coalesced = latest_by_msg.into_values().collect::<Vec<_>>();
+    let summary = coalesced
+        .iter()
+        .map(|entry| format!("{} -> {} ({})", entry.message_id, entry.recipient, entry.status))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let body = format!(
+        "COLLAB_BATCH_RECEIPT: {} message update(s): {}",
+        coalesced.len(),
+        summary
+    );
+    Some((coalesced, body))
+}
+
 #[cfg(test)]
 #[path = "mailbox_tests.rs"]
 mod tests;

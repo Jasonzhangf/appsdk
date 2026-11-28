@@ -1740,3 +1740,91 @@ fn standing_project_patrol_unknown_activity_diagnoses_offline_vs_online_mismatch
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+#[test]
+fn batch_receipt_coalescing_holds_until_window_and_flushes_when_sender_not_busy() {
+    use crate::server::state::{Event, Message};
+
+    let (mut server, root) = test_server();
+    register_project_patrol_master(&server);
+    let is_busy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    Arc::get_mut(&mut server).unwrap().appserver_thread_status = Arc::new({
+        let is_busy = is_busy.clone();
+        move |_, thread| {
+            Ok(serde_json::json!({
+                "thread": {
+                    "id": thread,
+                    "status": {"type": if is_busy.load(std::sync::atomic::Ordering::SeqCst) { "active" } else { "idle" }},
+                },
+            }))
+        }
+    });
+    let base = now_ms();
+    server.commit(&[
+        Event::Sent {
+            msg: Message {
+                id: "out-1".into(),
+                from: "master".into(),
+                to: "peer-1".into(),
+                mtype: "direct".into(),
+                subject: Some("s1".into()),
+                body: "b1".into(),
+                in_reply_to: None,
+                created_ms: base,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        },
+        Event::Sent {
+            msg: Message {
+                id: "out-2".into(),
+                from: "master".into(),
+                to: "peer-2".into(),
+                mtype: "direct".into(),
+                subject: Some("s2".into()),
+                body: "b2".into(),
+                in_reply_to: None,
+                created_ms: base + 1_000,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        },
+        Event::NotificationDeliveryAccepted {
+            message_id: "out-1".into(),
+            accepted_ms: base + 5_000,
+            evidence: None,
+        },
+        Event::Acked {
+            ids: vec!["out-2".into()],
+            consumed_ms: Some(base + 10_000),
+        },
+    ]);
+
+    // Inside 120s window: held in pending_batch_receipts.
+    super::tick_batch_receipt_coalescing_at(&server, base + 60_000);
+    assert_eq!(server.state.lock().unwrap().pending_batch_receipts["master"].len(), 2);
+
+    // Past 120s window while sender is Busy: still held, not interrupting Busy sender.
+    super::tick_batch_receipt_coalescing_at(&server, base + 130_000);
+    assert_eq!(server.state.lock().unwrap().pending_batch_receipts["master"].len(), 2);
+
+    // Sender becomes Idle: flushed into one coalesced batch-receipt notification.
+    is_busy.store(false, std::sync::atomic::Ordering::SeqCst);
+    super::tick_batch_receipt_coalescing_at(&server, base + 130_001);
+    {
+        let state = server.state.lock().unwrap();
+        assert!(!state.pending_batch_receipts.contains_key("master"));
+        let receipts: Vec<_> = state
+            .msgs
+            .values()
+            .filter(|m| m.to == "master" && m.mtype == "batch-receipt")
+            .collect();
+        assert_eq!(receipts.len(), 1);
+        assert!(receipts[0].body.contains("COLLAB_BATCH_RECEIPT: 2 message update(s)"));
+    }
+    std::fs::remove_dir_all(root).ok();
+}

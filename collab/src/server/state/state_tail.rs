@@ -43,6 +43,8 @@ pub struct State {
     /// daemon-owned control record; message bodies never carry it.
     pub mailbox_name_addresses: HashMap<String, crate::server::name_mailbox::MailboxNameAddress>,
     pub mailbox_handoff_wakes: HashMap<String, u32>,
+    #[serde(default)]
+    pub pending_batch_receipts: HashMap<String, Vec<crate::server::mailbox::BatchReceiptEntry>>,
     /// Per-external-conversation default delivery target, keyed by
     /// `<channel>:<channel-instance>:<conversation>`. Control state only;
     /// never grants identity.

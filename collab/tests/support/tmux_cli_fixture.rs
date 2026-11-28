@@ -220,7 +220,9 @@ impl Fixture {
             .env_remove("TMUX_PANE")
             .env_remove("CODEX_SESSION_ID")
             .env_remove("CODEX_THREAD_ID")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID")
             .env_remove("COLLAB_WORKER")
+            .env("COLLAB_TEST_ITERM2_ATTACHMENT", "fixture")
             .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", originator);
         if let Some(pane) = pane {
             command

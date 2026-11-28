@@ -371,6 +371,7 @@ impl Fixture {
             .env_remove("TMUX_PANE")
             .env_remove("CODEX_SESSION_ID")
             .env_remove("CODEX_THREAD_ID")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID")
             .env_remove("COLLAB_WORKER")
             .env_remove("DSH_SESSION_ID")
             .env_remove("REX_SERVER")

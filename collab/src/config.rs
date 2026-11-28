@@ -230,6 +230,7 @@ pub struct Notifications {
     pub enabled: bool,
     pub mode: String,
     pub batch_window_seconds: u64,
+    pub receipt_batch_window_seconds: u64,
     pub submit_enter: bool,
     pub max_unacked: u32,
     pub events: BTreeMap<String, EventPolicy>,
@@ -245,6 +246,7 @@ impl Default for Notifications {
             enabled: true,
             mode: "batch".into(),
             batch_window_seconds: 120,
+            receipt_batch_window_seconds: 120,
             submit_enter: true,
             max_unacked: 3,
             events: BTreeMap::from([(

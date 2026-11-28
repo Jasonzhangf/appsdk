@@ -403,10 +403,23 @@ fn board_patrol_worker_checked(
     } else {
         0
     };
+    let is_ordinary_peer = super::current_master_holder(server, &state)
+        .ok()
+        .flatten()
+        .as_deref()
+        != Some(worker.id.as_str());
+    let trigger_mode = if is_ordinary_peer
+        && activity == AgentActivity::Idle
+        && !candidate.gate.as_ref().is_some_and(|gate| gate.last_poll_idle)
+    {
+        PatrolTriggerMode::RealtimeEvent
+    } else {
+        PatrolTriggerMode::PeriodicPoll
+    };
     let decision = evaluate_board_patrol(
         &candidate.eligible,
         &candidate.owner_key,
-        PatrolTriggerMode::PeriodicPoll,
+        trigger_mode,
         activity == AgentActivity::Idle,
         activity == AgentActivity::Busy,
         idle_since_ms,

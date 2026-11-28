@@ -1484,7 +1484,7 @@ fn attempt_tmux_notification_with_retry(
             })
         })
     }) {
-        return NotificationAttempt::Deferred(None);
+        return NotificationAttempt::Deferred;
     }
     let mut attempt_events = vec![Event::WakeAttempted {
         ids: batch.iter().map(|message| message.1.clone()).collect(),

@@ -1,6 +1,6 @@
 ---
 name: project-memory
-description: "本地记忆: L1锚点+L2/L3入口+tag+相对路径; SQLite 搜 raw memory; 不是开发或规则升级门禁。"
+description: "本地记忆: L1锚点+L2/L3入口+tag+相对路径; SQLite 搜 raw memory; 不是开发或规则升级门禁。高频检索/写入命令在本文件，index/verify 校验见后半段。"
 ---
 
 # Project memory

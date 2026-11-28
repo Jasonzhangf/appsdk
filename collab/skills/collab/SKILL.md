@@ -9,30 +9,9 @@ description: "Collab 跨项目/跨机器通信与协作总控（原 agent shell 
 `.agent-collab` 标记。daemon 的身份、路由、消息、任务和订阅由全局
 `~/.collab/` 管理，运行策略从 `~/.appsdk/config.toml` 读取。
 
-Collab 注册、恢复、收件、状态查询和交付都在原 agent 会话的 shell 中执行。
-收到唤醒或上下文压缩后同样适用。已验证绑定可直接复用。用户要求恢复、当前身份未知
-或明确绑定异常时，在实际项目运行 `collab context`。授权接替时只按恢复表补参数。
-禁止用 Computer Use、CUA 或 GUI 找工具、打开终端、读日志或代跑 CLI。
-`cua_repl` 的 JavaScript/Node 运行时同样属于 CUA；即使它可以调用 `child_process`，
-也不得用来执行 shell、`collab`、`rex`、文件检查、日志读取或其他 CLI 替代动作。
-原会话缺 shell 或 CLI 时，保留原消息和任务状态，沿已有获授权通道向 Jenny
-或 Jenny 报告缺失入口及恢复条件，继续能独立完成的工作。
+Collab 注册、恢复、收件、状态查询和交付都在原 agent 会话的 shell 中执行（禁止用 Computer Use / `cua_repl` / GUI 代跑 CLI）；仅在收到未消费 `COLLAB_NOTIFY` 时执行 `collab recv --timeout 0`。原会话缺 shell 或 CLI 时，保留原消息和任务状态，沿获授权通道报告缺失入口及恢复条件，继续能独立完成的工作。
 
-压缩、恢复和工具参数解析失败时，继续使用当前宿主的原生 shell。也不要调用
-`cua_repl` 的 `getState`、`reset`、截图或 AX 观察。若宿主提供
-`functions.exec`，给它传原始 JavaScript 源码。以下示例只在当前原项目收到未消费的
-`COLLAB_NOTIFY` 时执行：
-
-```javascript
-const result = await tools.exec_command({cmd: "collab recv --timeout 0", max_output_tokens: 1200});
-text(result.output);
-```
-
-参数解析失败时按该工具的声明修正参数并重试。如果原生入口仍失败，沿任务合同报告
-原错、已试入口、受影响步骤和恢复条件。
-
-本入口保留日常协作规则。按已观察的事实先选择下表中的唯一入口，再只读取对应章节；
-不整篇加载。手册与本入口属于同一个 Skill。
+本入口保留日常协作规则与高频角色矩阵。按已观察的事实先选择下表中的唯一入口，再只读取对应章节；不整篇加载。手册与本入口属于同一个 Skill。
 
 | 已观察条件 | 唯一分支入口 |
 |---|---|

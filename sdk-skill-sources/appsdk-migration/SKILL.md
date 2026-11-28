@@ -1,6 +1,6 @@
 ---
 name: appsdk-migration
-description: "AppSDK/Collab 控制面迁移、context 身份与通信恢复、授权项目重置；遵循所属状态 owner，全局 daemon 始终由用户管理。"
+description: "AppSDK/Collab 控制面迁移、context 身份与通信恢复、授权项目重置；遵循所属状态 owner，全局 daemon 始终由用户管理。高频步骤在本文件，低频细节按需读取各模块设计文档。"
 ---
 
 # AppSDK & Collab Control-Plane Migration

@@ -52,8 +52,8 @@ sessionID 承载当前执行。普通名字池用完后分配未占用的 `peer-
 适配器的 TUI 在固定布局使用 `<cwd末级folder>_<manifest固定位置序号>_<Collab名字>`，如
 `appsdk_1_Jenny`，该布局中只有位置 1 可升 Jenny。没有唯一固定布局时使用
 `<tmux session 编号>_<Collab名字>`。布局读取共享 manifest，正常改名由 Collab 负责。
-Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录名。
-身份、角色和任务变化保留该 Rex session 名。身份仅从当前 `~/.collab/identity-map.json` 恢复；全部 journal 及旧操作
+Rex 绑定当前 server/session/block 仅用于投递定位；Rex session 与项目无关，tab 按项目命名。
+严禁 agent 修改 Rex session 名（禁止运行 `rex session rename` 或以任何理由重命名 session）。身份仅从当前 `~/.collab/identity-map.json` 恢复；全部 journal 及旧操作
 恢复链已删除。tmux `$N`、pane、thread 和 socket 仅定位通信。不得猜身份、
 复制 token、编辑控制状态或以 pane 内容证明消息消费。
 恢复失败只停受影响协作，保留原任务及资源。

@@ -684,7 +684,10 @@ fn handle_notification_cancel(
     let actionable: Vec<_> = state
         .tasks
         .values()
-        .filter(|task| state.task_actionable_for(task, Some((&worker_id, &owner_key))))
+        .filter(|task| {
+            (task_ids.is_empty() || cancelled.iter().any(|id| id == &task.id))
+                && state.task_actionable_for(task, Some((&worker_id, &owner_key)))
+        })
         .map(|task| task.id.clone())
         .collect();
     if !actionable.is_empty() {

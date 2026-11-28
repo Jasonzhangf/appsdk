@@ -394,6 +394,7 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         facts: &IdentityFacts,
         invocation_cwd: Option<&str>,
+        save: bool,
     ) -> anyhow::Result<RexRecoveryObservation> {
         let candidate = facts
             .rex
@@ -429,6 +430,7 @@ impl ProjectRuntimeManager {
             &candidates,
             &context.canonical_root,
             facts.session_id.as_deref(),
+            save,
         )
         .map_err(anyhow::Error::msg)?;
         let endpoint = transport.rex_endpoint.as_ref().ok_or_else(|| {
@@ -615,7 +617,7 @@ impl ProjectRuntimeManager {
             transport.thread_id = candidate.endpoint.codex_thread_id.clone();
         }
 
-        self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None)
+        self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None, None)
     }
 
     fn rex_execution_for_refresh(
@@ -678,6 +680,7 @@ impl ProjectRuntimeManager {
         scope: &Scope,
         rex_execution: Option<&crate::server::binding_slot::VerifiedRexExecutionAssociation>,
         expected_baseline: Option<&RexRecoveryBaseline>,
+        host_facts: Option<&IdentityFacts>,
     ) -> anyhow::Result<RuntimeBinding> {
         let _register = self.register_gate.lock().unwrap();
         if let (Some(expected), Some(execution)) = (expected_baseline, rex_execution) {
@@ -806,6 +809,10 @@ impl ProjectRuntimeManager {
             .map_err(anyhow::Error::msg)?;
         let mut value =
             crate::server::binding_slot::BindingValue::new(next.clone(), transport.clone());
+        if let Some(facts) = host_facts {
+            value.host.agent_kind = facts.agent_kind.clone();
+            value.host.profile = facts.profile.clone();
+        }
         Self::prepare_control_value(&control, &key, &mut value).map_err(anyhow::Error::msg)?;
         if transport.kind == TransportKind::Rex
             && rex_execution.is_none()
@@ -879,7 +886,7 @@ impl ProjectRuntimeManager {
                 "REX_CURRENT_BINDING_CHANGED: notification refresh requires Rex transport"
             );
         }
-        self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None)
+        self.refresh_session_transport(runtime, saved, transport, ident, scope, None, None, None)
     }
 
     fn reconcile_identity_context(
@@ -889,6 +896,7 @@ impl ProjectRuntimeManager {
         outer_binding: Option<RegisterOuterBinding>,
         allow_persisted_restore: bool,
         allow_explicit_rex_rebind: bool,
+        save: bool,
         invocation_cwd: Option<&str>,
     ) -> anyhow::Result<(Arc<Server>, Resp)> {
         if context.app_scope_id.as_str() != identity::CLI_APP_SERVER_ID
@@ -930,6 +938,16 @@ impl ProjectRuntimeManager {
                 allow_explicit_rex_rebind,
             )?
         };
+        if save
+            && session_identity.is_none()
+            && rex_recovery
+                .as_ref()
+                .is_some_and(|recovery| recovery.baseline.is_some())
+        {
+            anyhow::bail!(
+                "REX_SAVE_REQUIRES_EXISTING_BINDING: current binding was retired before Save could continue"
+            );
+        }
         if let Some(identity) = session_identity.as_ref() {
             if let Some(candidate) = facts.tmux.as_ref() {
                 let control = self
@@ -1057,6 +1075,7 @@ impl ProjectRuntimeManager {
                                 &candidates,
                                 &context.canonical_root,
                                 facts.session_id.as_deref(),
+                                save,
                             )
                             .map_err(anyhow::Error::msg)?,
                         };
@@ -1068,6 +1087,7 @@ impl ProjectRuntimeManager {
                             &scope,
                             execution.as_ref(),
                             baseline.as_ref(),
+                            Some(&facts),
                         )?);
                     }
                 } else if facts.tmux.is_none() {
@@ -1090,7 +1110,14 @@ impl ProjectRuntimeManager {
                             )
                             .map_err(anyhow::Error::msg)?;
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope, None, None,
+                                &runtime,
+                                saved,
+                                transport,
+                                &mut ident,
+                                &scope,
+                                None,
+                                None,
+                                Some(&facts),
                             )?);
                         } else if let Some(candidate) = facts.rex.as_ref() {
                             let (execution, baseline) = self.rex_execution_for_refresh(
@@ -1104,18 +1131,17 @@ impl ProjectRuntimeManager {
                                 rex: Some(candidate.clone()),
                                 ..Default::default()
                             };
-                            transport = rex_recovery
-                                .as_ref()
-                                .map(|recovery| recovery.transport.clone())
-                                .unwrap_or(
-                                    validate_transport_candidates_for_session(
-                                        &runtime.root,
-                                        &candidates,
-                                        &context.canonical_root,
-                                        facts.session_id.as_deref(),
-                                    )
-                                    .map_err(anyhow::Error::msg)?,
-                                );
+                            transport = match rex_recovery.as_ref() {
+                                Some(recovery) => recovery.transport.clone(),
+                                None => validate_transport_candidates_for_session(
+                                    &runtime.root,
+                                    &candidates,
+                                    &context.canonical_root,
+                                    facts.session_id.as_deref(),
+                                    save,
+                                )
+                                .map_err(anyhow::Error::msg)?,
+                            };
                             current = Some(self.refresh_session_transport(
                                 &runtime,
                                 saved,
@@ -1124,6 +1150,7 @@ impl ProjectRuntimeManager {
                                 &scope,
                                 execution.as_ref(),
                                 baseline.as_ref(),
+                                Some(&facts),
                             )?);
                         } else if facts.desktop_bridge.is_some()
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -1135,7 +1162,14 @@ impl ProjectRuntimeManager {
                             )
                             .map_err(|e| anyhow::anyhow!(e))?;
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope, None, None,
+                                &runtime,
+                                saved,
+                                transport,
+                                &mut ident,
+                                &scope,
+                                None,
+                                None,
+                                Some(&facts),
                             )?);
                         } else if transport.kind == TransportKind::AppServer
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -1151,7 +1185,14 @@ impl ProjectRuntimeManager {
                             }
                             transport.tmux_endpoint = None;
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope, None, None,
+                                &runtime,
+                                saved,
+                                transport,
+                                &mut ident,
+                                &scope,
+                                None,
+                                None,
+                                Some(&facts),
                             )?);
                         } else if transport.kind == TransportKind::Tmux
                             && saved.session_id.as_ref().map(identity::SessionId::as_str)
@@ -1162,7 +1203,14 @@ impl ProjectRuntimeManager {
                             // published binding still owns the saved transport
                             // projection, but does not authorize a new claim.
                             current = Some(self.refresh_session_transport(
-                                &runtime, saved, transport, &mut ident, &scope, None, None,
+                                &runtime,
+                                saved,
+                                transport,
+                                &mut ident,
+                                &scope,
+                                None,
+                                None,
+                                Some(&facts),
                             )?);
                         }
                     }
@@ -1267,6 +1315,20 @@ impl ProjectRuntimeManager {
             }
         }
         let (runtime, receipt) = {
+            if save
+                && self
+                    .current_session_identity_at_cwd(
+                        &context,
+                        &facts,
+                        invocation_cwd,
+                        allow_explicit_rex_rebind,
+                    )?
+                    .is_none()
+            {
+                anyhow::bail!(
+                    "REX_SAVE_REQUIRES_EXISTING_BINDING: current binding was retired before Save could commit"
+                );
+            }
             if facts.dsh_session_id.is_some() && facts.dsh.is_none() && facts.tmux.is_none() {
                 return Err(anyhow::anyhow!("IDENTITY_INFORMATION_REQUIRED: first DSH registration requires dsh endpoint, runtime_id, agent_id, session_id and cwd facts").into());
             }
@@ -1559,6 +1621,7 @@ mod anchor_provenance_tests {
             &context,
             &facts,
             Some(invocation_root.to_str().unwrap()),
+            false,
         ) {
             Ok(_) => panic!("the invalid Rex target must fail after project-root admission"),
             Err(error) => error.to_string(),
@@ -1704,6 +1767,7 @@ mod anchor_provenance_tests {
                 host_id: Some("host-fixture".into()),
                 instance_id: "instance-fixture".into(),
                 cwd: root.display().to_string(),
+                layout_association: None,
             }),
             capabilities: vec!["send_message_to_block".into()],
             self_check: "rex execution association test".into(),
@@ -1796,6 +1860,7 @@ mod anchor_provenance_tests {
             approval: None,
             grant_approval: None,
             query: false,
+            save: false,
         };
         let (_, first) = tokio::task::spawn_blocking({
             let manager = manager.clone();
@@ -1838,6 +1903,7 @@ mod anchor_provenance_tests {
             approval: None,
             grant_approval: None,
             query: false,
+            save: false,
         };
         let (_, second) = tokio::task::spawn_blocking({
             let manager = manager.clone();
@@ -2327,6 +2393,7 @@ mod anchor_provenance_tests {
             approval: None,
             grant_approval: None,
             query: false,
+            save: false,
         };
         let (_, registered) = tokio::task::spawn_blocking({
             let manager = manager.clone();
@@ -2379,6 +2446,7 @@ mod anchor_provenance_tests {
                             ..IdentityFacts::default()
                         },
                         Some(root.to_str().unwrap()),
+                        false,
                     )
                     .unwrap()
             }

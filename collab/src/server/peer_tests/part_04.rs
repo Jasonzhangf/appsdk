@@ -1579,6 +1579,7 @@ async fn worker_snapshot_dispatches_rex_capture_without_writing_input() {
             host_id: Some("host-fixture".into()),
             instance_id: "instance-fixture".into(),
             cwd: root.display().to_string(),
+            layout_association: None,
         }),
         capabilities: vec!["send_message_to_block".into()],
         self_check: "rex snapshot fixture".into(),

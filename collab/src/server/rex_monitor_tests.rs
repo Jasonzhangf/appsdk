@@ -18,6 +18,7 @@ fn endpoint(block: &str) -> RexEndpoint {
         host_id: Some("host".into()),
         instance_id: "instance".into(),
         cwd: "/tmp".into(),
+        layout_association: None,
     }
 }
 

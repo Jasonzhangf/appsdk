@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-#[path = "daemon_readiness.rs"]
-mod daemon_readiness;
 #[path = "codex_pane_interpreter.rs"]
 mod codex_pane_interpreter;
+#[path = "daemon_readiness.rs"]
+mod daemon_readiness;
 
 /// Fixture roots live under `/var/tmp` so the AF_UNIX socket stays inside
 /// `SUN_LEN`. The macOS default temp dir is long enough to make every daemon
@@ -264,13 +264,19 @@ impl Fixture {
         );
         let capture = || {
             String::from_utf8_lossy(
-                &tmux(&self.tmux_socket, &["capture-pane", "-p", "-t", &pane.pane_id]).stdout,
+                &tmux(
+                    &self.tmux_socket,
+                    &["capture-pane", "-p", "-t", &pane.pane_id],
+                )
+                .stdout,
             )
             .into_owned()
         };
         assert!(
             wait_until(Duration::from_secs(3), || {
-                capture().lines().any(|line| line.starts_with("> fixture idle"))
+                capture()
+                    .lines()
+                    .any(|line| line.starts_with("> fixture idle"))
             }),
             "Codex fixture did not render an idle prompt: stdout={:?}, stderr={:?}, pane={}",
             std::fs::read_to_string(output.stdout),
@@ -393,6 +399,38 @@ impl Fixture {
             }
         }
         command
+    }
+
+    /// Install the repository Rex CLI fixture at the public binary's isolated
+    /// HOME location. The wrapper supplies the fixture control environment that
+    /// the production adapter intentionally strips from `REX_*` variables.
+    pub fn install_rex_fixture_cli(&self) -> PathBuf {
+        let script = self.root.join("rex-cli-fixture.py");
+        std::fs::write(
+            &script,
+            include_str!("../../src/adapters/rex/fixture_rex.py"),
+        )
+        .expect("write Rex CLI fixture");
+        let installed = self.root.join(
+            "home/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex",
+        );
+        std::fs::create_dir_all(installed.parent().expect("Rex CLI parent"))
+            .expect("create isolated Rex CLI directory");
+        std::fs::write(
+            &installed,
+            format!(
+                "#!/bin/sh\nexport REXPRIMITIVE_LOG_DIR={}\nexport REXPRIMITIVE_SCENARIO_FILE={}\nexport REXPRIMITIVE_BARRIER_DIR={}\nexec python3 {} \"$@\"\n",
+                shell_quote(&self.root.to_string_lossy()),
+                shell_quote(&self.root.join("rex-scenario").to_string_lossy()),
+                shell_quote(&self.root.to_string_lossy()),
+                shell_quote(&script.to_string_lossy()),
+            ),
+        )
+        .expect("write Rex CLI wrapper");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o700))
+            .expect("make Rex CLI wrapper executable");
+        installed
     }
 
     pub fn command_on_socket(&self, socket: &Path, args: &[&str], pane: &Pane) -> Command {
@@ -644,6 +682,21 @@ impl Fixture {
         )
     }
 
+    pub fn context_save(&self, operation_id: &str, provide: &Value, pane: Option<&Pane>) -> Value {
+        let provide = serde_json::to_string(provide).expect("serialize provide facts");
+        self.run_ok(
+            &[
+                "context",
+                "--op",
+                operation_id,
+                "--provide",
+                &provide,
+                "--save",
+            ],
+            pane,
+        )
+    }
+
     pub fn project_state(&self) -> PathBuf {
         self.project_state_for(&self.root, "appserver-cli")
     }
@@ -810,10 +863,14 @@ impl Fixture {
     /// Restart only this fixture daemon with one compile-time gated fault
     /// injection variable, used to prove public journal failure projections.
     pub fn restart_daemon_with_env(&mut self, key: &str, value: &str) {
+        self.restart_daemon_with_envs(&[(key, value)]);
+    }
+
+    pub fn restart_daemon_with_envs(&mut self, values: &[(&str, &str)]) {
         self.stop_daemon();
         std::fs::remove_file(self.host_state.join("DOWN")).ok();
         let mut command = self.configured_command(&["serve"], None);
-        command.env(key, value);
+        command.envs(values.iter().copied());
         self.start_daemon_with(command);
     }
 
@@ -913,15 +970,7 @@ impl Drop for Fixture {
                 ])
                 .output();
         }
-        if std::thread::panicking() {
-            eprintln!(
-                "preserving failed public fixture: root={} host_state={}",
-                self.root.display(),
-                self.host_state.display()
-            );
-        } else {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

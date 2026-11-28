@@ -40,6 +40,7 @@ fn rex_transport(
             host_id: Some("host-fixture".into()),
             instance_id: "instance-fixture".into(),
             cwd: "/tmp".into(),
+            layout_association: None,
         }),
         capabilities: vec!["send_message_to_block".into()],
         self_check: "test rex transport".into(),
@@ -1475,6 +1476,7 @@ fn rex_notification_target_is_the_full_service_scoped_terminal_address() {
             host_id: None,
             instance_id: "instance-7".into(),
             cwd: "/tmp".into(),
+            layout_association: None,
         }),
         capabilities: Vec::new(),
         self_check: "test rex transport".into(),
@@ -3050,6 +3052,14 @@ async fn rex_service_generation_change_refreshes_same_block_and_retries_once() {
     assert_eq!(
         response.data["rex_binding_retry"],
         "original-durable-message-once"
+    );
+    assert!(
+        fixture.calls().iter().all(|call| {
+            call["argv"]
+                .as_array()
+                .is_none_or(|argv| !argv.iter().any(|arg| arg == "session.view"))
+        }),
+        "notification repair must not require restore-only session.view"
     );
     for failure_field in [
         "notification_error",

@@ -46,6 +46,7 @@ fn rex_registration_uses_an_agent_session_and_a_separate_terminal_endpoint() {
         host_id: Some("host".into()),
         instance_id: "instance".into(),
         cwd: "/remote/project".into(),
+        layout_association: None,
     });
     let mut runtime = runtime_identity("binding-rex");
     runtime.native_thread_id = None;
@@ -200,6 +201,7 @@ fn registered_rex_caller_cannot_borrow_a_successor_session_from_the_same_block()
         host_id: Some("host".into()),
         instance_id: "instance".into(),
         cwd: root.to_string_lossy().into_owned(),
+        layout_association: None,
     });
     let mut runtime = runtime_identity("binding-rex-current-session");
     runtime.session_id = Some(SessionId::new("successor-agent-session").unwrap());

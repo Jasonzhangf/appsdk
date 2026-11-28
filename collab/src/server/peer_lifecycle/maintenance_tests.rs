@@ -135,6 +135,7 @@ fn rex_transport(root: &Path) -> SelectedTransport {
             host_id: Some("host-fixture".into()),
             instance_id: "instance-fixture".into(),
             cwd: root.display().to_string(),
+            layout_association: None,
         }),
         capabilities: vec!["send_message_to_block".into()],
         self_check: "maintenance Rex fixture".into(),

@@ -148,6 +148,7 @@ impl ProjectRuntimeManager {
                 &Scope { root: cwd },
                 None,
                 None,
+                None,
             )?;
         }
         Ok(())

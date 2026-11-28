@@ -29,6 +29,9 @@ Scenarios (override behavior keyed by the extracted method):
   session_malformed      session.list returns an incomplete response
   block_missing          session.list_blocks omits the requested block
   blocks_malformed       session.list_blocks returns an incomplete response
+  layout_block_missing   session.view omits the candidate block
+  layout_block_duplicate session.view places the candidate block twice
+  layout_malformed       session.view returns an invalid layout tree
   status_marker_only     server.status fails with the service marker but no
                          typed service-generation mismatch
   status_unknown         server.status fails without proving absence
@@ -271,6 +274,50 @@ def list_blocks() -> None:
     )
 
 
+def session_view() -> None:
+    mode = scenario()
+    block = {
+        "block_id": BLOCK,
+        "creator_name": TERMINAL,
+        "flavor": "com.superlogical.terminal.shell",
+        "host_id": "host-fixture",
+        "label": "fixture",
+    }
+    blocks = [] if mode == "layout_block_missing" else [block]
+    if mode == "layout_block_duplicate":
+        blocks.append(block)
+    layout = {
+        "rect": [0, 0, 1, 1],
+        "block_id": BLOCK,
+    }
+    if mode == "layout_malformed":
+        layout = {"rect": [0, 0, 1], "block_id": BLOCK}
+    emit(
+        {
+            "revision": 7,
+            "session_id": SESSION,
+            "label": "fixture",
+            "active_window_id": "window-fixture",
+            "windows": [
+                {
+                    "window_id": "window-fixture",
+                    "label": "fixture",
+                    "focused_block_id": BLOCK,
+                    "layers": [
+                        {
+                            "layer_id": "layer-fixture",
+                            "kind": "tiled",
+                            "bounds": [0, 0, 1, 1],
+                            "layout": layout,
+                            "blocks": blocks,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
 def write(stdin: str) -> None:
     mode = scenario()
     if mode == "write_unknown":
@@ -314,6 +361,10 @@ def pwd() -> None:
 def configured_owner() -> tuple[int, str] | None:
     pid = os.environ.get("COLLAB_TEST_REX_OWNER_PID")
     name = os.environ.get("COLLAB_TEST_REX_OWNER_NAME")
+    path = os.path.join(log_dir(), "rex-owner-pid")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            pid, name = handle.read().strip(), "codex"
     try:
         if pid and name:
             value = int(pid)
@@ -505,6 +556,9 @@ def dispatch(method: str, stdin: str) -> None:
         return
     if method == "session.list_blocks":
         list_blocks()
+        return
+    if method == "session.view":
+        session_view()
         return
     if method == f"{TERMINAL}.write":
         write(stdin)

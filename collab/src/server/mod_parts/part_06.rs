@@ -1296,6 +1296,7 @@ fn handle_register_with_app_scope_inner_bound(
         &candidates,
         &cwd,
         agent_session,
+        false,
     ) {
         Ok(selected) => selected,
         Err(error) => return Resp::err(error),

@@ -703,6 +703,7 @@ struct IdentityFence {
     worker_id: String,
     binding_id: String,
     identity_path: PathBuf,
+    stale_token: String,
     stale_identity_bytes: Vec<u8>,
 }
 
@@ -747,7 +748,8 @@ fn seed_stale_identity(
         .as_str()
         .expect("isolated fixture identity has token")
         .to_owned();
-    identity["token"] = json!(format!("stale-{token}"));
+    let stale_token = format!("stale-{token}");
+    identity["token"] = json!(stale_token);
     let stale_identity_bytes =
         serde_json::to_vec_pretty(&identity).expect("serialize isolated fixture identity cache");
     fs::write(&identity_path, &stale_identity_bytes)
@@ -756,6 +758,7 @@ fn seed_stale_identity(
         worker_id,
         binding_id,
         identity_path,
+        stale_token,
         stale_identity_bytes,
     }
 }

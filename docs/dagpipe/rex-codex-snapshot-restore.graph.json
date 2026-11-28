@@ -1,0 +1,177 @@
+{
+  "id": "appsdk-rex-codex-snapshot-restore",
+  "version": "1.2.4",
+  "description": "One saved Codex Rex association may enter one isolated restore attempt. Save readback is mandatory before target selection. Collab owns terminal cancellation while the Rex create child has an isolated process group, so an in-flight create receipt remains available for classification. A verified create and its resume plan terminate through the single result with the carrier retained for the caller. Every pre-create rejection terminates without cleanup. Post-create failure or cancellation enters exact-ID cleanup only with a usable owned full session ID, ending closed or unconfirmed; unknown ownership returns cleanup absent. Post-terminal live verification and test teardown are observer-owned; the candidate does not claim live resume or a fresh binding without independent owner evidence.",
+  "inputs": [
+    {"id": "restore_request", "schema": "Object"}
+  ],
+  "nodes": [
+    {
+      "id": "collect_verified_context",
+      "operator": "appsdk.rex_restore.collect_context",
+      "operator_version": "1",
+      "description": "Read canonical project scope, Collab principal/binding/generation, Rex endpoint and the saved layout. The public owner is collab/src/main.rs and BindingControlStore.",
+      "inputs": ["restore_request"],
+      "output": {"id": "verified_context", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "validate_context_ownership",
+      "operator": "appsdk.rex_restore.validate_context",
+      "operator_version": "1",
+      "description": "Require the complete save association, one exact active binding, the saved generation, Codex profile and session, and the canonical invocation cwd. Explicit Save is admitted only for the still-current binding and cannot be combined with retire_name approval. Ordinary Rex registration remains outside this restore-only requirement.",
+      "inputs": ["verified_context"],
+      "output": {"id": "admitted_context", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "persist_panel_association",
+      "operator": "appsdk.rex_restore.persist_association",
+      "operator_version": "1",
+      "description": "The save owner writes profile, Codex session, project, binding and Rex carrier metadata atomically. At the final identity gate, Save rejects if its admitted current binding was retired or is no longer usable; it never falls through to first registration. The saved_association result distinguishes committed, write_rejected and durability_unknown. Only committed proceeds to independent readback. Write rejection and unknown durability terminate as typed failures; unknown durability must not claim rollback or authorize restore.",
+      "inputs": ["admitted_context"],
+      "output": {"id": "saved_association", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "readback_saved_association",
+      "operator": "appsdk.rex_restore.readback_association",
+      "operator_version": "1",
+      "description": "Accept only the committed saved_association variant. Independently read the authoritative identity map and prove every restore field matches. Save-before-restore is a hard dependency in this graph.",
+      "inputs": ["saved_association"],
+      "output": {"id": "save_proof", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "select_isolated_restore_target",
+      "operator": "appsdk.rex_restore.select_target",
+      "operator_version": "1",
+      "description": "Select only the task-owned test target and reject ambiguous or occupied labels before mutation. Recheck the exact binding immediately before create.",
+      "inputs": ["save_proof"],
+      "output": {"id": "restore_target", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "create_restore_carrier",
+      "operator": "appsdk.rex_restore.restore_carrier",
+      "operator_version": "2",
+      "description": "Create one isolated carrier in a process group separate from the Collab terminal owner. A foreground Ctrl-C cancels Collab but must not destroy the Rex child response carrying the created session ID. A confirmed rejection has no side effect. An unknown response keeps its server, session label and operation context and performs no cleanup without a full owned session ID. Behavior receipts: collab/tests/restore_public.rs::restore_public_preserves_unknown_create_outcome_and_refuses_unsafe_retry and collab/tests/restore_public.rs::restore_public_foreground_sigint_retains_create_receipt_for_exact_cleanup.",
+      "inputs": ["restore_target"],
+      "output": {"id": "create_observation", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "classify_restore_carrier_outcome",
+      "operator": "appsdk.rex_restore.classify_carrier",
+      "operator_version": "1",
+      "description": "Classify the create result before any resume or resource action. Success has one fresh full carrier ID. A confirmed rejection has no side effect and goes to the non-cleanup terminal path. An unknown outcome carries create_context and create_outcome and goes directly to its typed terminal with ownership unconfirmed and cleanup absent.",
+      "inputs": ["create_observation"],
+      "output": {"id": "carrier_outcome", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "resume_codex_with_recorded_identity",
+      "operator": "appsdk.rex_restore.resume_codex",
+      "operator_version": "1",
+      "description": "Return the explicit profile, Codex session, canonical cwd and target block. This candidate reports live_resume=unverified; it does not launch or prove Codex resume.",
+      "inputs": ["carrier_outcome"],
+      "output": {"id": "codex_resume_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "observe_cancellation_request",
+      "operator": "appsdk.rex_restore.observe_cancellation",
+      "operator_version": "1",
+      "description": "Collab owns Ctrl-C for this restore operation while the Rex create child remains isolated from the terminal foreground group. Pending cancellation takes precedence over status and session-list read failures. Without cancellation, native errors remain errors. Cancellation before create terminates without cleanup. Cancellation during or after create enters the same exact-ID cleanup owner only when its returned receipt has a usable owned full session ID, ending closed or unconfirmed; unknown ownership retains the create context and returns cleanup absent. Behavior receipts: collab/tests/restore_public.rs::restore_public_cancellation_is_typed_and_routes_through_exact_id_cleanup, collab/tests/restore_public.rs::restore_public_foreground_sigint_during_preflight_is_typed_without_mutation, collab/tests/restore_public.rs::restore_public_preflight_native_errors_without_cancellation_are_preserved, collab/tests/restore_public.rs::restore_public_foreground_sigint_retains_create_receipt_for_exact_cleanup, and collab/tests/restore_public.rs::restore_public_pending_cancel_preserves_unusable_create_reply_without_kill.",
+      "inputs": ["restore_request"],
+      "output": {"id": "cancellation_request", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "return_pre_create_failure",
+      "operator": "appsdk.rex_restore.pre_create_failure",
+      "operator_version": "1",
+      "description": "Return one typed binding, save, target, pre-create cancellation or confirmed-create-rejection result. First-registration explicit Save rejects before Register publication; ordinary registration followed by Save remains legal. These paths own no newly created Rex resource. Behavior receipts include collab/tests/restore_public.rs::restore_public_rejects_bad_inputs_before_mutation, collab/tests/restore_public.rs::restore_public_foreground_sigint_during_preflight_is_typed_without_mutation, collab/tests/context_operation_public_contract/part_b.rs::b08_rex_registration_keeps_restore_metadata_optional_and_save_requires_complete_layout, and collab/tests/context_operation_public_contract/part_b.rs::b08_rex_first_registration_save_rejects_without_publication.",
+      "inputs": ["verified_context", "admitted_context", "saved_association", "save_proof", "restore_target", "carrier_outcome", "cancellation_request"],
+      "output": {"id": "pre_create_failure", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "reconcile_and_cleanup_created_carrier",
+      "operator": "appsdk.rex_restore.cleanup",
+      "operator_version": "3",
+      "description": "One cleanup owner handles post-create failure and post-create cancellation when the create receipt confirms an owned full session ID. Successful restore retains the verified carrier for resume. Cleanup records closed or unconfirmed and never substitutes label-based or guessed cleanup. Unknown create outcomes do not enter cleanup. Behavior receipts: restore_public_cleans_failed_carrier_and_never_emits_partial_success and restore_public_reports_cleanup_unconfirmed_after_post_create_verification_failure.",
+      "inputs": ["carrier_outcome", "cancellation_request"],
+      "output": {"id": "cleanup_disposition", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "return_unknown_create_result",
+      "operator": "appsdk.rex_restore.unknown_create_result",
+      "operator_version": "1",
+      "description": "Return create_context and create_outcome with ownership unconfirmed, no partial success or guessed carrier ID, and cleanup absent. This terminal is used when create cannot be classified or its reply has no usable owned full session ID.",
+      "inputs": ["carrier_outcome"],
+      "output": {"id": "unknown_create_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "return_restore_result",
+      "operator": "appsdk.rex_restore.result",
+      "operator_version": "2",
+      "description": "Return the single typed terminal result: verified public success with the retained carrier and resume plan for the caller, named pre-create failure, unknown create outcome with ownership unconfirmed and cleanup absent, or post-create failure or cancellation with closed/unconfirmed cleanup only when a usable owned full session ID is available. Cancellation with unknown ownership returns cleanup absent. Subsequent live verification and test teardown are observer-owned. The public CLI maps every error to exit 2 without a partial success payload.",
+      "inputs": ["codex_resume_result", "pre_create_failure", "unknown_create_result", "cleanup_disposition"],
+      "output": {"id": "restore_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "collect_verified_context", "to": "validate_context_ownership", "arc_id": "verified_context"},
+    {"from": "collect_verified_context", "to": "return_pre_create_failure", "arc_id": "verified_context"},
+    {"from": "validate_context_ownership", "to": "persist_panel_association", "arc_id": "admitted_context"},
+    {"from": "validate_context_ownership", "to": "return_pre_create_failure", "arc_id": "admitted_context"},
+    {"from": "persist_panel_association", "to": "readback_saved_association", "arc_id": "saved_association"},
+    {"from": "persist_panel_association", "to": "return_pre_create_failure", "arc_id": "saved_association"},
+    {"from": "readback_saved_association", "to": "select_isolated_restore_target", "arc_id": "save_proof"},
+    {"from": "readback_saved_association", "to": "return_pre_create_failure", "arc_id": "save_proof"},
+    {"from": "select_isolated_restore_target", "to": "create_restore_carrier", "arc_id": "restore_target"},
+    {"from": "select_isolated_restore_target", "to": "return_pre_create_failure", "arc_id": "restore_target"},
+    {"from": "create_restore_carrier", "to": "classify_restore_carrier_outcome", "arc_id": "create_observation"},
+    {"from": "classify_restore_carrier_outcome", "to": "resume_codex_with_recorded_identity", "arc_id": "carrier_outcome"},
+    {"from": "classify_restore_carrier_outcome", "to": "reconcile_and_cleanup_created_carrier", "arc_id": "carrier_outcome"},
+    {"from": "classify_restore_carrier_outcome", "to": "return_pre_create_failure", "arc_id": "carrier_outcome"},
+    {"from": "classify_restore_carrier_outcome", "to": "return_unknown_create_result", "arc_id": "carrier_outcome"},
+    {"from": "return_unknown_create_result", "to": "return_restore_result", "arc_id": "unknown_create_result"},
+    {"from": "resume_codex_with_recorded_identity", "to": "return_restore_result", "arc_id": "codex_resume_result"},
+    {"from": "observe_cancellation_request", "to": "reconcile_and_cleanup_created_carrier", "arc_id": "cancellation_request"},
+    {"from": "observe_cancellation_request", "to": "return_pre_create_failure", "arc_id": "cancellation_request"},
+    {"from": "return_pre_create_failure", "to": "return_restore_result", "arc_id": "pre_create_failure"},
+    {"from": "reconcile_and_cleanup_created_carrier", "to": "return_restore_result", "arc_id": "cleanup_disposition"}
+  ],
+  "outputs": ["restore_result"]
+}

@@ -859,8 +859,207 @@ fn main() {
 
 include!("main_error_format.rs");
 
+#[cfg(unix)]
+static RESTORE_INTERRUPTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+struct RestoreInterrupt {
+    previous: libc::sigaction,
+}
+
+#[cfg(unix)]
+impl RestoreInterrupt {
+    fn install() -> std::io::Result<Self> {
+        extern "C" fn interrupt(_: libc::c_int) {
+            RESTORE_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        RESTORE_INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            let mut previous = std::mem::zeroed();
+            action.sa_sigaction = interrupt as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            if libc::sigaction(libc::SIGINT, &action, &mut previous) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Self { previous })
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RestoreInterrupt {
+    fn drop(&mut self) {
+        unsafe { libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut()) };
+    }
+}
+
+fn restore_carrier(
+    args: main_cli::RestoreArgs,
+) -> Result<proto::RestoreResult, proto::RestoreFailure> {
+    use proto::{CodexResumePlan, RestoreFailure, RestorePlan, RestoreResult};
+    use server::binding_store::BindingControlStore;
+
+    let reject = |detail: String| RestoreFailure::new("binding", detail);
+    if !args.approve {
+        return Err(RestoreFailure::new("approval", "RESTORE_APPROVAL_REQUIRED"));
+    }
+    let root = scope::lifecycle_project_root().map_err(|error| reject(error.to_string()))?;
+    let project = root
+        .to_str()
+        .ok_or_else(|| reject("project path is not UTF-8".into()))?;
+    let paths = scope::HostPaths::resolve().map_err(|error| reject(error.to_string()))?;
+    let store = BindingControlStore::new(paths.state_root());
+    let read = || {
+        let control = store.load().map_err(reject)?;
+        let mut matches = control.slots().filter_map(|slot| {
+            let binding = slot.active_binding()?;
+            (slot.identity_key.project_scope.as_str() == project
+                && slot.identity_key.app_scope_id.as_str() == args.app
+                && binding.binding.agent_id.as_str() == args.worker)
+                .then_some((slot.generation, binding))
+        });
+        let (generation, value) = matches
+            .next()
+            .ok_or_else(|| reject("RESTORE_BINDING_NOT_FOUND".into()))?;
+        if matches.next().is_some()
+            || generation == 0
+            || generation != args.generation
+            || value.binding.binding_id.as_str() != args.binding_id
+        {
+            return Err(reject("RESTORE_BINDING_MISMATCH".into()));
+        }
+        Ok(value.clone())
+    };
+    let value = read()?;
+    let profile = value
+        .host
+        .profile
+        .as_ref()
+        .filter(|profile| !profile.trim().is_empty() && !profile.chars().any(char::is_control))
+        .ok_or_else(|| reject("RESTORE_PROFILE_REQUIRED".into()))?;
+    let codex_session_id = value
+        .binding
+        .session_id
+        .as_ref()
+        .ok_or_else(|| reject("RESTORE_CODEX_SESSION_REQUIRED".into()))?;
+    let saved_layout = value
+        .rex_layout
+        .as_ref()
+        .ok_or_else(|| reject("RESTORE_LAYOUT_REQUIRED".into()))?;
+    let transport = value
+        .transport
+        .as_ref()
+        .filter(|transport| transport.kind == proto::TransportKind::Rex)
+        .ok_or_else(|| reject("RESTORE_REX_TRANSPORT_REQUIRED".into()))?;
+    if value.host.agent_kind.as_deref() != Some("codex")
+        || value.host.host_type != "rex"
+        || value.binding.project_scope.as_str() != project
+        || value.binding.app_scope_id.as_str() != args.app
+        || transport.session_id.as_deref() != Some(codex_session_id.as_str())
+    {
+        return Err(reject("RESTORE_BINDING_SCOPE_OR_SESSION_MISMATCH".into()));
+    }
+    let cwd =
+        std::fs::canonicalize(&value.invocation_cwd).map_err(|error| reject(error.to_string()))?;
+    if !cwd.is_dir()
+        || cwd.to_str() != Some(value.invocation_cwd.as_str())
+        || transport
+            .rex_endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.cwd.as_str())
+            != cwd.to_str()
+    {
+        return Err(reject("RESTORE_CWD_MISMATCH".into()));
+    }
+
+    let plan = RestorePlan {
+        project_scope: project.into(),
+        app_scope_id: args.app.clone(),
+        worker_id: args.worker.clone(),
+        binding_id: args.binding_id.clone(),
+        binding_generation: args.generation,
+        operation_id: args.operation_id,
+        session_label: args.session_label,
+        saved_layout: saved_layout.clone(),
+    };
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|error| RestoreFailure::new("runtime", error.to_string()))?;
+    #[cfg(unix)]
+    let _interrupt = RestoreInterrupt::install()
+        .map_err(|error| RestoreFailure::new("signal", error.to_string()))?;
+    #[cfg(all(unix, feature = "lifecycle-test-hooks"))]
+    if let Some(release) = std::env::var_os("COLLAB_TEST_RESTORE_SIGNAL_CONSUMER_BARRIER") {
+        // The regression keeps the former asynchronous consumer withheld. The
+        // synchronous signal owner above does not depend on that consumer.
+        std::fs::write(
+            std::path::PathBuf::from(release).with_extension("ready"),
+            b"ready",
+        )
+        .map_err(|error| RestoreFailure::new("signal", error.to_string()))?;
+    }
+    #[cfg(not(unix))]
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(not(unix))]
+    let signal_cancelled = cancelled.clone();
+    #[cfg(not(unix))]
+    let signal_task = runtime.spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            signal_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let carrier = runtime.block_on(crate::client::adapters::rex::restore_carrier(
+        &plan,
+        || {
+            if read()? != value {
+                return Err(reject("RESTORE_BINDING_CHANGED".into()));
+            }
+            Ok(())
+        },
+        || {
+            #[cfg(unix)]
+            {
+                RESTORE_INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
+            }
+            #[cfg(not(unix))]
+            {
+                cancelled.load(std::sync::atomic::Ordering::SeqCst)
+            }
+        },
+    ));
+    #[cfg(not(unix))]
+    signal_task.abort();
+    let carrier = carrier?;
+    let resume = CodexResumePlan {
+        profile: profile.clone(),
+        codex_session_id: codex_session_id.as_str().into(),
+        canonical_cwd: value.invocation_cwd.clone(),
+        target_block_id: carrier.layout_verification.block_id.clone(),
+    };
+    Ok(RestoreResult {
+        restored_session_id: carrier.layout_verification.session_id.clone(),
+        restored_window_id: carrier.layout_verification.window_id.clone(),
+        restored_block_id: carrier.layout_verification.block_id.clone(),
+        carrier,
+        plan,
+        resume,
+        live_resume: proto::RestoreLiveResume::Unverified,
+    })
+}
+
 fn run(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {
+        Cmd::Restore(args) => {
+            match restore_carrier(args) {
+                Ok(result) => out(&serde_json::json!({"ok": true, "result": result})),
+                Err(error) => {
+                    out(&serde_json::json!({"ok": false, "error": error}));
+                    std::process::exit(2);
+                }
+            }
+            Ok(())
+        }
         Cmd::Config => {
             crate::config::ensure_written()?;
             out(&crate::config::load(&scope::lifecycle_project_root()?)?);
@@ -2050,6 +2249,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             approve_grant,
             provide,
             query,
+            save,
         } => {
             // Validate and parse the workflow mutation before any bootstrap or
             // identity write. A malformed spec or conflicting flag must leave
@@ -2089,6 +2289,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 approve_grant.as_deref(),
                 provide.as_deref(),
                 query,
+                save,
             );
             match result {
                 Ok(value) => {

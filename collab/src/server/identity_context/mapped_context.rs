@@ -98,6 +98,14 @@ impl ProjectRuntimeManager {
                 );
             }
             let retire_name = approval["action"].as_str() == Some("retire_name");
+            if retire_name && request.save {
+                return (
+                    self.host.clone(),
+                    Resp::err(
+                        "REX_SAVE_INCOMPATIBLE_RETIREMENT: --save cannot be combined with retire_name",
+                    ),
+                );
+            }
             if !approval
                 .get("authorization")
                 .or(approval.get("approval"))
@@ -117,22 +125,64 @@ impl ProjectRuntimeManager {
             }
         }
         // Parse authorized target before any registration can publish a name.
-        let raw_authorization = request.grant_approval.as_ref().or(request.approval.as_ref());
+        let raw_authorization = request
+            .grant_approval
+            .as_ref()
+            .or(request.approval.as_ref());
         let mut intent = match name_resolution::parse_name_intent(raw_authorization) {
             Ok(intent) => intent,
             Err(error) => return (self.host.clone(), Resp::err(error)),
         };
-        let allow_explicit_rex_rebind = matches!(request
-            .grant_approval
-            .as_ref()
-            .or(request.approval.as_ref())
-            .and_then(|approval| approval["action"].as_str()),
-            Some("restore_name" | "restore_master"));
+        let allow_explicit_rex_rebind = matches!(
+            request
+                .grant_approval
+                .as_ref()
+                .or(request.approval.as_ref())
+                .and_then(|approval| approval["action"].as_str()),
+            Some("restore_name" | "restore_master")
+        );
+        if request.save && facts.rex.is_none() {
+            return (
+                self.host.clone(),
+                Resp::err("REX_SAVE_REQUIRES_REX: explicit Save requires a Rex session and block"),
+            );
+        }
+        if request.save {
+            let control = match self.binding_control_store().load() {
+                Ok(control) => control,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            let existing = match if allow_explicit_rex_rebind {
+                control.lookup_explicit_rex_rebind(
+                    &context.project_scope,
+                    &context.app_scope_id,
+                    &facts,
+                    request.invocation_cwd.as_deref(),
+                )
+            } else {
+                control.lookup(
+                    &context.project_scope,
+                    &context.app_scope_id,
+                    &facts,
+                    request.invocation_cwd.as_deref(),
+                )
+            } {
+                Ok(existing) => existing,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            if existing.is_none() {
+                return (
+                    self.host.clone(),
+                    Resp::err("REX_SAVE_REQUIRES_EXISTING_BINDING: register without --save first"),
+                );
+            }
+        }
         let rex_recovery = if facts.rex.is_some() && !allow_explicit_rex_rebind {
             match self.observe_rex_recovery(
                 &context,
                 &facts,
                 request.invocation_cwd.as_deref(),
+                request.save,
             ) {
                 Ok(observation) => Some(observation),
                 Err(error) => {
@@ -142,12 +192,31 @@ impl ProjectRuntimeManager {
         } else {
             None
         };
+        if request.save
+            && rex_recovery.as_ref().is_some_and(|recovery| {
+                matches!(
+                    recovery.admission,
+                    RexRecoveryAdmission::DisplacedExecution(_)
+                )
+            })
+        {
+            return (
+                self.host.clone(),
+                Resp::err(
+                    "REX_SAVE_REQUIRES_CALLER_BINDING: displaced Rex caller must register without --save first",
+                ),
+            );
+        }
         let mut facts = facts;
         facts.caller_pid = None;
         facts.pane_hint = None;
         request.facts = facts.clone();
-        if !rex_recovery.as_ref().is_some_and(|recovery|
-            matches!(recovery.admission, RexRecoveryAdmission::DisplacedExecution(_))) {
+        if !rex_recovery.as_ref().is_some_and(|recovery| {
+            matches!(
+                recovery.admission,
+                RexRecoveryAdmission::DisplacedExecution(_)
+            )
+        }) {
             let _identity = self.identity_gate.lock().unwrap();
             if let Err(error) = self.ensure_current_worker_for_context(
                 &context,
@@ -185,6 +254,7 @@ impl ProjectRuntimeManager {
             Some(outer),
             true,
             allow_explicit_rex_rebind,
+            request.save,
             request.invocation_cwd.as_deref(),
         );
         let (runtime, mut response) = match reconciled {
@@ -193,7 +263,8 @@ impl ProjectRuntimeManager {
         };
         if !response.ok {
             if let Some(error) = response.error.as_deref().and_then(|error| {
-                error.strip_prefix("CONTROL_COMMITTED_EFFECTS_PENDING: ")
+                error
+                    .strip_prefix("CONTROL_COMMITTED_EFFECTS_PENDING: ")
                     .and_then(|error| error.strip_prefix(PHYSICAL_ANCHOR_PENDING))
             }) {
                 let (runtime, mut readback) = self.current_mapped_context(&context, &request);
@@ -289,14 +360,17 @@ impl ProjectRuntimeManager {
         if request.operation_id.is_empty() && !physical_incomplete {
             return (runtime, response);
         }
-        let outcome = if physical_incomplete { "incomplete" } else { "completed" };
-        let mut result =
-            json!({"result":{
-                "operation_id":request.operation_id,"action":"context","invocation":request.invocation,
-                "outcome":outcome,"phase":"context_complete","committed_phases":[],"failed_phase":null,
-                "requires":{"kind":null,"fields":[],"sources":{},"approval":null,"repair_invocation":null},
-                "snapshot":response.data["snapshot"],"owner_readback":{"physical_anchor":physical}
-            }});
+        let outcome = if physical_incomplete {
+            "incomplete"
+        } else {
+            "completed"
+        };
+        let mut result = json!({"result":{
+            "operation_id":request.operation_id,"action":"context","invocation":request.invocation,
+            "outcome":outcome,"phase":"context_complete","committed_phases":[],"failed_phase":null,
+            "requires":{"kind":null,"fields":[],"sources":{},"approval":null,"repair_invocation":null},
+            "snapshot":response.data["snapshot"],"owner_readback":{"physical_anchor":physical}
+        }});
         if physical_incomplete {
             result["result"]["phase"] = json!("physical_anchor");
             result["result"]["failed_phase"] = json!("physical_anchor");
@@ -304,11 +378,19 @@ impl ProjectRuntimeManager {
             result["result"]["requires"]["kind"] = json!("physical_anchor");
             result["result"]["requires"]["repair_invocation"] = json!("collab context");
         }
-        let error = physical_incomplete.then(|| physical["error"].as_str()
-            .unwrap_or("PHYSICAL_ANCHOR_INCOMPLETE").to_owned());
+        let error = physical_incomplete.then(|| {
+            physical["error"]
+                .as_str()
+                .unwrap_or("PHYSICAL_ANCHOR_INCOMPLETE")
+                .to_owned()
+        });
         (
             runtime,
-            Resp { ok: outcome == "completed", error, data: result },
+            Resp {
+                ok: outcome == "completed",
+                error,
+                data: result,
+            },
         )
     }
 
@@ -334,7 +416,9 @@ impl ProjectRuntimeManager {
         let control = self.binding_control_store().load()?;
         let targets = control.project_currents_for_name(&context.project_scope, requested_name);
         if targets.is_empty()
-            || targets.iter().any(|slot| slot.identity_key.app_scope_id == context.app_scope_id)
+            || targets
+                .iter()
+                .any(|slot| slot.identity_key.app_scope_id == context.app_scope_id)
         {
             return Ok(None);
         }
@@ -356,25 +440,30 @@ impl ProjectRuntimeManager {
             "target_app_scope_ids": target_apps,
             "target_key": null,
             "target_keys": targets.iter().map(|slot| &slot.identity_key).collect::<Vec<_>>(),
-        }).as_object().unwrap().clone();
-        Ok(Some(typed_operation_resp(crate::proto::ContextOperationResult {
-            operation_id: request.operation_id.clone(),
-            invocation: request.invocation.clone(),
-            action: request.action.clone(),
-            phase: Some("target_scope_resolution".into()),
-            outcome: "scope_required".into(),
-            committed_phases: Vec::new(),
-            failed_phase: None,
-            requires: crate::proto::ContextOperationRequires {
-                kind: Some("app_scope".into()),
-                fields: vec!["app_scope_id".into()],
-                sources,
-                repair_invocation: Some(repair_invocation),
-                ..Default::default()
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        Ok(Some(typed_operation_resp(
+            crate::proto::ContextOperationResult {
+                operation_id: request.operation_id.clone(),
+                invocation: request.invocation.clone(),
+                action: request.action.clone(),
+                phase: Some("target_scope_resolution".into()),
+                outcome: "scope_required".into(),
+                committed_phases: Vec::new(),
+                failed_phase: None,
+                requires: crate::proto::ContextOperationRequires {
+                    kind: Some("app_scope".into()),
+                    fields: vec!["app_scope_id".into()],
+                    sources,
+                    repair_invocation: Some(repair_invocation),
+                    ..Default::default()
+                },
+                snapshot: Some(json!({"registered": false, "identity": null})),
+                owner_readback: Default::default(),
             },
-            snapshot: Some(json!({"registered": false, "identity": null})),
-            owner_readback: Default::default(),
-        })))
+        )))
     }
 
     fn current_mapped_context(
@@ -419,14 +508,22 @@ impl ProjectRuntimeManager {
             return (runtime, snapshot);
         }
         let physical = snapshot.data["physical_anchor"].clone();
-        let outcome = if physical["status"] == "incomplete" { "incomplete" } else { "completed" };
+        let outcome = if physical["status"] == "incomplete" {
+            "incomplete"
+        } else {
+            "completed"
+        };
         let mut result = json!({"result":{"operation_id":request.operation_id,"action":"context","invocation":"query",
             "outcome":outcome,"phase":null,"committed_phases":[],"failed_phase":null,
             "requires":{"kind":null,"fields":[],"sources":{},"approval":null,"repair_invocation":null},"snapshot":snapshot.data,
             "owner_readback":{"physical_anchor":physical}}});
         (
             runtime,
-            Resp { ok: true, error: None, data: result },
+            Resp {
+                ok: true,
+                error: None,
+                data: result,
+            },
         )
     }
 
@@ -444,23 +541,19 @@ impl ProjectRuntimeManager {
             &context.app_scope_id,
             &request.facts,
             request.invocation_cwd.as_deref(),
-        )? else {
+        )?
+        else {
             return Ok(None);
         };
         let value = slot
             .active_binding()
             .expect("lookup returns active current");
-        if request
-            .facts
-            .dsh
-            .as_ref()
-            .is_some_and(|candidate| {
-                value
-                    .transport
-                    .as_ref()
-                    .is_some_and(|transport| !identity::dsh_transport_matches(candidate, transport))
-            })
-        {
+        if request.facts.dsh.as_ref().is_some_and(|candidate| {
+            value
+                .transport
+                .as_ref()
+                .is_some_and(|transport| !identity::dsh_transport_matches(candidate, transport))
+        }) {
             return Err(
                 "IDENTITY_RESTORE_CONFLICT: DSH communication API differs from the current mapped binding"
                     .into(),
@@ -471,7 +564,13 @@ impl ProjectRuntimeManager {
         };
         let worker_id = value.binding.agent_id.as_str();
         let runtime = self.select_runtime(context)?;
-        if runtime.state.lock().unwrap().workers.contains_key(worker_id) {
+        if runtime
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .contains_key(worker_id)
+        {
             return Ok(None);
         }
         let pending: Vec<_> = control
@@ -619,7 +718,9 @@ impl ProjectRuntimeManager {
             let Some(approval) = approval
                 .filter(|text| !text.trim().is_empty() && !text.chars().any(char::is_control))
             else {
-                return Resp::err("MASTER_AUTHORIZATION_REQUIRED: a new master requires explicit user approval");
+                return Resp::err(
+                    "MASTER_AUTHORIZATION_REQUIRED: a new master requires explicit user approval",
+                );
             };
             (
                 target.to_owned(),
@@ -678,11 +779,13 @@ impl ProjectRuntimeManager {
         match result {
             Ok(outcome) => {
                 let control = match self.binding_control_store().load() {
-                    Ok(control) => control, Err(error) => return Resp::err(error),
+                    Ok(control) => control,
+                    Err(error) => return Resp::err(error),
                 };
                 let state = runtime.state.lock().unwrap();
                 let brief = match role_brief(runtime, &state, &control, &subject) {
-                    Ok(brief) => brief, Err(error) => return Resp::err(error),
+                    Ok(brief) => brief,
+                    Err(error) => return Resp::err(error),
                 };
                 let mut response = json!({"master":current_master_worker_id(&state, Some(&route)),"scope":scope_view(Some(&route)),
                     "name_resolution":outcome,"mode":"user_approved_self_promotion","role_brief":brief});
@@ -694,7 +797,8 @@ impl ProjectRuntimeManager {
                 if outcome["physical_anchor"]["status"] == "incomplete" {
                     response["outcome"] = json!("incomplete");
                     return Resp::err_data(
-                        outcome["physical_anchor"]["error"].as_str()
+                        outcome["physical_anchor"]["error"]
+                            .as_str()
                             .unwrap_or("PHYSICAL_ANCHOR_INCOMPLETE"),
                         response,
                     );
@@ -737,46 +841,45 @@ impl ProjectRuntimeManager {
         {
             return Err("NAME_AUTHORIZATION_REQUIRED".into());
         }
-        let mut cross_scope_sources = if intent
-            .as_ref()
-            .is_some_and(|intent| intent.user_authorized)
-        {
-            let mut sources: Vec<_> = map
-                .project_currents_for_name(&context.project_scope, &target)
-                .into_iter()
-                .filter(|slot| slot.identity_key.app_scope_id != context.app_scope_id)
-                .filter_map(BindingControlSet::cross_scope_source_ref)
-                .collect();
-            if let Some(facts) = facts {
-                let cwd = pane
-                    .as_ref()
-                    .map(|pane| pane.cwd.as_str())
-                    .or(Some(value.invocation_cwd.as_str()));
-                if let Some(source_slot) = map.project_current_for_facts_excluding_app(
-                    &context.project_scope,
-                    Some(&context.app_scope_id),
-                    facts,
-                    cwd,
-                )? {
-                    if source_slot.identity_key.app_scope_id != context.app_scope_id {
-                        if let Some(source) = BindingControlSet::cross_scope_source_ref(source_slot)
-                        {
-                            sources.push(source);
+        let mut cross_scope_sources =
+            if intent.as_ref().is_some_and(|intent| intent.user_authorized) {
+                let mut sources: Vec<_> = map
+                    .project_currents_for_name(&context.project_scope, &target)
+                    .into_iter()
+                    .filter(|slot| slot.identity_key.app_scope_id != context.app_scope_id)
+                    .filter_map(BindingControlSet::cross_scope_source_ref)
+                    .collect();
+                if let Some(facts) = facts {
+                    let cwd = pane
+                        .as_ref()
+                        .map(|pane| pane.cwd.as_str())
+                        .or(Some(value.invocation_cwd.as_str()));
+                    if let Some(source_slot) = map.project_current_for_facts_excluding_app(
+                        &context.project_scope,
+                        Some(&context.app_scope_id),
+                        facts,
+                        cwd,
+                    )? {
+                        if source_slot.identity_key.app_scope_id != context.app_scope_id {
+                            if let Some(source) =
+                                BindingControlSet::cross_scope_source_ref(source_slot)
+                            {
+                                sources.push(source);
+                            }
                         }
                     }
                 }
-            }
-            let mut seen = std::collections::BTreeSet::new();
-            sources.retain(|source| {
-                seen.insert((
-                    source.key.app_scope_id.as_str().to_owned(),
-                    source.key.name.clone(),
-                ))
-            });
-            sources
-        } else {
-            Vec::new()
-        };
+                let mut seen = std::collections::BTreeSet::new();
+                sources.retain(|source| {
+                    seen.insert((
+                        source.key.app_scope_id.as_str().to_owned(),
+                        source.key.name.clone(),
+                    ))
+                });
+                sources
+            } else {
+                Vec::new()
+            };
         if let Some(facts) = facts {
             value.host.agent_kind = facts.agent_kind.clone().or(value.host.agent_kind);
             value.host.profile = facts.profile.clone().or(value.host.profile);
@@ -829,9 +932,11 @@ impl ProjectRuntimeManager {
                 .name_occupancy(context.project_scope.as_str(), &target)
                 .is_some_and(|holder| holder.worker_id == worker && holder.session_id == session)
         {
-            let is_current_master = current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker);
+            let is_current_master =
+                current_master_worker_id(&state, Some(&route)).as_deref() == Some(worker);
             drop(state);
-            let physical = rename_prepared_anchor(&value, &value.invocation_cwd, &target, is_current_master)?;
+            let physical =
+                rename_prepared_anchor(&value, &value.invocation_cwd, &target, is_current_master)?;
             return Ok(
                 json!({"outcome":"committed","name":target,"session_id":session,
                     "physical_anchor":physical.readback(value.physical_name.clone()),
@@ -847,14 +952,17 @@ impl ProjectRuntimeManager {
         verify_tmux_replacement(
             previous,
             &value,
-            intent.as_ref().is_some_and(|intent| intent.user_authorized && intent.replace_confirmed),
+            intent
+                .as_ref()
+                .is_some_and(|intent| intent.user_authorized && intent.replace_confirmed),
         )?;
         if intent.as_ref().is_some_and(|intent| intent.user_authorized) {
             if let Some(previous) = previous {
                 value.replace_rex_holder(previous)?;
             }
             for source in &cross_scope_sources {
-                if let Some(current) = map.slot(&source.key).and_then(|slot| slot.active_binding()) {
+                if let Some(current) = map.slot(&source.key).and_then(|slot| slot.active_binding())
+                {
                     value.preserve_rex_fence(current);
                     if source.key.name.eq_ignore_ascii_case(&target) {
                         value.replace_rex_holder(current)?;
@@ -868,23 +976,17 @@ impl ProjectRuntimeManager {
                 slot.identity_key.project_scope == context.project_scope
                     && slot.identity_key.app_scope_id == context.app_scope_id
                     && slot.identity_key.name != target
-                    && slot.active_binding().is_some_and(|current| {
-                        current.binding.agent_id.as_str() == worker
-                    })
+                    && slot
+                        .active_binding()
+                        .is_some_and(|current| current.binding.agent_id.as_str() == worker)
             })
             .map(|slot| slot.identity_key.name.clone())
             .collect();
         local_source_names.sort();
         local_source_names.dedup();
         cross_scope_sources.sort_by(|left, right| {
-            (
-                left.key.app_scope_id.as_str(),
-                left.key.name.as_str(),
-            )
-                .cmp(&(
-                    right.key.app_scope_id.as_str(),
-                    right.key.name.as_str(),
-                ))
+            (left.key.app_scope_id.as_str(), left.key.name.as_str())
+                .cmp(&(right.key.app_scope_id.as_str(), right.key.name.as_str()))
         });
         let effect = PendingEffect {
             kind: if cross_scope_sources.is_empty() {

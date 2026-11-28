@@ -1092,8 +1092,8 @@ fn project_patrol_requires_trusted_30m_and_30m_between_pushes() {
     tick_with_idle_at(&server, base + 75 * minute + 1, &|_| false);
     assert_eq!(
         bodies(&server).len(),
-        2,
-        "the same idle episode may push again after 30m"
+        1,
+        "the same idle episode must remain idempotent and not push again"
     );
 
     let native_status = Arc::new(Mutex::new("working".to_string()));
@@ -1102,20 +1102,20 @@ fn project_patrol_requires_trusted_30m_and_30m_between_pushes() {
     tick_with_idle_at(&server, busy_at, &|_| false);
     assert_eq!(
         bodies(&server).len(),
-        2,
+        1,
         "busy detection advances without pushing or backfilling"
     );
     *native_status.lock().unwrap() = "idle".into();
     tick_with_idle_at(&server, base + 105 * minute + 1, &|_| false);
     assert_eq!(
         bodies(&server).len(),
-        2,
+        1,
         "a new idle episode does not inherit the old trusted start"
     );
     tick_with_idle_at(&server, base + 135 * minute + 2, &|_| false);
     assert_eq!(
         bodies(&server).len(),
-        3,
+        2,
         "the new idle episode pushes only after its own 30 minutes"
     );
     std::fs::remove_dir_all(root).ok();
@@ -1436,10 +1436,11 @@ fn project_patrol_renews_finite_budget_and_ttl_on_same_subscription() {
         );
     }
 
-    // The trusted gate pushes at most once per 30 minutes, so reaching the old
-    // 100-occurrence budget needs more 15-minute polls than the pre-gate test.
-    for _ in 0..260 {
-        at = at.saturating_add(PROJECT_PATROL_INTERVAL_MS);
+    // Each distinct idle episode pushes once; advance through 110 episodes to
+    // verify the standing patrol survives past the old 100-occurrence budget.
+    for _ in 0..110 {
+        at = at.saturating_add(45 * 60_000);
+        seed_project_patrol_episode(&server, &subscription_id, at - 31 * 60_000, 0);
         tick_with_idle_at(&server, at, &|_| false);
     }
 
@@ -1599,6 +1600,7 @@ fn master_wake_hold_suppresses_standing_project_patrol_until_expiry_or_release()
         crate::server::handle_master_wake_release(&server, "master".into(), "token-master".into());
     assert!(released.ok, "{released:?}");
     let resumed = suppressed + PROJECT_PATROL_INTERVAL_MS + 1;
+    seed_project_patrol_episode(&server, &subscription_id, resumed - 31 * 60_000, 0);
     tick_with_idle_at(&server, resumed, &|_| false);
     {
         let state = server.state.lock().unwrap();

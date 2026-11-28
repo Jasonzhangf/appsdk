@@ -447,7 +447,7 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                                     .as_deref()
                                     .is_some_and(|subject| subject.starts_with("master-idle"))
                         });
-                        record.idle_episode_notices < 3
+                        record.idle_episode_notices < 1
                             && !record.idle_episode_stopped
                             && record.idle_since_ms > subscription.created_ms
                             && record.last_notice_ms != now
@@ -885,6 +885,7 @@ fn project_patrol_body() -> String {
          If configured and substantive progress or blockers changed, report the substantive goal, \
          results, remaining work, blockers, and next action through `collab ceo reply`; \
          when none remain, continue local master work. \
+         If no actionable tasks remain, stop patrol immediately with `collab notify cancel --event master-idle` (没有可执行任务时请立即停止巡检). \
          Direct-message reception is daemon-owned and must never be closed.",
     )
 }
@@ -1026,11 +1027,16 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
             } else {
                 None
             };
+            let no_actionable_tasks = !state.tasks.is_empty()
+                && state
+                    .tasks
+                    .values()
+                    .all(|task| matches!(task.status.as_str(), "closed" | "cancelled"));
             let last_push_ms = current.patrol_last_push_ms;
-            let due = idle_since_ms.is_some_and(|start| {
-                now > start + PROJECT_PATROL_TRUSTED_IDLE_MS
-                    && (last_push_ms == 0 || now - last_push_ms >= PROJECT_PATROL_TRUSTED_IDLE_MS)
-            });
+            let due = !no_actionable_tasks
+                && idle_since_ms.is_some_and(|start| {
+                    now > start + PROJECT_PATROL_TRUSTED_IDLE_MS && last_push_ms < start
+                });
             let should_notify = due && !hold_active;
             let fired_count = if should_notify {
                 current.fired_count.saturating_add(1)
@@ -1039,22 +1045,28 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
             };
             let mut renewed = current.clone();
             renewed.fired_count = fired_count;
-            renewed.trigger_ms = Some(
-                now.saturating_add(
-                    current
-                        .interval_ms
-                        .unwrap_or(PROJECT_PATROL_TARGET_INTERVAL_MS),
-                ),
-            );
-            renewed.repeat_count = renewed
-                .repeat_count
-                .max(fired_count.saturating_add(PROJECT_PATROL_REPEAT_HEADROOM));
-            renewed.expires_ms = renewed
-                .expires_ms
-                .max(now.saturating_add(PROJECT_PATROL_TTL_MS));
-            renewed.status = "armed".into();
+            if no_actionable_tasks {
+                renewed.status = "cancelled".into();
+                renewed.status_reason = Some("NO_ACTIONABLE_TASKS".into());
+                renewed.trigger_ms = None;
+            } else {
+                renewed.trigger_ms = Some(
+                    now.saturating_add(
+                        current
+                            .interval_ms
+                            .unwrap_or(PROJECT_PATROL_TARGET_INTERVAL_MS),
+                    ),
+                );
+                renewed.repeat_count = renewed
+                    .repeat_count
+                    .max(fired_count.saturating_add(PROJECT_PATROL_REPEAT_HEADROOM));
+                renewed.expires_ms = renewed
+                    .expires_ms
+                    .max(now.saturating_add(PROJECT_PATROL_TTL_MS));
+                renewed.status = "armed".into();
+                renewed.status_reason = None;
+            }
             renewed.updated_ms = now;
-            renewed.status_reason = None;
             renewed.patrol_idle_since_ms = idle_since_ms;
             renewed.patrol_last_push_ms = if should_notify { now } else { last_push_ms };
             let mut events = vec![Event::NotificationSubscribed {

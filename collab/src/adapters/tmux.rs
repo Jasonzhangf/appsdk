@@ -1448,6 +1448,7 @@ pub(crate) mod tests {
         }
 
         fn start_with_command(pane_command: Option<&str>) -> Self {
+            reap_orphan_test_tmux_artifacts();
             let root = std::env::temp_dir().join(format!(
                 "collab-tmux-test-{}-{}",
                 std::process::id(),
@@ -1653,12 +1654,72 @@ pub(crate) mod tests {
         }
     }
 
+    pub(crate) fn reap_orphan_test_tmux_artifacts() {
+        static REAP_ONCE: std::sync::Once = std::sync::Once::new();
+        REAP_ONCE.call_once(|| {
+            let current_pid = std::process::id();
+            let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                let pid_str = name
+                    .strip_prefix("ctmux-")
+                    .or_else(|| name.strip_prefix("collab-tmux-test-"))
+                    .or_else(|| name.strip_prefix("collab-peer-"))
+                    .and_then(|rest| rest.split(['-', '.']).next());
+                let Some(pid) = pid_str.and_then(|s| s.parse::<u32>().ok()) else {
+                    continue;
+                };
+                if pid == 0 || pid == current_pid {
+                    continue;
+                }
+                let alive = Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success());
+                if alive {
+                    continue;
+                }
+                let path = entry.path();
+                if name.starts_with("ctmux-") {
+                    let _ = Command::new("tmux")
+                        .arg("-S")
+                        .arg(&path)
+                        .arg("kill-server")
+                        .output();
+                    let _ = std::fs::remove_file(&path);
+                } else {
+                    let sock = path.join("tmux.sock");
+                    if sock.exists() {
+                        let _ = Command::new("tmux")
+                            .arg("-S")
+                            .arg(&sock)
+                            .arg("kill-server")
+                            .output();
+                    }
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+            }
+        });
+    }
+
     impl Drop for IsolatedTmux {
         fn drop(&mut self) {
             let _ = Command::new("tmux")
                 .arg("-S")
                 .arg(&self.socket)
                 .args(["kill-session", "-t", &self.session_id])
+                .output();
+            let _ = Command::new("tmux")
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
                 .output();
             let _ = std::fs::remove_dir_all(&self.root);
         }

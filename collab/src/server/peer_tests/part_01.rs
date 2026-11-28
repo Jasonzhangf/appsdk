@@ -670,6 +670,7 @@ struct TestTmuxFixtureScope {
 
 impl TestTmuxFixtureScope {
     fn enter() -> Self {
+        crate::client::adapters::tmux::tests::reap_orphan_test_tmux_artifacts();
         clear_test_tmux_pools();
         Self { root: None }
     }

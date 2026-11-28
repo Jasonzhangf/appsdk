@@ -43,11 +43,6 @@ pub struct Record {
     pub idle_episode_tasks: Vec<(String, String)>,
 }
 
-/// A starting agent legitimately flaps between idle and working while it boots
-/// and renders. Reporting each flap floods the master, so a state must hold
-/// before it is worth one scheduling notification.
-const SUBAGENT_STATE_SETTLE_MS: i64 = 60_000;
-
 const NON_LIVE_PEER_DISPATCH_RULE: &str = "For newly unknown peers, including peers that just registered, inspect `collab worker status <id>` this round. For Rex or Codex TUI/tmux, run `collab worker snapshot <id> --capture --lines 80` and inspect the existing block or pane. Apply the same check for identity-mismatch, cold, offline or missing peers. If facts are still needed from the peer, send one context-recovery request and wait at most 15 minutes before a final status check. Use that check to remove the still-unavailable from the dispatch queue and enqueue the available. Keep other ready work moving.";
 
 pub(crate) fn actionable(status: &str) -> bool {
@@ -417,22 +412,41 @@ fn board_patrol_worker_checked(
         && activity == AgentActivity::Idle
         && !candidate.gate.as_ref().is_some_and(|gate| gate.last_poll_idle);
     let trigger_mode = if immediate_peer_idle_wake {
-        PatrolTriggerMode::RealtimeEvent
+        PatrolTriggerMode::ImmediateWorkingToIdle
     } else {
         PatrolTriggerMode::PeriodicPoll
     };
-    let effective_idle_since_ms = if immediate_peer_idle_wake {
-        now - crate::board_patrol_policy::BOARD_IDLE_TRUSTED_INTERVAL_MS - 1
-    } else {
-        idle_since_ms
-    };
+    if activity == AgentActivity::Unknown {
+        let (presence_fact, _) = super::worker_agent_facts(server, &state, worker);
+        match presence_fact.map(|fact| fact.presence) {
+            Some(super::name_state::AgentPresence::Offline) => {
+                super::presence::append_log(
+                    &server.log_path(),
+                    &format!(
+                        "BOARD_PATROL_TARGET_OFFLINE: {}: peer activity unknown and presence is offline",
+                        worker.id
+                    ),
+                );
+            }
+            Some(super::name_state::AgentPresence::Online) => {
+                super::presence::append_log(
+                    &server.log_path(),
+                    &format!(
+                        "BOARD_PATROL_OBSERVATION_MISMATCH: {}: peer is online but activity probe returned unknown",
+                        worker.id
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
     let decision = evaluate_board_patrol(
         &candidate.eligible,
         &candidate.owner_key,
         trigger_mode,
         activity == AgentActivity::Idle,
         activity == AgentActivity::Busy,
-        effective_idle_since_ms,
+        idle_since_ms,
         now,
         candidate.gate.as_ref(),
     );

@@ -41,6 +41,7 @@ fn timer_due_commit_pause_hook(due_events: &[Event]) {
 /// work never gets a wake from elapsed time alone; the agent monitor may still
 /// continue an admitted ticket queue when it observes a trusted online-idle
 /// slot.
+#[cfg(test)]
 pub fn tick(server: &Arc<Server>) {
     tick_at(server, now_ms());
 }
@@ -52,6 +53,7 @@ pub(super) fn tick_managed(manager: &super::ProjectRuntimeManager, server: &Arc<
     tick_after_tmux(server, now);
 }
 
+#[cfg(test)]
 fn tick_at(server: &Arc<Server>, now: i64) {
     super::keepalive::tick_with_rex_recovery(server, now);
     super::name_monitor::tick(server, now);

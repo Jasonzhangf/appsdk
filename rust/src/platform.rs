@@ -16,6 +16,7 @@ pub(crate) fn try_lock_exclusive(file: &File) -> Result<(), LockAttemptError> {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn is_link_or_reparse(metadata: &Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -30,6 +31,7 @@ pub(crate) fn is_link_or_reparse(metadata: &Metadata) -> bool {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn is_platform_root_alias(path: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -47,6 +49,7 @@ pub(crate) fn is_platform_root_alias(path: &Path) -> bool {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum PathBoundaryError {
     BaseLink(PathBuf),
@@ -56,6 +59,7 @@ pub(crate) enum PathBoundaryError {
     Inspection(PathBuf, io::Error),
 }
 
+#[allow(dead_code)]
 pub(crate) fn validate_contained_path(base: &Path, path: &Path) -> Result<(), PathBoundaryError> {
     if !base.is_absolute() || !path.is_absolute() {
         return Err(PathBoundaryError::Escape);

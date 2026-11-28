@@ -67,9 +67,11 @@ CEO 按授权管理项目 master。Master 按 [Collab 派单顺序](../SKILL.md#
 处理 buglist 和项目任务。Jenny 分配独立目标，peer 在本人任务内使用 Codex 编排。
 巡检或记忆专长只承接本职责的任务。
 
-每轮派发先列出全部 live idle peer，包括没有当前任务的成员。遇到 `unknown` 等异常，
-按 [主动核实流程](board-idle-patrol.md#非-live-peer-的主动核实流程) 当轮查看状态。Rex
-和 Codex TUI/tmux 走现有 snapshot 入口。状态未知的 peer 不计入容量，其他工作继续派发。
+每轮派发先列出全部 live idle peer，包括没有当前任务的成员。遇到 `unknown`（含 `REX_SERVICE_CHANGED`）
+等异常，按 [主动核实流程](board-idle-patrol.md#非-live-peer-的主动核实流程) 当轮执行
+`collab worker snapshot <id> --capture --lines 80`（Rex 和 Codex TUI/tmux 走现有 snapshot 入口）
+确定 agent 实际状态，并立即落盘与执行具体 action item（恢复、改派或排除）。状态未知的 peer
+不计入容量，其他工作继续派发。上述事务均属 master scope，自行闭环，不找 CEO。
 
 master 选择承接任务的 peer 时，按 Collab Skill
 [派单顺序与一 peer 一任务](../SKILL.md#派单顺序与一-peer-一任务) 维护的当前提示词优先级和容量边界执行；本文件不复制该排序细节。

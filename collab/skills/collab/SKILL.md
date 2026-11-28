@@ -198,8 +198,10 @@ idle peer，包括没有当前任务的成员，并显式显示各自通道来�
 Desktop）和实际可承接容量。unknown 不算 idle，受保护角色仍显示但不计入业务派单容量。
 `identity-mismatch`、`cold`、`offline`、`unknown` 或 `presence=missing` 的成员按
 [非 live peer 主动核实流程](references/board-idle-patrol.md#非-live-peer-的主动核实流程)
-处理。刚注册的 Rex peer 显示 `unknown` 时，master 当轮主动查状态和原 block 的 snapshot。
-仍需 peer 补事实时最多等 15 分钟。状态未核实的 peer 不计入容量，其他 ready 工作继续派发。
+处理。遇到 `unknown`（含 `REX_SERVICE_CHANGED`）时，master 必须在当轮执行
+`collab worker snapshot <id> --capture --lines 80`（或对应宿主只读检查）确认该 agent 的真实状态，
+并立即落盘或执行具体 action item（如恢复/续接、改派未关闭任务或排除容量），不得仅记录 `unknown`
+后被动等待。仍需 peer 补事实时最多等 15 分钟。状态未核实的 peer 不计入容量，其他 ready 工作继续派发。
 先按任务权限、能力、依赖和实际容量筛选，再按当前用户或任务提示词中的优先级选择。
 派单优先级可直接在提示词自定义，不新增固定宿主排序算法或专用配置。提示词未指定时，
 默认 DSH 与 Codex TUI 同层优先，Codex Desktop 最后。有合适且可用的现有 peer 时先派单，
@@ -323,10 +325,12 @@ board 任务且正态 idle 时应唤醒本人，由本人继续推理并判断�
 超过 30 分钟，同一 idle 阶段重复推送至少间隔 30 分钟；29m59s 和恰好 30m00s 不推，
 不补发漏掉周期。
 
-任务阻塞或执行者没有推进时，直属负责人[当轮先取证](references/board-idle-patrol.md#任务阻塞或停滞先取证)。
+任务阻塞、执行者没有推进或状态为 `unknown`（含 `REX_SERVICE_CHANGED`）时，直属负责人
+[当轮先取证](references/board-idle-patrol.md#任务阻塞或停滞先取证)。
 用 `collab who` 取目标 worker ID 和当前 transport。Rex 绑定只查原 Rex block，
-tmux 绑定只查原 tmux pane。需要实际终端证据时执行
-`collab worker snapshot <id> --capture --lines 80`，由 daemon 按当前绑定选适配器。
+tmux 绑定只查原 tmux pane。必须执行
+`collab worker snapshot <id> --capture --lines 80` 检查终端输出以确定 agent 实际状态，
+并基于真实状态生成和执行具体 action item（恢复、改派或关闭清理），不得只标记 `unknown` 后空等。
 身份恢复走原会话 `collab context`。
 
 没有可执行项时，peer 取消本人对应的 board 巡检，任务与基本收件仍保留。取消按任务和当前稳定 owner
@@ -358,9 +362,12 @@ master 检查必要证据，不用 ACK 或自报完成代替验收。
 
 ## CEO 与项目进度
 
-全局 CEO 只由 daemon 的 typed grant 授权；工作角色 `ceo` 不授予全局权限。项目
-master 有 CEO 时通过现有 `collab ceo reply` 路由回报目标、已验收结果、剩余工作、
-阻塞和下一动作；无 CEO 时明确报告 `CEO_NOT_CONFIGURED`，继续本项目工作。
+全局 CEO 只由 daemon 的 typed grant 授权；工作角色 `ceo` 不授予全局权限。
+项目 master 自己 scope 内的所有事务（包括 peer 状态核实、`unknown`/`REX_SERVICE_CHANGED` 排查与恢复、
+任务拆解与派发、任务改派、常规阻塞解阻、review 后备、worktree 清理和日常巡检）由 master 自行处理闭环，
+不需要也不得找 CEO 请示、求助或例行汇报。只有在存在全局 CEO 且发生超出本 project master 权限的事项
+（需跨项目协调或用户决定）或重大里程碑实质进展时，才通过现有 `collab ceo reply` 路由回报目标、
+已验收结果、剩余工作、阻塞和下一动作；无 CEO 时明确报告 `CEO_NOT_CONFIGURED`，继续本项目工作。
 `collab master status` 与 `collab ceo progress` 的 `workspace` 必须投影当前 master
 绑定注册的 canonical project root；不得另造可写状态根，也不得用 cwd 或 session
 载体替代工作空间事实。

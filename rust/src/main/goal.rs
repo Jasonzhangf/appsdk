@@ -2308,3 +2308,54 @@ where
         std::process::exit(status.code().unwrap_or(1));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn goal_scope_from_context_rejects_missing_worker_or_invalid_scope() {
+        let root = Path::new("/tmp/appsdk-goal-unit");
+        let missing_worker = json!({"identity": {}});
+        assert_eq!(
+            goal_scope_from_context(&missing_worker, root)
+                .err()
+                .as_deref(),
+            Some("GOAL_OWNER_IDENTITY_MISSING")
+        );
+
+        let managed_subagent = json!({
+            "name": "worker-1",
+            "identity": {"worker_id": "w1", "role": "managed-subagent"},
+            "binding": {"project_scope": "/tmp/appsdk-goal-unit"}
+        });
+        assert!(goal_scope_from_context(&managed_subagent, root)
+            .err()
+            .is_some_and(|e| e.starts_with("GOAL_OWNER_MANAGED_SUBAGENT")));
+
+        let valid = json!({
+            "name": "peer-1",
+            "identity": {"worker_id": "w-peer-1", "role": "peer"},
+            "binding": {"project_scope": "/tmp/appsdk-goal-unit"}
+        });
+        let scope = goal_scope_from_context(&valid, root).expect("valid context should resolve");
+        assert_eq!(scope.owner, "peer-1");
+        assert_eq!(scope.worker_id, "w-peer-1");
+    }
+
+    #[test]
+    fn goal_record_subscription_id_reads_nested_and_top_level_ids() {
+        assert_eq!(
+            goal_record_subscription_id(&json!({"subscription_id": "sub-1"})),
+            Some("sub-1".to_string())
+        );
+        assert_eq!(
+            goal_record_subscription_id(
+                &json!({"collab_subscription": {"subscription_id": "sub-2"}})
+            ),
+            Some("sub-2".to_string())
+        );
+        assert_eq!(goal_record_subscription_id(&json!({})), None);
+    }
+}

@@ -67,14 +67,9 @@ pub(crate) fn is_valid_id(value: &str, max_len: usize, allow_slash: bool) -> boo
 #[allow(dead_code)]
 pub(crate) fn git_current_branch(root: &Path) -> Result<Option<String>, ()> {
     let output = Command::new("git")
-        .args([
-            "-C",
-            root.to_str().unwrap_or("."),
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "HEAD",
-        ])
+        .arg("-C")
+        .arg(root)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .output()
         .map_err(|_| ())?;
     if output.status.success() {

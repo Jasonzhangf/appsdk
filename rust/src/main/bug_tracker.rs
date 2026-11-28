@@ -11,12 +11,9 @@ pub(super) fn reset_governance_internal(
     assert_project_root_safe(root);
 
     let branch = Command::new("git")
-        .args([
-            "-C",
-            root.to_str().unwrap_or(""),
-            "branch",
-            "--show-current",
-        ])
+        .arg("-C")
+        .arg(root)
+        .args(["branch", "--show-current"])
         .output()
         .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
     if !branch.status.success() {
@@ -477,5 +474,131 @@ pub(super) fn assert_bug_tracker_solution_evidence(root: &Path, issue_id: &str, 
             "BUG_TRACKER_SOLUTION_EVIDENCE_MISSING:{}",
             issue_id
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn bug_record_matches_identity_accepts_human_id_or_full_id() {
+        let record = json!({"id": "abcdef1234567890", "human_id": "abcdef1"});
+        assert!(bug_record_matches_identity(&record, "abcdef1"));
+        assert!(bug_record_matches_identity(&record, "abcdef1234567890"));
+        assert!(!bug_record_matches_identity(&record, "other"));
+    }
+
+    #[test]
+    fn real_git_bug_triage_and_close_round_trip() {
+        struct TempDirGuard(PathBuf);
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let Ok(git_bug) = locate_git_bug_binary() else {
+            return;
+        };
+        let repo_guard = TempDirGuard(std::env::temp_dir().join(format!(
+            "appsdk-real-git-bug-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let repo = &repo_guard.0;
+        fs::create_dir_all(repo).unwrap();
+        for args in [
+            &["init", "-b", "codex/git-bug-e2e"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["config", "user.name", "AppSDK Test"][..],
+        ] {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(repo.join("README.md"), "real git-bug test\n").unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "."])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["commit", "-m", "init"])
+            .status()
+            .unwrap()
+            .success());
+
+        // Create a real git-bug user and adopt it non-interactively.
+        let user_out = Command::new(&git_bug)
+            .args([
+                "user",
+                "new",
+                "--name",
+                "AppSDK Test",
+                "--email",
+                "test@example.com",
+                "--non-interactive",
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            user_out.status.success(),
+            "git-bug user new failed: {}",
+            String::from_utf8_lossy(&user_out.stderr)
+        );
+        let new_bug = Command::new(&git_bug)
+            .args([
+                "bug",
+                "new",
+                "--title",
+                "Real git-bug integration test",
+                "--message",
+                "Reproduced via real git-bug CLI",
+                "--non-interactive",
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            new_bug.status.success(),
+            "git-bug bug new failed: {}",
+            String::from_utf8_lossy(&new_bug.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&new_bug.stdout);
+        let bug_id = stdout
+            .split_whitespace()
+            .find(|tok| tok.len() >= 7 && tok.chars().all(|c| c.is_ascii_hexdigit()))
+            .expect("git-bug bug new should output a hex bug id")
+            .to_string();
+
+        let record = query_bug_record(&repo, &bug_id).expect("query_bug_record must read real bug");
+        assert!(bug_record_matches_identity(&record, &bug_id));
+        assert_eq!(record["status"].as_str(), Some("open"));
+        assert!(git_bug_close_event(&repo, &record).is_none());
+
+        let close_out = Command::new(&git_bug)
+            .args(["bug", "status", "close", &bug_id])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(close_out.status.success());
+        let closed = query_bug_record(&repo, &bug_id).unwrap();
+        assert_eq!(closed["status"].as_str(), Some("closed"));
+        let close_event = git_bug_close_event(repo, &closed).expect("close event should exist");
+        assert_eq!(close_event["action"], json!("close"));
     }
 }

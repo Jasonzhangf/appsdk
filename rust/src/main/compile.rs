@@ -1432,3 +1432,49 @@ pub(super) fn assert_compile_preconditions(
         fail("FROZEN_ARTIFACT_IMMUTABLE");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn assert_artifact_module_semantics_accepts_matching_module_and_frozen_transition() {
+        let base_mod = json!({
+            "module_id": "core",
+            "stage": "compiled",
+            "source_owner": "appsdk",
+            "active_artifact": "active/core",
+            "owned_paths": ["src/**"],
+            "generated_outputs": ["generated/core"],
+            "regression": "cargo test"
+        });
+        let project = json!({"modules": [base_mod.clone()]});
+        let artifact = json!({"modules": [base_mod]});
+        assert_artifact_module_semantics(&project, &artifact);
+
+        let frozen_proj = json!({
+            "modules": [{
+                "module_id": "core",
+                "stage": "frozen",
+                "source_owner": "appsdk",
+                "active_artifact": "active/core",
+                "owned_paths": ["src/**"],
+                "generated_outputs": ["generated/core"],
+                "regression": "cargo test"
+            }]
+        });
+        let arch_artifact = json!({
+            "modules": [{
+                "module_id": "core",
+                "stage": "architecture_stable",
+                "source_owner": "appsdk",
+                "active_artifact": "active/core",
+                "owned_paths": ["src/**"],
+                "generated_outputs": ["generated/core"],
+                "regression": "cargo test"
+            }]
+        });
+        assert_artifact_module_semantics(&frozen_proj, &arch_artifact);
+    }
+}

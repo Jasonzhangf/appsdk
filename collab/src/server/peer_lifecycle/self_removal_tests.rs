@@ -288,9 +288,9 @@ fn self_close_preserves_a_task_linked_subscription_for_the_next_owner() {
                 test_condition: "verify continuation".into(),
                 long_horizon: Some(crate::board::LongHorizonTaskSpec {
                     content: "continue the same task".into(),
-                    interval_ms: 60_000,
-                    repeat_count: 8,
-                    ttl_seconds: 86_400,
+                    interval_ms: 90_000,
+                    repeat_count: 4,
+                    ttl_seconds: 172_800,
                 }),
                 revision: 2,
                 public_visibility: true,
@@ -377,17 +377,113 @@ fn self_close_preserves_a_task_linked_subscription_for_the_next_owner() {
         assert_ne!(state.msgs["task-linked-wake"].state, "pending");
     }
 
-    task.owner = next.into();
+    task.owner = "unregistered-successor".into();
     task.updated_ms = now + 1;
-    server.commit(&[state::Event::TaskUpdated { task }]);
+    server.commit(&[state::Event::TaskUpdated { task: task.clone() }]);
+    {
+        let state = server.state.lock().unwrap();
+        let subscription = &state.notification_subscriptions["task-linked-sub"];
+        assert_eq!(subscription.status, "waiting-owner");
+        assert_eq!(subscription.worker_id, peer);
+    }
+
+    task.owner = next.into();
+    task.updated_ms = now + 2;
+    let assignment = {
+        let state = server.state.lock().unwrap();
+        let occupancy = state
+            .name_occupancies
+            .values()
+            .flat_map(|names| names.values())
+            .find(|occupancy| occupancy.worker_id == next)
+            .expect("successor name occupancy");
+        crate::server::name_state::TaskAssignment {
+            task_id: task.id.clone(),
+            name: occupancy.name.clone(),
+            session_id: occupancy.session_id.clone(),
+            assignment_revision: 1,
+            reflow: None,
+            updated_ms: now + 2,
+        }
+    };
+    server.commit(&[
+        state::Event::TaskUpdated { task: task.clone() },
+        state::Event::TaskAssignmentUpdated { assignment },
+    ]);
     let state = server.state.lock().unwrap();
+    let successor_route = notification_route_projection(&state.workers[next]);
     let subscription = &state.notification_subscriptions["task-linked-sub"];
-    assert_eq!(subscription.status, "armed");
-    assert_eq!(subscription.worker_id, next);
+    assert_eq!(subscription.id, "task-linked-sub");
     assert_eq!(subscription.fired_count, 3);
     assert_eq!(subscription.repeat_count, 8);
     assert_eq!(subscription.interval_ms, Some(60_000));
+    assert_eq!(subscription.trigger_ms, Some(now + 60_000));
+    assert_eq!(subscription.expires_ms, now + 86_400_000);
+    assert_eq!(
+        subscription.goal_content,
+        Some(state::GoalScheduleBinding {
+            source: Some(state::GoalScheduleContent::BoardTask {
+                task_id: task.id.clone(),
+            }),
+            ttl_seconds: 86_400,
+        })
+    );
+    assert_eq!(subscription.status, "waiting-owner");
+    assert_eq!(subscription.worker_id, next);
+    assert_eq!(successor_route.0, "tmux");
+    assert!(!successor_route.1.is_empty());
+    assert_eq!(subscription.method, successor_route.0);
+    assert_eq!(subscription.target, successor_route.1);
     drop(state);
+
+    // Selection can observe a live row just before reduction observes expiry.
+    // Use the reducer's explicit clock without changing global clock behavior.
+    {
+        let mut state = server.state.lock().unwrap();
+        let row = state.notification_subscriptions.get_mut("task-linked-sub").unwrap();
+        row.expires_ms = now + 10;
+        row.trigger_ms = Some(now + 20);
+        let retained = row.clone();
+        let mut change = crate::server::GoalScheduleChange {
+            goal_id: format!("task:{}", task.id),
+            goal_owner: "successor".into(),
+            desired: "active".into(),
+            trigger_ms: None,
+            ttl_seconds: Some(172_800),
+            goal_subject: None,
+            expected_subscription_id: Some(retained.id.clone()),
+            reason: None,
+            interval_ms: Some(90_000),
+            repeat_count: Some(4),
+            content: Some(state::GoalScheduleContent::BoardTask { task_id: task.id.clone() }),
+            operation: crate::server::GoalScheduleOperation::OwnerRecovery,
+        };
+        let (events, response) = crate::server::prepare_goal_schedule(&state, next, &change, now + 9).unwrap();
+        assert!(response.ok, "{response:?}");
+        assert!(events.is_empty(), "exact live recovery must preserve its progressed clock");
+        let (events, response) = crate::server::prepare_goal_schedule(&state, next, &change, now + 10).unwrap();
+        assert!(events.is_empty(), "expired recovery must not allocate a replacement");
+        assert!(response.ok, "expired schedule must not block ownership recovery");
+        assert_eq!(state.notification_subscriptions[&retained.id], retained);
+
+        change.expected_subscription_id = Some("different-batch".into());
+        assert!(crate::server::prepare_goal_schedule(&state, next, &change, now + 9).is_err());
+
+        state.tasks.get_mut(&task.id).unwrap().status = "delivered".into();
+        change.operation = crate::server::GoalScheduleOperation::Explicit;
+        change.expected_subscription_id = None;
+        for reduced_at in [now + 9, now + 10] {
+            let response = crate::server::prepare_goal_schedule(&state, next, &change, reduced_at).unwrap_err();
+            assert!(response.error.as_deref().unwrap().contains("GOAL_SCHEDULE_TASK_REQUIRES_EXPLICIT_EDIT"));
+            assert_eq!(state.notification_subscriptions[&retained.id], retained);
+        }
+
+        // A real TTL edit still validates the resulting clock.
+        change.operation = crate::server::GoalScheduleOperation::Edit;
+        change.ttl_seconds = Some(1);
+        state.notification_subscriptions.get_mut(&retained.id).unwrap().trigger_ms = Some(now + 2_000);
+        assert!(crate::server::prepare_goal_schedule(&state, next, &change, now + 9).is_err());
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 

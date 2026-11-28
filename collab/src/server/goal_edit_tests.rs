@@ -747,6 +747,7 @@ fn goal_edit_task_details_and_schedule_commit_together() {
         &server,
         &mut state,
         "task-edit",
+        "task-edit",
         GoalScheduleChange {
             goal_id: "task:task-edit".into(),
             goal_owner: "task-edit".into(),
@@ -775,6 +776,7 @@ fn goal_edit_task_details_and_schedule_commit_together() {
     let edited = commit_goal_schedule(
         &server,
         &mut state,
+        "task-edit",
         "task-edit",
         GoalScheduleChange {
             goal_id: "task:task-edit".into(),
@@ -817,6 +819,7 @@ fn goal_edit_task_details_and_schedule_commit_together() {
     let rejected = commit_goal_schedule(
         &server,
         &mut state,
+        "task-edit",
         "task-edit",
         GoalScheduleChange {
             goal_id: "task:task-edit".into(),
@@ -876,7 +879,7 @@ fn goal_edit_task_details_and_schedule_commit_together() {
     let mut closed_edit = content_edit_change("must not change closed task");
     closed_edit.goal_id = "task:task-edit".into();
     closed_edit.goal_owner = "task-edit".into();
-    let closed = commit_goal_schedule(&server, &mut state, "task-edit", closed_edit);
+    let closed = commit_goal_schedule(&server, &mut state, "task-edit", "task-edit", closed_edit);
     assert!(closed
         .error
         .as_deref()

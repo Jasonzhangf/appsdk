@@ -1264,7 +1264,7 @@ fn task_goal_actionable(
         task.owner == worker
             && worker == subscription.worker_id
             && !matches!(task.status.as_str(), "waiting" | "blocked")
-            && super::task_schedule_selection(state, task)
+            && super::task_schedule_wake_selection(state, task)
                 .is_some_and(|name| state.task_actionable_for(task, Some((worker, name))))
     })
 }

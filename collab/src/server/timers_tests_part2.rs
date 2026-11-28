@@ -404,7 +404,7 @@ use super::*;
             assert_eq!(state.notification_subscriptions[&id].fired_count, 0);
             let message_id = messages[0].id.clone();
             let edited = super::super::commit_goal_schedule(
-                &server, &mut state, "goal-owner", super::super::GoalScheduleChange {
+                &server, &mut state, "goal-owner", "goal-owner", super::super::GoalScheduleChange {
                     goal_id: "resume".into(), goal_owner: "goal-owner".into(),
                     desired: "active".into(), trigger_ms: None, ttl_seconds: None,
                     interval_ms: None, repeat_count: None, goal_subject: None,

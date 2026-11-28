@@ -160,7 +160,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_context",
-            "The single agent identity entry, also available as collab context CLI. Desktop agents may register and message through CLI without invoking an MCP tool; CLI discovers the enrolled bridge's exact current capability declaration. Agent sessionID anchors identity; native thread and socket only locate communication. Names own work; normal session continuation synchronizes all nonclosed tasks. Jenny assigns Collab tasks. Each peer uses Codex orchestration for their own independent task, verifies the outcome, records independent review evidence and closes their own resources. Run ready work without waiting for a finite patrol. Restore a name with approve_grant action restore_name and requested_name, or restore_master for Jenny, with user authorization. An online other holder requires replace_confirmed. Query only reads retained progress and needs no endpoint or registration. This managed MCP entry can capture real executor metadata and publish an enrolled bridge capability; startup without genuine enrollment cannot invent a caller turn. Do not supply or guess an AppServer endpoint for Desktop. Direct AppServer clients supply current session_id, thread_id, endpoint and namespace. History cannot fill missing current communication facts. DSH reports typed gateway facts through provide.dsh and restores a unique saved identity from DSH_SESSION_ID. tmux keeps its existing adapter. Connect only to the user-managed daemon; never perform daemon/tmux lifecycle actions or return identity tokens.",
+            "Codex Desktop bridge only. In Codex TUI / Rex / terminal hosts, do NOT call this MCP tool — run `collab context` in your shell instead. Desktop agents may register and message through CLI without invoking an MCP tool; CLI discovers the enrolled bridge's exact current capability declaration. Agent sessionID anchors identity; native thread and socket only locate communication. Names own work; normal session continuation synchronizes all nonclosed tasks. Jenny assigns Collab tasks. Each peer uses Codex orchestration for their own independent task, verifies the outcome, records independent review evidence and closes their own resources. Run ready work without waiting for a finite patrol. Restore a name with approve_grant action restore_name and requested_name, or restore_master for Jenny, with user authorization. An online other holder requires replace_confirmed. Query only reads retained progress and needs no endpoint or registration. This managed MCP entry can capture real executor metadata and publish an enrolled bridge capability; startup without genuine enrollment cannot invent a caller turn. Do not supply or guess an AppServer endpoint for Desktop. Direct AppServer clients supply current session_id, thread_id, endpoint and namespace. History cannot fill missing current communication facts. DSH reports typed gateway facts through provide.dsh and restores a unique saved identity from DSH_SESSION_ID. tmux keeps its existing adapter. Connect only to the user-managed daemon; never perform daemon/tmux lifecycle actions or return identity tokens.",
             json!({"operation_id":{"description":"Retained operation key. Required only with query=true.","type":"string","minLength":1},"project_scope":{"description":"Canonical project root to select for this operation.","type":"string","minLength":1},"app_scope_id":{"description":"App scope identifier to select for this operation.","type":"string","minLength":1},"approve_identity":{"description":"Exact user-supplied identity recovery approval object.","oneOf":[{"type":"object"},{"type":"string","minLength":1}]},"approve_grant":{"description":"Exact user-supplied master grant replacement approval object.","oneOf":[{"type":"object"},{"type":"string","minLength":1}]},"provide":{"description":"Current host facts. Desktop uses its managed bridge; direct AppServer uses session_id, thread_id, endpoint, namespace. DSH reports dsh with its actual gateway endpoint, runtime_id, agent_id, session_id and cwd. A unique saved DSH identity can recover with DSH_SESSION_ID alone. Query needs no facts.","oneOf":[{"type":"object","additionalProperties":false,"properties":{"session_id":{"type":"string","minLength":1},"thread_id":{"type":"string","minLength":1},"endpoint":{"type":"string","minLength":1},"namespace":{"type":"string","minLength":1},"dsh":{"type":"object","additionalProperties":false,"required":["endpoint","runtime_id","agent_id","session_id","cwd"],"properties":{"endpoint":{"type":"string","minLength":1},"runtime_id":{"type":"string","minLength":1},"agent_id":{"type":"string","minLength":1},"session_id":{"type":"string","minLength":1},"cwd":{"type":"string","minLength":1}}}}},{"type":"string","minLength":1}]},"query":{"description":"Read the durable projection with operation_id and the locally retained capability.","type":"boolean","default":false}}),
             &[]
         ),
@@ -413,7 +413,24 @@ fn add_caller_facts_to_command(command: &mut Command, facts: Option<&Value>) {
         .env("CODEX_THREAD_ID", thread);
 }
 
+fn is_tui_or_rex_host() -> bool {
+    let origin = std::env::var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE").unwrap_or_default();
+    let desktop = origin == "Codex Desktop"
+        || (origin.is_empty() && std::env::var_os("CODEX_APP_TOOLS_PIPE_PATH").is_some());
+    !desktop && (std::env::var_os("REX_SESSION").is_some() || std::env::var_os("TMUX").is_some())
+}
+
 fn call(name: &str, args: &Value, caller_facts: Option<&Value>) -> Result<String, String> {
+    if name == "collab_context"
+        && is_tui_or_rex_host()
+        && caller_facts.is_none()
+        && args.get("query") != Some(&Value::Bool(true))
+    {
+        return Err(
+            "COLLAB_MCP_NOT_FOR_TUI: MCP collab_context is only for Codex Desktop. You are running in a TUI/Rex/terminal host; run `collab context` directly in your shell instead."
+                .into(),
+        );
+    }
     let argv = build_argv(name, args)?;
     let mut command = Command::new(collab_bin());
     command.args(argv);

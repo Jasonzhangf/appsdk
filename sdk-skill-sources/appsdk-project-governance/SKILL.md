@@ -1,6 +1,6 @@
 ---
 name: appsdk-project-governance
-description: AppSDK 项目治理、旧治理消融迁移和规则升级；release 前禁 SHA 与身份包装，按真实行为选测；协作与质量准入分开。
+description: "AppSDK 项目治理、旧治理消融迁移和规则升级；release 前禁 SHA 与身份包装，按真实行为选测；协作与质量准入分开。高频入口在本文件，低频细则按需读取 references/（bootstrap-migration.md、command-surface.md、ontology-governance.md、review-delivery.md、state-paths.md 等）。"
 ---
 
 # AppSDK Project Governance

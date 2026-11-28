@@ -70,9 +70,9 @@ board 修改仍先提交，自动通知在目标离线时保持未读。
 
 ### 身份恢复与自动锚点绑定
 
-恢复身份、获取身份**不需要经常做**，只有在遗忘（上下文丢失/全新未绑定会话）或显式 `CALLER_IDENTITY_REQUIRED` 时才运行 `collab context`。普通 CLI 命令（`recv`、`send`、`board`、`task`、`ceo` 等）在检测到已有绑定的物理锚点（tmux pane / Rex block / Desktop thread）发生漂移时，会在后台自动同步绑定，无需每次唤醒或轮次都跑 `collab context`。
+恢复身份、获取身份**不需要经常做**，只有在遗忘（上下文丢失/全新未绑定会话）或显式 `CALLER_IDENTITY_REQUIRED` 时才运行 **一次** `collab context`（或带 `--approve-grant`）。普通 CLI 命令（`recv`、`send`、`board`、`task`、`ceo` 等）在检测到已有绑定的物理锚点发生漂移时，会在后台自动同步绑定，无需每次唤醒或轮次都跑 `collab context`。
 
-确需恢复时，按 [Table D：稳定名字恢复](references/stable-name-recovery.md#正常恢复) 根据原始回执选择下一条命令，恢复动作留在同一个 agent 会话。禁止先派子 agent、搜索历史身份、调用其他 context 工具碰运气，或使用 `rex session rename`、新建窗口、切换 block、重启 daemon 来修复身份。
+> **单次恢复原则**：恢复身份直接在本会话 shell 执行一次 `collab context`（会自动补齐 Rex/tmux/session 事实）；**不要先读 `operations.md`、`rex session list` 或建临时 `notes.md`**，也**不要在 `registered=true` 后再重复运行 `collab context --query`**。只有在真正缺字段报错时，才按 [Table D：稳定名字恢复](references/stable-name-recovery.md#正常恢复) 补齐对应项。禁止调用 MCP `collab_context`、派子 agent 或重启 daemon。
 
 ## 关闭门禁：未验证不得关闭
 

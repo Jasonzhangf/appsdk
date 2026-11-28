@@ -876,7 +876,7 @@ pub fn env_block_hint() -> bool {
 /// This runs with the caller's environment intact so the CLI resolves the same
 /// server the block belongs to; it never guesses a socket. A failed or
 /// malformed reply stays a typed error.
-fn whoami_endpoint() -> Result<String, RexError> {
+fn whoami_placement() -> Result<(String, Option<String>, Option<String>), RexError> {
     let operation = "discover_env";
     let call = std::process::Command::new(official_cli_path())
         .args(["whoami", "--json", "--autostart=false"])
@@ -908,7 +908,7 @@ fn whoami_endpoint() -> Result<String, RexError> {
             format!("official Rex CLI returned malformed whoami JSON: {error}"),
         )
     })?;
-    value
+    let endpoint = value
         .get("endpoint")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -920,7 +920,24 @@ fn whoami_endpoint() -> Result<String, RexError> {
                 RexInputStage::BeforeWrite,
                 "official Rex CLI whoami did not report a server endpoint",
             )
-        })
+        })?;
+    let session_id = value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let block_id = value
+        .get("block_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    Ok((endpoint, session_id, block_id))
+}
+
+fn whoami_endpoint() -> Result<String, RexError> {
+    whoami_placement().map(|(endpoint, _, _)| endpoint)
 }
 
 /// Discover this invocation's Rex block placement from `REX_SESSION` and
@@ -938,6 +955,46 @@ pub(crate) fn candidate_from_env() -> Result<Option<RexCandidate>, RexError> {
         return Ok(None);
     };
     let server = whoami_endpoint()?;
+    validate_target_fields(&server, &session_id, &block_id)?;
+    let cwd = crate::scope::process_cwd().map_err(|error| {
+        RexError::known_not_delivered(
+            "discover_env",
+            RexInputStage::BeforeWrite,
+            format!("cannot resolve Rex candidate cwd: {error}"),
+        )
+    })?;
+    let cwd = cwd.to_str().map(str::to_owned).ok_or_else(|| {
+        RexError::known_not_delivered(
+            "discover_env",
+            RexInputStage::BeforeWrite,
+            "Rex candidate cwd must be valid UTF-8",
+        )
+    })?;
+    Ok(Some(RexCandidate {
+        server,
+        session_id,
+        block_id,
+        cwd,
+    }))
+}
+
+/// Discover Rex placement from `REX_SESSION`/`REX_BLOCK`, falling back to
+/// `rex whoami --json --autostart=false` when either hint is present in env
+/// so `collab context` succeeds in a single CLI call.
+pub(crate) fn candidate_from_env_or_whoami() -> Result<Option<RexCandidate>, RexError> {
+    if !env_block_hint() {
+        return Ok(None);
+    }
+    if env_block_present() {
+        return candidate_from_env();
+    }
+    let (server, whoami_session, whoami_block) = whoami_placement()?;
+    let Some(session_id) = nonempty_env("REX_SESSION").or(whoami_session) else {
+        return Ok(None);
+    };
+    let Some(block_id) = nonempty_env("REX_BLOCK").or(whoami_block) else {
+        return Ok(None);
+    };
     validate_target_fields(&server, &session_id, &block_id)?;
     let cwd = crate::scope::process_cwd().map_err(|error| {
         RexError::known_not_delivered(

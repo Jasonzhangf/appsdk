@@ -314,7 +314,7 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
     }
     let dsh_owns = facts.dsh_session_id.is_some()
         || supplied.as_ref().is_some_and(|report| report.dsh.is_some());
-    if !dsh_owns && crate::client::adapters::rex::env_block_present() {
+    if !dsh_owns && crate::client::adapters::rex::env_block_hint() {
         if supplied.as_ref().is_some_and(|report| {
             report.dsh.is_some()
                 || report.desktop_bridge.is_some()
@@ -326,17 +326,18 @@ pub(crate) fn collect_identity_facts(provide: Option<&str>) -> anyhow::Result<Id
                 "IDENTITY_FACT_INVALID: Rex candidate cannot be mixed with DSH, Desktop or AppServer facts"
             );
         }
-        // REX_SESSION/REX_BLOCK own this invocation's placement. Native Codex
-        // variables may still describe the agent session, but inherited thread,
-        // Desktop and AppServer fields must not become a competing transport.
-        let candidate = crate::client::adapters::rex::candidate_from_env()
+        // REX_SESSION/REX_BLOCK (or rex whoami completion when hinted) own this
+        // invocation's placement. Inherited thread/Desktop/AppServer fields must
+        // not become a competing transport.
+        if let Some(candidate) = crate::client::adapters::rex::candidate_from_env_or_whoami()
             .map_err(|error| anyhow::anyhow!(error.to_string()))?
-            .expect("both Rex block variables form a candidate");
-        facts.rex = Some(candidate);
-        facts.thread_id = None;
-        facts.endpoint = None;
-        facts.namespace = None;
-        facts.desktop_bridge = None;
+        {
+            facts.rex = Some(candidate);
+            facts.thread_id = None;
+            facts.endpoint = None;
+            facts.namespace = None;
+            facts.desktop_bridge = None;
+        }
     }
     if dsh_owns {
         // DSH owns this invocation. Native variables may describe its launcher.

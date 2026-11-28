@@ -1,0 +1,6 @@
+<!-- project-memory:v1 {"category":"lesson","created_at":"2026-11-25T05:14:50.923873+00:00","entry_kind":null,"id":"collab-parallel-task-capacity-user-correction","importance":0,"memory_level":3,"review_evidence":[],"review_status":"unreviewed","rule_control":null,"source_refs":[],"tags":["capacity","collab","dispatch","user-correction"],"updated_at":"2026-11-25T05:14:50.923873+00:00"} -->
+
+# Parallel task dispatch uses live capacity
+
+2026-11-25 user correction: Do not treat an existing open task as proof that a peer lacks capacity. A peer reported idle can receive another explicitly authorized, non-overlapping task; multiple tasks may be assigned concurrently. Check actual presence/activity and overlapping resource or writer constraints. Keep each task and its acceptance findings tracked separately. For this dispatch, the user explicitly directed Carol to handle the RouteCodex schedule-preservation and LatestFactBytes blockers while preserving her AppServer Presence rework. If a task invitation or acceptance fails, record the exact Collab error and ask or notify the responsible owner immediately; do not substitute a different worker or claim acceptance.
+<!-- project-memory:end -->

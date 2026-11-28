@@ -1,0 +1,8 @@
+<!-- project-memory:v1 {"category":"knowledge","created_at":"2026-11-12T13:47:26.203989+00:00","entry_kind":"rule","id":"appsdk-collab-resource-late-result-handoff","importance":0,"memory_level":3,"review_evidence":[],"review_status":"unreviewed","rule_control":{"approval":{"state":"candidate"},"clause":{"allowed_actions":["当前 owner 核对活动 writer 后同路径续写","当前 owner 评估迟到结果"],"axis":"behavior","axis_id":"collab.task.resource-handoff","clause_id":"collab.T4","effects":["task 状态与 revision 不变"],"evidence":["docs/design/collab-identity-lifecycle-consistency.md T4.1/T4.2"],"forbidden_actions":["自动合入、丢弃结果或清理旧资源","迟到结果改 owner 或覆盖已提交状态"],"owner":"resource claim、task result/attempt owner","rule":"任务转交后保留旧代码、未提交改动、证据和资源；迟到结果交当前 owner 评估，不改变归属。","scenario":"任务已转交","scope":"AppSDK Collab 任务归属","state_after":"资源写入责任归当前 owner","state_before":"资源与结果归旧执行","trigger":"新 owner 接续或旧执行提交迟到结果"},"revision":1},"source_refs":[],"tags":["collab","late-result","ontology","resource","user-approved"],"updated_at":"2026-11-13T23:21:52.832384+00:00"} -->
+
+# Collab 任务转交的资源保全与迟到结果由当前owner评估
+
+来源为2026-11-12当前聊天01a1cf28-1d6f-7bc1-918e-186d04f98666。Jason对本轮T4.1/T4.2确认单回复“同意”。T4.1任务转交后保留旧代码、未提交改动、证据和资源引用，当前owner核对资源归属及活动写入者，完成交接后接续相关写入。T4.2旧身份迟到结果交当前task owner评估采用，结果本身不改变当前任务归属，不覆盖当前owner已提交的task状态。
+
+Object为未交付资源、活动writer和旧执行结果。Behavior为保全、核对、交接、接续写入和当前owner评估。Relation为当前task owner到资源写入责任、旧result到原attempt及当前task。owner为现有resource claim、task result/attempt/review owner。T4.1/T4.2 approval=approved，程序edge/gate、黑盒和真实前端=pending。不能扩成自动合入、丢弃结果、清理旧资源或外部副作用的新授权。详见task-runs/collab-identity-lifecycle-ontology-20261112/semantics.md及note.md。关联appsdk-collab-task-offline-reclaim、appsdk-collab-explicit-retirement与appsdk-collab-role-inheritance。
+<!-- project-memory:end -->

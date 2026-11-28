@@ -887,6 +887,30 @@ fn tick_standing_project_patrol_at(server: &Arc<Server>, now: i64) {
                 .as_ref()
                 .is_some_and(|hold| now < hold.until_ms);
             let is_idle = activity == crate::server::name_state::AgentActivity::Idle;
+            if activity == crate::server::name_state::AgentActivity::Unknown {
+                let (presence_fact, _) = super::worker_agent_facts(server, &state, &worker);
+                match presence_fact.map(|fact| fact.presence) {
+                    Some(crate::server::name_state::AgentPresence::Offline) => {
+                        super::presence::append_log(
+                            &server.log_path(),
+                            &format!(
+                                "PROJECT_PATROL_TARGET_OFFLINE: {}: manager activity unknown and presence is offline",
+                                worker.id
+                            ),
+                        );
+                    }
+                    Some(crate::server::name_state::AgentPresence::Online) => {
+                        super::presence::append_log(
+                            &server.log_path(),
+                            &format!(
+                                "PROJECT_PATROL_OBSERVATION_MISMATCH: {}: manager is online but activity probe returned unknown",
+                                worker.id
+                            ),
+                        );
+                    }
+                    _ => {}
+                }
+            }
             let idle_since_ms = if is_idle {
                 current
                     .patrol_idle_since_ms

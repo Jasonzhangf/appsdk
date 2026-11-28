@@ -1345,6 +1345,7 @@ fn task_goal_transition_events_at_route(
                 None,
                 Some(held_id),
                 control,
+                route,
             )?;
             events.extend(goal_events);
             continue;
@@ -1362,8 +1363,8 @@ fn task_goal_transition_events_at_route(
         }
         let started = !ended && old_selection.is_none();
         let target = match (selection, control.zip(route)) {
-            (Some(TaskScheduleSelection::Name(name)), Some((control, route))) => {
-                Some(goal_schedule_target_at_route(after, &name, control, route)?)
+            (Some(name), Some((control, route))) => {
+                Some(goal_schedule_target_at_route(after, name, control, route)?)
             }
             (selection, _) => resolve_task_schedule_selection(server, after, selection, control)?,
         };

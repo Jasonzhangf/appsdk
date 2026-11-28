@@ -66,13 +66,11 @@ Rex 绑定当前 server/session/block，session 名取项目 cwd 的末级目录
 保留待办，等当前绑定确认在线且空闲后再判断能否投递。
 board 修改仍先提交，自动通知在目标离线时保持未读。
 
-### 身份恢复
+### 身份恢复与自动锚点绑定
 
-按 [Table D：稳定名字恢复](references/stable-name-recovery.md#正常恢复) 根据原始回执选择
-下一条命令。
-恢复动作留在同一个 agent 会话。先跑 context，再按缺项进入对应宿主的只读诊断。
-禁止先派子 agent、搜索历史身份、调用其他 context 工具碰运气，或使用
-`rex session rename`、新建窗口、切换 block、重启 daemon 来修复身份。
+恢复身份、获取身份**不需要经常做**，只有在遗忘（上下文丢失/全新未绑定会话）或显式 `CALLER_IDENTITY_REQUIRED` 时才运行 `collab context`。普通 CLI 命令（`recv`、`send`、`board`、`task`、`ceo` 等）在检测到已有绑定的物理锚点（tmux pane / Rex block / Desktop thread）发生漂移时，会在后台自动同步绑定，无需每次唤醒或轮次都跑 `collab context`。
+
+确需恢复时，按 [Table D：稳定名字恢复](references/stable-name-recovery.md#正常恢复) 根据原始回执选择下一条命令，恢复动作留在同一个 agent 会话。禁止先派子 agent、搜索历史身份、调用其他 context 工具碰运气，或使用 `rex session rename`、新建窗口、切换 block、重启 daemon 来修复身份。
 
 ## 关闭门禁：未验证不得关闭
 
@@ -101,18 +99,26 @@ board issue 和 Collab task 只有在适用证据齐备后才能 `close`。关�
 没有可推进的已授权工作时，完成本人收口并保留收件。任务交回与中途联系按
 [完整派单与交回](operations.md#完整派单与交回)执行。
 
-## 日常通信
+## 日常通信（精简单次调用入口）
 
 | 任务 | 入口与边界 |
 |---|---|
-| 恢复当前已注册身份和状态 | 按 [Table D](references/stable-name-recovery.md) 选择 context 或 context query；仅给当前宿主的真实 runtime 信息 |
-| 查可投递地址 | `collab list`；全局目录，不依赖当前目录，输出 `project.name`、通道和真实可达状态 |
-| 发送已授权消息（本项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；地址必须来自 `collab list`，显式地址失败不回退默认目标 |
-| 跨项目通信 | 仅在用户或当前任务合同明确指定目标项目与接收人时发送。无跨项目指令时，`Jenny` 指本项目的 Jenny。AppSDK CLI 或 SDK 错误不会自动把消费者项目的任务交给 `appsdk.Jenny`。只用目录核实已有授权目标，保留原发送和接收证据 |
-| 收件与消费 | 非 DSH 用 `collab recv`；DSH gateway 独占 Poll/Ack，直接处理原生完整正文，不运行 recv/ack |
-| 只读查消息 | `collab context` 只给未读数量。使用同一项目、同一会话的 `collab msg <真实消息ID>` 或 `collab inbox` 查看消息；只读查询不等于消费 |
-| 只读查项目通信目录（未注册可用） | `collab directory`；只读返回已知接收方白名单，不写 presence，不暴露凭据或任务细节 |
-| 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'`；固定来源为 unknown，跳过身份获取，无回信义务 |
+| 恢复身份与一次取全上下文（仅遗忘时） | `collab context`；一次返回身份、`role_brief`、任务、`peers` 与 `inbox.messages` 未读预览，无需再跑 `inbox` |
+| 查可投递地址（统一目录入口） | `collab list`（本机全量）；`collab list --local`（当前项目）；`collab list --machine '<m>' [--project '<p>']`（远端联邦） |
+| 发送已授权消息（本项目或跨项目同一个命令） | `collab send --to '<project.name>' --subject '<主题>' --content '<正文>'`；显式地址失败不回退默认目标 |
+| QQBot 原通道回复 | 收到 QQBot 消息后用 `collab send --in-reply-to '<msg_id>' --content '<正文>'`（或 `--to external:qqbot`）原路回复，禁止只在窗口回答 |
+| 收件与消费 / 只读查看 | 非 DSH 用 `collab recv`（消费）或 `collab recv --peek`（只读预览，替代旧 `inbox`）；DSH gateway 独占 Poll/Ack，只读用 `collab recv --peek` 或 `collab msg <id>` |
+| 检查停滞/unknown peer 终端 | `collab snapshot <name-or-id> --capture --lines 80`；直接传稳定名字或 worker ID，无需先跑 `collab who` |
+| CEO 全局巡检与进度 | `collab ceo status`（一次返回 CEO 状态与全量项目列表）；回报使用 `collab ceo reply` |
+| 匿名发送通知（未注册可用） | `collab send --unknown-sender --to '<目标peer>' [--target-session '<会话>'] --subject '<主题>' '<正文>'` |
+
+### 跨机器节点初始化与 CEO 汇报 DAG
+
+当远端机器（如通过 `zterm list` / SSH 可达的 `macbookair`）存在活跃 agent 但未初始化 Collab 时：
+1. 在远端启动 `collab up`，初始化 `collab machine init <machine>` 与对端 `add-peer` / `machine check`，并在对应项目会话执行 `collab context` 建档。
+2. 远端与本机汇报 CEO 遵循唯一 DAG：
+   - 本机 `collab` 已配置 CEO → 直接向本机 CEO 汇报；
+   - 本机无 CEO → 由 `collab` daemon 注册/检查联邦节点时识别各机器的 CEO 状态：若全网存在唯一远端 CEO → 默认向该唯一远端 CEO 汇报；若存在多个 CEO → 必须由用户确认向哪个 CEO 汇报；若均无 CEO → 报告 `CEO_NOT_CONFIGURED`。
 
 ### 跨机器地址与 Rex
 

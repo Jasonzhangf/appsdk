@@ -2,12 +2,19 @@ fn inbox_projection(state: &State, inbox: Vec<&Message>) -> Resp {
     let items: Vec<serde_json::Value> = inbox
         .iter()
         .map(|message| {
-            json!({
+            let mut item = json!({
                 "id": message.id, "from": message.from, "type": message.mtype,
                 "subject": message.subject,
                 "state": message.state, "created_at": iso(message.created_ms),
                 "body": message.body,
-            })
+            });
+            if state.channel_envelopes.contains_key(&message.id) {
+                item["reply_via"] = json!(format!(
+                    "collab send --in-reply-to {} --content '<回复内容>'",
+                    message.id
+                ));
+            }
+            item
         })
         .collect();
     Resp::data(json!({"unread": items.len(), "messages": items}))

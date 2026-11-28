@@ -2539,10 +2539,34 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
     // The idle-capacity projection is one pure snapshot shared by the
     // master-only top-level ledger and the nested `master.master_wake` field,
     // so both read entry points report the same filtered capacity.
-    let (projected_master_wake, master_wake, message_count, unread_count) = {
+    let (projected_master_wake, master_wake, message_count, unread_count, unread_previews) = {
         let st = server.state.lock().unwrap();
         let projected_master_wake = project_master_wake_idle_capacity(server, &st);
-        let unread_count = st.inbox_of(&worker_id).len();
+        let inbox = st.inbox_of(&worker_id);
+        let unread_count = inbox.len();
+        let unread_previews: Vec<serde_json::Value> = inbox
+            .into_iter()
+            .take(10)
+            .map(|message| {
+                let preview: String = message.body.chars().take(200).collect();
+                let mut item = json!({
+                    "id": message.id,
+                    "from": message.from,
+                    "type": message.mtype,
+                    "subject": message.subject,
+                    "state": message.state,
+                    "created_at": iso(message.created_ms),
+                    "body_preview": preview,
+                });
+                if st.channel_envelopes.contains_key(&message.id) {
+                    item["reply_via"] = json!(format!(
+                        "collab send --in-reply-to {} --content '<回复内容>'",
+                        message.id
+                    ));
+                }
+                item
+            })
+            .collect();
         let (master_wake, message_count) = if role == "master" {
             (json!(projected_master_wake.clone()), st.msgs.len())
         } else {
@@ -2563,6 +2587,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
             master_wake,
             message_count,
             unread_count,
+            unread_previews,
         )
     };
 
@@ -2838,6 +2863,7 @@ pub(crate) fn context_projection(server: &Server, worker_id: String, token: Stri
         },
         "inbox": {
             "unread": unread_count,
+            "messages": unread_previews,
         },
         "daemon": daemon_context_view(server),
         "next_actions": next_actions,

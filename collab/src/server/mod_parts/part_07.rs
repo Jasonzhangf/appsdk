@@ -2502,11 +2502,22 @@ fn handle_worker_snapshot(
     if !(1..=200).contains(&lines) {
         return Resp::err("snapshot lines must be 1..200");
     }
-    let target = match state.workers.get(&target_id).cloned() {
+    let resolved_target_id = if state.workers.contains_key(&target_id) {
+        target_id.clone()
+    } else {
+        state
+            .name_occupancies
+            .values()
+            .flat_map(|scope_map| scope_map.values())
+            .find(|occ| occ.name.eq_ignore_ascii_case(target_id.trim()))
+            .map(|occ| occ.worker_id.clone())
+            .unwrap_or_else(|| target_id.clone())
+    };
+    let target = match state.workers.get(&resolved_target_id).cloned() {
         Some(target) => target,
         None => return Resp::err(format!("target worker {target_id} not registered")),
     };
-    let capture = match worker_status_capture(server, &control, &state, &target_id, now_ms()) {
+    let capture = match worker_status_capture(server, &control, &state, &resolved_target_id, now_ms()) {
         Ok(capture) => capture,
         Err(error) => return Resp::err(error),
     };

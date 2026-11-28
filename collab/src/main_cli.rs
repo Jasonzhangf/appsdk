@@ -641,7 +641,8 @@ pub(crate) enum Cmd {
     /// List registered peers and their local activity projection
     /// (does not report master authority; use `collab master status`)
     Who,
-    /// Read-only communication directory for the current project
+    /// Read-only communication directory (hidden alias; prefer `collab list`)
+    #[command(hide = true)]
     Directory {
         /// Explicit machine whose daemon directory should be queried
         #[arg(long)]
@@ -650,9 +651,19 @@ pub(crate) enum Cmd {
         #[arg(long)]
         project: Option<String>,
     },
-    /// List copyable project-qualified delivery addresses with channel and
-    /// honest deliverability. Same read-only source as `collab directory`.
-    List,
+    /// Unified read-only delivery directory (`--local` for current project,
+    /// `--machine`/`--project` for remote federation, or no flags for host-wide)
+    List {
+        /// Restrict to the current project directory
+        #[arg(long, conflicts_with_all = ["machine", "project"])]
+        local: bool,
+        /// Explicit machine whose daemon directory should be queried
+        #[arg(long)]
+        machine: Option<String>,
+        /// Restrict a federation directory query to one declared project key
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Inspect or explicitly assign collab master authority
     Master {
         #[command(subcommand)]
@@ -786,7 +797,7 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: GoalCmd,
     },
-    /// Read and consume the current available message batch
+    /// Read (and by default consume) the current available message batch
     Recv {
         /// Seconds to opt in to waiting for new mail; 0 checks once
         #[arg(long, default_value_t = 0)]
@@ -794,8 +805,12 @@ pub(crate) enum Cmd {
         /// Optional trace identifier for this consume-once receive; repeating it does not replay consumed mail
         #[arg(long = "receive-id")]
         receive_id: Option<String>,
+        /// Read unread inbox without consuming messages
+        #[arg(long, conflicts_with_all = ["timeout", "receive_id"])]
+        peek: bool,
     },
-    /// List unread inbox
+    /// Hidden alias for `collab recv --peek`
+    #[command(hide = true)]
     Inbox,
     /// Restore current project identity and communication through the existing
     /// user-managed service, then return the authoritative snapshot
